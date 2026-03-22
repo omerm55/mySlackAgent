@@ -6,18 +6,17 @@ const { App } = require('@slack/bolt');
 const JiraService = require('./services/jiraService');
 const { registerReplyHandler } = require('./handlers/replyHandler');
 const { registerReactionHandler } = require('./handlers/reactionHandler');
+const { loadIntegrations } = require('./loadIntegrations');
+const DedupCache = require('./utils/dedupCache');
 
 // Validate required environment variables at startup.
 const REQUIRED_VARS = [
   'SLACK_BOT_TOKEN',
   'SLACK_SIGNING_SECRET',
   'SLACK_APP_TOKEN',
-  'SLACK_WATCH_CHANNEL_ID',
   'JIRA_BASE_URL',
   'JIRA_USER_EMAIL',
   'JIRA_API_TOKEN',
-  'JIRA_FIELD_ID',
-  'JIRA_FIELD_VALUE',
 ];
 
 const missing = REQUIRED_VARS.filter((v) => !process.env[v]);
@@ -26,10 +25,13 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+const integrations = loadIntegrations();
+const dedupCache = new DedupCache();
+
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
-  socketMode: true,            // Uses WebSocket — no public URL needed
+  socketMode: true,
   appToken: process.env.SLACK_APP_TOKEN,
 });
 
@@ -39,19 +41,28 @@ const jiraService = new JiraService({
   apiToken: process.env.JIRA_API_TOKEN,
 });
 
-const integrationConfig = {
-  watchChannelId: process.env.SLACK_WATCH_CHANNEL_ID,
-  jiraFieldId: process.env.JIRA_FIELD_ID,
-  jiraFieldValue: process.env.JIRA_FIELD_VALUE,
-  jiraFieldType: process.env.JIRA_FIELD_TYPE || 'select',
-};
+for (const integration of integrations) {
+  const config = {
+    name: integration.name,
+    watchChannelId: integration.slackChannelId,
+    jiraFieldId: integration.jiraFieldId,
+    jiraFieldValue: integration.jiraFieldValue,
+    jiraFieldType: integration.jiraFieldType || 'select',
+  };
 
-registerReplyHandler(app, jiraService, integrationConfig);
-registerReactionHandler(app, jiraService, integrationConfig);
+  if (integration.triggers.includes('reply')) {
+    registerReplyHandler(app, jiraService, config, dedupCache);
+  }
+  if (integration.triggers.includes('reaction')) {
+    registerReactionHandler(app, jiraService, config, dedupCache);
+  }
+}
 
 (async () => {
   await app.start();
   console.log('Slack-Jira integration bot is running (Socket Mode).');
-  console.log(`Watching channel: ${process.env.SLACK_WATCH_CHANNEL_ID}`);
-  console.log(`On reply → set "${process.env.JIRA_FIELD_ID}" = "${process.env.JIRA_FIELD_VALUE}"`);
+  console.log(`Loaded ${integrations.length} integration(s):`);
+  for (const i of integrations) {
+    console.log(`  • [${i.name}] channel=${i.slackChannelId} field=${i.jiraFieldId} → "${i.jiraFieldValue}" triggers=[${i.triggers.join(', ')}]`);
+  }
 })();
