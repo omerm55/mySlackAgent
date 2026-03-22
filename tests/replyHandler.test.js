@@ -2,6 +2,11 @@
 
 const { registerReplyHandler } = require('../src/handlers/replyHandler');
 
+const REAL_MESSAGE =
+  "Bug SNS-122172 / Customer Hosted Multi-Node POC License Expiration Not Working  was marked as Include Release Notes = No." +
+  "The bug is assigned to ** from team 'Cockpit'." +
+  "@Adva Almog-Dadush - please take a look and make sure this bug does not require public documentation.";
+
 const config = {
   watchChannelId: 'C_WATCH',
   jiraFieldId: 'customfield_10000',
@@ -35,24 +40,19 @@ function makeClient(rootMessageText) {
 const logger = { info: jest.fn(), error: jest.fn() };
 
 describe('replyHandler', () => {
-  test('updates Jira when a reply is posted and root message has a Jira link', async () => {
+  test('updates Jira when a reply is posted and root message is the real-world format', async () => {
     const app = makeApp();
     const jira = makeJira();
     registerReplyHandler(app, jira, config);
 
     await app._trigger({
-      message: {
-        channel: 'C_WATCH',
-        ts: '222.000',
-        thread_ts: '111.000',
-        text: 'Looks good!',
-      },
-      client: makeClient('Please review https://myco.atlassian.net/browse/PROJ-99'),
+      message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', text: 'Looks good!' },
+      client: makeClient(REAL_MESSAGE),
       logger,
     });
 
     expect(jira.updateIssueField).toHaveBeenCalledWith(
-      'PROJ-99', 'customfield_10000', 'In Review', 'select'
+      'SNS-122172', 'customfield_10000', 'In Review', 'select'
     );
   });
 
@@ -63,7 +63,7 @@ describe('replyHandler', () => {
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '111.000', thread_ts: '111.000' }, // root message
-      client: makeClient('https://myco.atlassian.net/browse/PROJ-1'),
+      client: makeClient(REAL_MESSAGE),
       logger,
     });
 
@@ -77,21 +77,21 @@ describe('replyHandler', () => {
 
     await app._trigger({
       message: { channel: 'C_OTHER', ts: '222.000', thread_ts: '111.000' },
-      client: makeClient('https://myco.atlassian.net/browse/PROJ-1'),
+      client: makeClient(REAL_MESSAGE),
       logger,
     });
 
     expect(jira.updateIssueField).not.toHaveBeenCalled();
   });
 
-  test('does nothing if the root message has no Jira link', async () => {
+  test('does nothing if the root message has no Jira key', async () => {
     const app = makeApp();
     const jira = makeJira();
     registerReplyHandler(app, jira, config);
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000' },
-      client: makeClient('No links here'),
+      client: makeClient('Please take a look at this issue.'),
       logger,
     });
 
@@ -106,7 +106,7 @@ describe('replyHandler', () => {
     await expect(
       app._trigger({
         message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000' },
-        client: makeClient('https://myco.atlassian.net/browse/PROJ-1'),
+        client: makeClient(REAL_MESSAGE),
         logger,
       })
     ).resolves.not.toThrow();

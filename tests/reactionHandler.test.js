@@ -2,6 +2,11 @@
 
 const { registerReactionHandler } = require('../src/handlers/reactionHandler');
 
+const REAL_MESSAGE =
+  "Bug SNS-122172 / Customer Hosted Multi-Node POC License Expiration Not Working  was marked as Include Release Notes = No." +
+  "The bug is assigned to ** from team 'Cockpit'." +
+  "@Adva Almog-Dadush - please take a look and make sure this bug does not require public documentation.";
+
 const config = {
   watchChannelId: 'C_WATCH',
   jiraFieldId: 'customfield_10000',
@@ -35,7 +40,7 @@ const logger = { info: jest.fn(), error: jest.fn() };
 
 describe('reactionHandler', () => {
   test.each(['+1', 'thumbsup', 'thumbs_up'])(
-    'updates Jira on "%s" reaction when message has a Jira link',
+    'updates Jira on "%s" reaction when message is the real-world format',
     async (emoji) => {
       const app = makeApp();
       const jira = makeJira();
@@ -43,12 +48,12 @@ describe('reactionHandler', () => {
 
       await app._trigger('reaction_added', {
         event: { reaction: emoji, user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
-        client: makeClient('Fix tracked at https://myco.atlassian.net/browse/PROJ-55'),
+        client: makeClient(REAL_MESSAGE),
         logger,
       });
 
       expect(jira.updateIssueField).toHaveBeenCalledWith(
-        'PROJ-55', 'customfield_10000', 'In Review', 'select'
+        'SNS-122172', 'customfield_10000', 'In Review', 'select'
       );
     }
   );
@@ -60,7 +65,7 @@ describe('reactionHandler', () => {
 
     await app._trigger('reaction_added', {
       event: { reaction: 'heart', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
-      client: makeClient('https://myco.atlassian.net/browse/PROJ-1'),
+      client: makeClient(REAL_MESSAGE),
       logger,
     });
 
@@ -74,7 +79,7 @@ describe('reactionHandler', () => {
 
     await app._trigger('reaction_added', {
       event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_OTHER', ts: '111.000' } },
-      client: makeClient('https://myco.atlassian.net/browse/PROJ-1'),
+      client: makeClient(REAL_MESSAGE),
       logger,
     });
 
@@ -88,21 +93,21 @@ describe('reactionHandler', () => {
 
     await app._trigger('reaction_added', {
       event: { reaction: '+1', user: 'U123', item: { type: 'file', channel: 'C_WATCH', ts: '111.000' } },
-      client: makeClient('https://myco.atlassian.net/browse/PROJ-1'),
+      client: makeClient(REAL_MESSAGE),
       logger,
     });
 
     expect(jira.updateIssueField).not.toHaveBeenCalled();
   });
 
-  test('does nothing if the message has no Jira link', async () => {
+  test('does nothing if the message has no Jira key', async () => {
     const app = makeApp();
     const jira = makeJira();
     registerReactionHandler(app, jira, config);
 
     await app._trigger('reaction_added', {
       event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
-      client: makeClient('Just a normal message'),
+      client: makeClient('Please take a look at this issue.'),
       logger,
     });
 
@@ -117,7 +122,7 @@ describe('reactionHandler', () => {
     await expect(
       app._trigger('reaction_added', {
         event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
-        client: makeClient('https://myco.atlassian.net/browse/PROJ-1'),
+        client: makeClient(REAL_MESSAGE),
         logger,
       })
     ).resolves.not.toThrow();
