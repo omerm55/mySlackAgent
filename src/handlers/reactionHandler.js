@@ -52,8 +52,7 @@ function registerReactionHandler(app, jiraService, config, dedupCache) {
             .updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType)
             .then(() => logger.info(`${tag} Updated ${key} ✓`))
             .catch((err) => {
-              const detail = err.response ? `HTTP ${err.response.status}` : err.message;
-              logger.error(`${tag} Failed to update ${key}: ${detail}`);
+              logger.error(`${tag} Failed to update ${key}: ${err.message}`);
             })
         )
       );
