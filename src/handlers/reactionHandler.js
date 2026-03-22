@@ -7,15 +7,16 @@ const THUMBS_UP_EMOJIS = new Set(['+1', 'thumbsup', 'thumbs_up']);
 /**
  * @param {import('@slack/bolt').App} app
  * @param {import('../services/jiraService')} jiraService
+ * @param {import('../services/attributionService')} attributionService
  * @param {object} config
- * @param {string} config.name           Integration name (for logging)
+ * @param {string} config.name
  * @param {string} config.watchChannelId
  * @param {string} config.jiraFieldId
  * @param {string} config.jiraFieldValue
  * @param {string} [config.jiraFieldType]
  * @param {import('../utils/dedupCache')} dedupCache
  */
-function registerReactionHandler(app, jiraService, config, dedupCache) {
+function registerReactionHandler(app, jiraService, attributionService, config, dedupCache) {
   const { name, watchChannelId, jiraFieldId, jiraFieldValue, jiraFieldType = 'select' } = config;
   const tag = `[${name}/reaction]`;
 
@@ -47,14 +48,17 @@ function registerReactionHandler(app, jiraService, config, dedupCache) {
       logger.info(`${tag} 👍 on message ${event.item.ts} → updating issue(s): ${issueKeys.join(', ')}`);
 
       await Promise.all(
-        issueKeys.map((key) =>
-          jiraService
-            .updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType)
-            .then(() => logger.info(`${tag} Updated ${key} ✓`))
-            .catch((err) => {
-              logger.error(`${tag} Failed to update ${key}: ${err.message}`);
-            })
-        )
+        issueKeys.map(async (key) => {
+          try {
+            await jiraService.updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType);
+            logger.info(`${tag} Updated ${key} ✓`);
+            await attributionService.postAttributionComment(
+              client, event.user, key, jiraFieldId, jiraFieldValue, '👍 reaction', name
+            );
+          } catch (err) {
+            logger.error(`${tag} Failed to update ${key}: ${err.message}`);
+          }
+        })
       );
     } catch (err) {
       logger.error(`${tag} Unexpected error: ${err.message}`);

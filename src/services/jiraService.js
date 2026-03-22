@@ -84,6 +84,42 @@ class JiraService {
       throw new Error(`${status} — PUT ${fullUrl}`);
     }
   }
+
+  /**
+   * Add a plain-text comment to a Jira issue.
+   * Supports [~accountId:xxx] mentions in the text.
+   * Errors are non-fatal — callers should catch and log.
+   * @param {string} issueKey
+   * @param {string} text
+   */
+  async addComment(issueKey, text) {
+    this._assertValidKey(issueKey);
+    await this.client.post(`/rest/api/3/issue/${issueKey}/comment`, {
+      body: {
+        type: 'doc',
+        version: 1,
+        content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+      },
+    });
+  }
+
+  /**
+   * Find a Jira user by email address.
+   * Returns the first match's accountId, or null if not found.
+   * @param {string} email
+   * @returns {Promise<string|null>}
+   */
+  async findUserByEmail(email) {
+    try {
+      const response = await this.client.get('/rest/api/3/user/search', {
+        params: { query: email, maxResults: 1 },
+      });
+      const users = response.data;
+      return users && users.length > 0 ? users[0].accountId : null;
+    } catch {
+      return null; // non-fatal — attribution will fall back to name only
+    }
+  }
 }
 
 module.exports = JiraService;

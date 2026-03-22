@@ -5,15 +5,16 @@ const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 /**
  * @param {import('@slack/bolt').App} app
  * @param {import('../services/jiraService')} jiraService
+ * @param {import('../services/attributionService')} attributionService
  * @param {object} config
- * @param {string} config.name           Integration name (for logging)
+ * @param {string} config.name
  * @param {string} config.watchChannelId
  * @param {string} config.jiraFieldId
  * @param {string} config.jiraFieldValue
  * @param {string} [config.jiraFieldType]
  * @param {import('../utils/dedupCache')} dedupCache
  */
-function registerReplyHandler(app, jiraService, config, dedupCache) {
+function registerReplyHandler(app, jiraService, attributionService, config, dedupCache) {
   const { name, watchChannelId, jiraFieldId, jiraFieldValue, jiraFieldType = 'select' } = config;
   const tag = `[${name}/reply]`;
 
@@ -44,15 +45,17 @@ function registerReplyHandler(app, jiraService, config, dedupCache) {
       logger.info(`${tag} Reply in thread ${message.thread_ts} → updating issue(s): ${issueKeys.join(', ')}`);
 
       await Promise.all(
-        issueKeys.map((key) =>
-          jiraService
-            .updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType)
-            .then(() => logger.info(`${tag} Updated ${key} ✓`))
-            .catch((err) => {
-              // Log only the status/code, not the full response body which may contain tokens
-              logger.error(`${tag} Failed to update ${key}: ${err.message}`);
-            })
-        )
+        issueKeys.map(async (key) => {
+          try {
+            await jiraService.updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType);
+            logger.info(`${tag} Updated ${key} ✓`);
+            await attributionService.postAttributionComment(
+              client, message.user, key, jiraFieldId, jiraFieldValue, 'thread reply', name
+            );
+          } catch (err) {
+            logger.error(`${tag} Failed to update ${key}: ${err.message}`);
+          }
+        })
       );
     } catch (err) {
       logger.error(`${tag} Unexpected error: ${err.message}`);
