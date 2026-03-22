@@ -75,9 +75,14 @@ class JiraService {
         fieldPayload = { value };
     }
 
-    await this.client.put(`/rest/api/3/issue/${issueKey}`, {
-      fields: { [fieldId]: fieldPayload },
-    });
+    const path = `/rest/api/3/issue/${issueKey}`;
+    try {
+      await this.client.put(path, { fields: { [fieldId]: fieldPayload } });
+    } catch (err) {
+      const fullUrl = `${this.client.defaults.baseURL}${path}`;
+      const status = err.response ? `HTTP ${err.response.status}` : err.message;
+      throw new Error(`${status} — PUT ${fullUrl}`);
+    }
   }
 }
 

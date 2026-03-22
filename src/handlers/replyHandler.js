@@ -50,8 +50,7 @@ function registerReplyHandler(app, jiraService, config, dedupCache) {
             .then(() => logger.info(`${tag} Updated ${key} ✓`))
             .catch((err) => {
               // Log only the status/code, not the full response body which may contain tokens
-              const detail = err.response ? `HTTP ${err.response.status}` : err.message;
-              logger.error(`${tag} Failed to update ${key}: ${detail}`);
+              logger.error(`${tag} Failed to update ${key}: ${err.message}`);
             })
         )
       );
