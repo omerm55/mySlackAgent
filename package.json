@@ -1,0 +1,26 @@
+{
+  "name": "myslackagent",
+  "version": "1.0.0",
+  "description": "Slack-Jira integration bot: updates Jira issues based on Slack thread replies",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "jest --testPathPatterns=tests/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:43397/git/omerm55/mySlackAgent"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@slack/bolt": "^4.6.0",
+    "axios": "^1.13.6",
+    "dotenv": "^17.3.1"
+  },
+  "devDependencies": {
+    "jest": "^30.3.0"
+  }
+}
