@@ -5,6 +5,7 @@ require('dotenv').config();
 const { App } = require('@slack/bolt');
 const JiraService = require('./services/jiraService');
 const { registerReplyHandler } = require('./handlers/replyHandler');
+const { registerReactionHandler } = require('./handlers/reactionHandler');
 
 // Validate required environment variables at startup.
 const REQUIRED_VARS = [
@@ -38,12 +39,15 @@ const jiraService = new JiraService({
   apiToken: process.env.JIRA_API_TOKEN,
 });
 
-registerReplyHandler(app, jiraService, {
+const integrationConfig = {
   watchChannelId: process.env.SLACK_WATCH_CHANNEL_ID,
   jiraFieldId: process.env.JIRA_FIELD_ID,
   jiraFieldValue: process.env.JIRA_FIELD_VALUE,
   jiraFieldType: process.env.JIRA_FIELD_TYPE || 'select',
-});
+};
+
+registerReplyHandler(app, jiraService, integrationConfig);
+registerReactionHandler(app, jiraService, integrationConfig);
 
 (async () => {
   await app.start();

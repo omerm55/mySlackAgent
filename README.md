@@ -2,9 +2,13 @@
 
 A Node.js bot that bridges Slack and Jira.
 
-## Current feature: Reply → Jira field update
+## Current features
 
+### 1. Thread reply → Jira field update
 When a user **replies in a thread** inside a configured Slack channel, and the **root message of that thread contains a Jira issue link**, the bot automatically updates a configurable field on that Jira issue.
+
+### 2. 👍 reaction → Jira field update
+When a user **adds a thumbs-up reaction** (👍 / `:+1:` / `:thumbsup:`) to a message in the configured channel that contains a Jira issue link, the same field update is triggered.
 
 ### How it works
 
@@ -23,10 +27,12 @@ When a user **replies in a thread** inside a configured Slack channel, and the *
    - `channels:history` (read messages in public channels)
    - `groups:history` (read messages in private channels)
    - `channels:read`
+   - `reactions:read` (detect emoji reactions)
    - `chat:write` _(optional, for future features)_
 4. Under **Event Subscriptions** → **Subscribe to bot events**, add:
    - `message.channels`
    - `message.groups`
+   - `reaction_added`
 5. Install the app to your workspace and copy the **Bot User OAuth Token** (`SLACK_BOT_TOKEN`).
 6. Copy the **Signing Secret** from **Basic Information** (`SLACK_SIGNING_SECRET`).
 7. Invite the bot to the channel you want to monitor (`/invite @your-bot`).
