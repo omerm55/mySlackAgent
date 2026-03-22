@@ -5,7 +5,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test": "jest --testPathPatterns=tests/"
   },
   "repository": {
     "type": "git",
@@ -18,5 +19,8 @@
     "@slack/bolt": "^4.6.0",
     "axios": "^1.13.6",
     "dotenv": "^17.3.1"
+  },
+  "devDependencies": {
+    "jest": "^30.3.0"
   }
 }
