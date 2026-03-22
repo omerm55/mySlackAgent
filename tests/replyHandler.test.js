@@ -1,6 +1,7 @@
 'use strict';
 
 const { registerReplyHandler } = require('../src/handlers/replyHandler');
+const DedupCache = require('../src/utils/dedupCache');
 
 const REAL_MESSAGE =
   "Bug SNS-122172 / Customer Hosted Multi-Node POC License Expiration Not Working  was marked as Include Release Notes = No." +
@@ -8,13 +9,13 @@ const REAL_MESSAGE =
   "@Adva Almog-Dadush - please take a look and make sure this bug does not require public documentation.";
 
 const config = {
+  name: 'doc-review-workflow',
   watchChannelId: 'C_WATCH',
   jiraFieldId: 'customfield_10000',
   jiraFieldValue: 'In Review',
   jiraFieldType: 'select',
 };
 
-// Minimal mock of Slack Bolt App
 function makeApp() {
   const handlers = {};
   return {
@@ -43,7 +44,7 @@ describe('replyHandler', () => {
   test('updates Jira when a reply is posted and root message is the real-world format', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, config);
+    registerReplyHandler(app, jira, config, new DedupCache());
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', text: 'Looks good!' },
@@ -56,10 +57,27 @@ describe('replyHandler', () => {
     );
   });
 
+  test('does not update Jira twice for the same event (deduplication)', async () => {
+    const app = makeApp();
+    const jira = makeJira();
+    registerReplyHandler(app, jira, config, new DedupCache());
+
+    const event = {
+      message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', text: 'Looks good!' },
+      client: makeClient(REAL_MESSAGE),
+      logger,
+    };
+
+    await app._trigger(event);
+    await app._trigger(event); // second delivery of the same event
+
+    expect(jira.updateIssueField).toHaveBeenCalledTimes(1);
+  });
+
   test('does nothing if the message is not a thread reply', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, config);
+    registerReplyHandler(app, jira, config, new DedupCache());
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '111.000', thread_ts: '111.000' }, // root message
@@ -73,7 +91,7 @@ describe('replyHandler', () => {
   test('does nothing if the channel does not match', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, config);
+    registerReplyHandler(app, jira, config, new DedupCache());
 
     await app._trigger({
       message: { channel: 'C_OTHER', ts: '222.000', thread_ts: '111.000' },
@@ -87,7 +105,7 @@ describe('replyHandler', () => {
   test('does nothing if the root message has no Jira key', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, config);
+    registerReplyHandler(app, jira, config, new DedupCache());
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000' },
@@ -101,7 +119,7 @@ describe('replyHandler', () => {
   test('logs an error if the Jira update fails, without throwing', async () => {
     const app = makeApp();
     const jira = { updateIssueField: jest.fn().mockRejectedValue(new Error('Jira down')) };
-    registerReplyHandler(app, jira, config);
+    registerReplyHandler(app, jira, config, new DedupCache());
 
     await expect(
       app._trigger({

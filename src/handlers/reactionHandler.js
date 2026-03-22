@@ -2,34 +2,35 @@
 
 const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 
-// Slack emoji names that represent a thumbs-up reaction.
 const THUMBS_UP_EMOJIS = new Set(['+1', 'thumbsup', 'thumbs_up']);
 
 /**
- * Register the Slack event handler that watches for 👍 reactions on messages
- * in the configured channel and updates linked Jira issues.
- *
- * Required Slack bot scope: reactions:read
- *
  * @param {import('@slack/bolt').App} app
  * @param {import('../services/jiraService')} jiraService
  * @param {object} config
+ * @param {string} config.name           Integration name (for logging)
  * @param {string} config.watchChannelId
  * @param {string} config.jiraFieldId
  * @param {string} config.jiraFieldValue
  * @param {string} [config.jiraFieldType]
+ * @param {import('../utils/dedupCache')} dedupCache
  */
-function registerReactionHandler(app, jiraService, config) {
-  const { watchChannelId, jiraFieldId, jiraFieldValue, jiraFieldType = 'select' } = config;
+function registerReactionHandler(app, jiraService, config, dedupCache) {
+  const { name, watchChannelId, jiraFieldId, jiraFieldValue, jiraFieldType = 'select' } = config;
+  const tag = `[${name}/reaction]`;
 
   app.event('reaction_added', async ({ event, client, logger }) => {
     try {
-      // Only care about thumbs-up reactions on messages in the watched channel.
       if (!THUMBS_UP_EMOJIS.has(event.reaction)) return;
       if (event.item.type !== 'message') return;
       if (event.item.channel !== watchChannelId) return;
 
-      // Fetch the message that was reacted to.
+      const dedupKey = `reaction:${watchChannelId}:${event.item.ts}:${event.user}`;
+      if (dedupCache.isDuplicate(dedupKey)) {
+        logger.info(`${tag} Skipping duplicate reaction event on ${event.item.ts}`);
+        return;
+      }
+
       const result = await client.conversations.history({
         channel: event.item.channel,
         latest: event.item.ts,
@@ -43,26 +44,21 @@ function registerReactionHandler(app, jiraService, config) {
       const issueKeys = extractJiraIssueKeys(message.text);
       if (issueKeys.length === 0) return;
 
-      logger.info(
-        `👍 reaction by ${event.user} on message ${event.item.ts}. ` +
-          `Found Jira issue(s): ${issueKeys.join(', ')}. Updating field "${jiraFieldId}" → "${jiraFieldValue}".`
-      );
+      logger.info(`${tag} 👍 on message ${event.item.ts} → updating issue(s): ${issueKeys.join(', ')}`);
 
       await Promise.all(
         issueKeys.map((key) =>
           jiraService
             .updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType)
-            .then(() => logger.info(`Updated ${key} successfully.`))
+            .then(() => logger.info(`${tag} Updated ${key} ✓`))
             .catch((err) => {
-              const detail = err.response
-                ? `HTTP ${err.response.status}: ${JSON.stringify(err.response.data)}`
-                : err.message;
-              logger.error(`Failed to update ${key}: ${detail}`);
+              const detail = err.response ? `HTTP ${err.response.status}` : err.message;
+              logger.error(`${tag} Failed to update ${key}: ${detail}`);
             })
         )
       );
     } catch (err) {
-      logger.error(`reactionHandler error: ${err.message}`);
+      logger.error(`${tag} Unexpected error: ${err.message}`);
     }
   });
 }

@@ -1,0 +1,12 @@
+services:
+  slack-jira-bot:
+    build: .
+    restart: unless-stopped
+    # All secrets come from environment variables — never hardcode them here.
+    # Copy .env.example to .env, fill it in, and it is loaded automatically.
+    env_file: .env
+    volumes:
+      # Mount the integrations config at runtime so you can update workflows
+      # without rebuilding the image.
+      - ./config/integrations.json:/app/config/integrations.json:ro
+    # No ports needed — the bot uses Slack's Socket Mode (outbound WebSocket only)

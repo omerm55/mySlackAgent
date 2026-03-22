@@ -3,30 +3,31 @@
 const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 
 /**
- * Register the Slack event handler that watches for thread replies in the
- * configured channel and updates linked Jira issues.
- *
  * @param {import('@slack/bolt').App} app
  * @param {import('../services/jiraService')} jiraService
  * @param {object} config
- * @param {string} config.watchChannelId  Slack channel ID to monitor
- * @param {string} config.jiraFieldId     Jira field to update
- * @param {string} config.jiraFieldValue  Value to set on the field
- * @param {string} [config.jiraFieldType] Field type hint (default: 'select')
+ * @param {string} config.name           Integration name (for logging)
+ * @param {string} config.watchChannelId
+ * @param {string} config.jiraFieldId
+ * @param {string} config.jiraFieldValue
+ * @param {string} [config.jiraFieldType]
+ * @param {import('../utils/dedupCache')} dedupCache
  */
-function registerReplyHandler(app, jiraService, config) {
-  const { watchChannelId, jiraFieldId, jiraFieldValue, jiraFieldType = 'select' } = config;
+function registerReplyHandler(app, jiraService, config, dedupCache) {
+  const { name, watchChannelId, jiraFieldId, jiraFieldValue, jiraFieldType = 'select' } = config;
+  const tag = `[${name}/reply]`;
 
-  // `message` fires for every message event, including thread replies.
   app.message(async ({ message, client, logger }) => {
     try {
-      // Only process messages from the configured channel.
       if (message.channel !== watchChannelId) return;
-
-      // Only process thread replies (thread_ts exists and differs from ts).
       if (!message.thread_ts || message.thread_ts === message.ts) return;
 
-      // Fetch the root message of the thread to look for Jira links.
+      const dedupKey = `reply:${watchChannelId}:${message.thread_ts}:${message.ts}`;
+      if (dedupCache.isDuplicate(dedupKey)) {
+        logger.info(`${tag} Skipping duplicate event for thread ${message.thread_ts}`);
+        return;
+      }
+
       const result = await client.conversations.replies({
         channel: message.channel,
         ts: message.thread_ts,
@@ -40,27 +41,22 @@ function registerReplyHandler(app, jiraService, config) {
       const issueKeys = extractJiraIssueKeys(rootMessage.text);
       if (issueKeys.length === 0) return;
 
-      logger.info(
-        `Reply detected in thread ${message.thread_ts}. ` +
-          `Found Jira issue(s): ${issueKeys.join(', ')}. Updating field "${jiraFieldId}" → "${jiraFieldValue}".`
-      );
+      logger.info(`${tag} Reply in thread ${message.thread_ts} → updating issue(s): ${issueKeys.join(', ')}`);
 
-      // Update all linked Jira issues.
       await Promise.all(
         issueKeys.map((key) =>
           jiraService
             .updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType)
-            .then(() => logger.info(`Updated ${key} successfully.`))
+            .then(() => logger.info(`${tag} Updated ${key} ✓`))
             .catch((err) => {
-              const detail = err.response
-                ? `HTTP ${err.response.status}: ${JSON.stringify(err.response.data)}`
-                : err.message;
-              logger.error(`Failed to update ${key}: ${detail}`);
+              // Log only the status/code, not the full response body which may contain tokens
+              const detail = err.response ? `HTTP ${err.response.status}` : err.message;
+              logger.error(`${tag} Failed to update ${key}: ${detail}`);
             })
         )
       );
     } catch (err) {
-      logger.error(`replyHandler error: ${err.message}`);
+      logger.error(`${tag} Unexpected error: ${err.message}`);
     }
   });
 }
