@@ -51,6 +51,11 @@ function registerReactionHandler(app, jiraService, config, dedupCache) {
           try {
             await jiraService.updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType);
             logger.info(`${tag} Updated ${key} ✓`);
+            await client.chat.postMessage({
+              channel: event.item.channel,
+              thread_ts: event.item.ts,
+              text: `✅ Jira issue *${key}* updated: *${jiraFieldValue}* (triggered by 👍 reaction)`,
+            });
           } catch (err) {
             logger.error(`${tag} Failed to update ${key}: ${err.message}`);
           }

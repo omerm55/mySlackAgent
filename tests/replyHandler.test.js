@@ -35,6 +35,7 @@ function makeClient(rootMessageText) {
         messages: [{ text: rootMessageText, ts: '111.000' }],
       }),
     },
+    chat: { postMessage: jest.fn().mockResolvedValue({}) },
   };
 }
 
@@ -46,15 +47,21 @@ describe('replyHandler', () => {
   test('updates Jira when a reply is posted and root message contains an issue key', async () => {
     const app = makeApp();
     const jira = makeJira();
+    const client = makeClient(REAL_MESSAGE);
     registerReplyHandler(app, jira, config, new DedupCache());
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U123', text: 'Looks good!' },
-      client: makeClient(REAL_MESSAGE),
+      client,
       logger,
     });
 
     expect(jira.updateIssueField).toHaveBeenCalledWith('SNS-122172', 'customfield_10000', 'In Review', 'select');
+    expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      channel: 'C_WATCH',
+      thread_ts: '111.000',
+      text: expect.stringContaining('SNS-122172'),
+    }));
   });
 
   test('does not update Jira twice for the same event (deduplication)', async () => {

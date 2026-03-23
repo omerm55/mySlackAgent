@@ -35,6 +35,7 @@ function makeClient(messageText) {
         messages: [{ text: messageText, ts: '111.000' }],
       }),
     },
+    chat: { postMessage: jest.fn().mockResolvedValue({}) },
   };
 }
 
@@ -48,15 +49,21 @@ describe('reactionHandler', () => {
     async (emoji) => {
       const app = makeApp();
       const jira = makeJira();
+      const client = makeClient(REAL_MESSAGE);
       registerReactionHandler(app, jira, config, new DedupCache());
 
       await app._trigger('reaction_added', {
         event: { reaction: emoji, user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
-        client: makeClient(REAL_MESSAGE),
+        client,
         logger,
       });
 
       expect(jira.updateIssueField).toHaveBeenCalledWith('SNS-122172', 'customfield_10000', 'In Review', 'select');
+      expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        channel: 'C_WATCH',
+        thread_ts: '111.000',
+        text: expect.stringContaining('SNS-122172'),
+      }));
     }
   );
 
