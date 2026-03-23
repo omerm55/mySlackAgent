@@ -60,7 +60,7 @@ describe('replyHandler', () => {
     expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       channel: 'C_WATCH',
       thread_ts: '111.000',
-      text: expect.stringContaining('SNS-122172'),
+      text: expect.stringMatching(/SNS-122172.+=.+In Review/),
     }));
   });
 

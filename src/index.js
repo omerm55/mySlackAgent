@@ -48,6 +48,7 @@ for (const integration of integrations) {
     name: integration.name,
     watchChannelId: integration.slackChannelId,
     jiraFieldId: integration.jiraFieldId,
+    jiraFieldName: integration.jiraFieldName || integration.jiraFieldId,
     jiraFieldValue: integration.jiraFieldValue,
     jiraFieldType: integration.jiraFieldType || 'select',
   };

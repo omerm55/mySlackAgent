@@ -14,7 +14,7 @@ const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
  * @param {import('../utils/dedupCache')} dedupCache
  */
 function registerReplyHandler(app, jiraService, config, dedupCache) {
-  const { name, watchChannelId, jiraFieldId, jiraFieldValue, jiraFieldType = 'select' } = config;
+  const { name, watchChannelId, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType = 'select' } = config;
   const tag = `[${name}/reply]`;
 
   app.message(async ({ message, client, logger }) => {
@@ -51,7 +51,7 @@ function registerReplyHandler(app, jiraService, config, dedupCache) {
             await client.chat.postMessage({
               channel: message.channel,
               thread_ts: message.thread_ts,
-              text: `✅ Jira issue *${key}* updated: *${jiraFieldValue}* (triggered by thread reply)`,
+              text: `✅ Jira issue *${key}* updated: *${jiraFieldName}* = *${jiraFieldValue}* (triggered by thread reply)`,
             });
           } catch (err) {
             logger.error(`${tag} Failed to update ${key}: ${err.message}`);
