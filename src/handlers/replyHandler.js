@@ -5,7 +5,6 @@ const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 /**
  * @param {import('@slack/bolt').App} app
  * @param {import('../services/jiraService')} jiraService
- * @param {import('../services/attributionService')} attributionService
  * @param {object} config
  * @param {string} config.name
  * @param {string} config.watchChannelId
@@ -14,7 +13,7 @@ const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
  * @param {string} [config.jiraFieldType]
  * @param {import('../utils/dedupCache')} dedupCache
  */
-function registerReplyHandler(app, jiraService, attributionService, config, dedupCache) {
+function registerReplyHandler(app, jiraService, config, dedupCache) {
   const { name, watchChannelId, jiraFieldId, jiraFieldValue, jiraFieldType = 'select' } = config;
   const tag = `[${name}/reply]`;
 
@@ -49,9 +48,6 @@ function registerReplyHandler(app, jiraService, attributionService, config, dedu
           try {
             await jiraService.updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType);
             logger.info(`${tag} Updated ${key} ✓`);
-            await attributionService.postAttributionComment(
-              client, message.user, key, jiraFieldId, jiraFieldValue, 'thread reply', name
-            );
           } catch (err) {
             logger.error(`${tag} Failed to update ${key}: ${err.message}`);
           }

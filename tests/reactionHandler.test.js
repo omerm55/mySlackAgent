@@ -16,8 +16,6 @@ const config = {
   jiraFieldType: 'select',
 };
 
-const attribution = { postAttributionComment: jest.fn().mockResolvedValue(undefined) };
-
 function makeApp() {
   const handlers = {};
   return {
@@ -37,7 +35,6 @@ function makeClient(messageText) {
         messages: [{ text: messageText, ts: '111.000' }],
       }),
     },
-    users: { info: jest.fn().mockResolvedValue({ user: { profile: { real_name: 'Test User', email: 'test@example.com' } } }) },
   };
 }
 
@@ -51,7 +48,7 @@ describe('reactionHandler', () => {
     async (emoji) => {
       const app = makeApp();
       const jira = makeJira();
-      registerReactionHandler(app, jira, attribution, config, new DedupCache());
+      registerReactionHandler(app, jira, config, new DedupCache());
 
       await app._trigger('reaction_added', {
         event: { reaction: emoji, user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
@@ -60,14 +57,13 @@ describe('reactionHandler', () => {
       });
 
       expect(jira.updateIssueField).toHaveBeenCalledWith('SNS-122172', 'customfield_10000', 'In Review', 'select');
-      expect(attribution.postAttributionComment).toHaveBeenCalled();
     }
   );
 
   test('does not update Jira twice for the same reaction (deduplication)', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReactionHandler(app, jira, attribution, config, new DedupCache());
+    registerReactionHandler(app, jira, config, new DedupCache());
 
     const payload = {
       event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
@@ -84,7 +80,7 @@ describe('reactionHandler', () => {
   test('does nothing for a non-thumbs-up reaction', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReactionHandler(app, jira, attribution, config, new DedupCache());
+    registerReactionHandler(app, jira, config, new DedupCache());
 
     await app._trigger('reaction_added', {
       event: { reaction: 'heart', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
@@ -98,7 +94,7 @@ describe('reactionHandler', () => {
   test('does nothing if the channel does not match', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReactionHandler(app, jira, attribution, config, new DedupCache());
+    registerReactionHandler(app, jira, config, new DedupCache());
 
     await app._trigger('reaction_added', {
       event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_OTHER', ts: '111.000' } },
@@ -112,7 +108,7 @@ describe('reactionHandler', () => {
   test('does nothing if the reacted item is not a message', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReactionHandler(app, jira, attribution, config, new DedupCache());
+    registerReactionHandler(app, jira, config, new DedupCache());
 
     await app._trigger('reaction_added', {
       event: { reaction: '+1', user: 'U123', item: { type: 'file', channel: 'C_WATCH', ts: '111.000' } },
@@ -126,7 +122,7 @@ describe('reactionHandler', () => {
   test('does nothing if the message has no Jira key', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReactionHandler(app, jira, attribution, config, new DedupCache());
+    registerReactionHandler(app, jira, config, new DedupCache());
 
     await app._trigger('reaction_added', {
       event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
@@ -140,7 +136,7 @@ describe('reactionHandler', () => {
   test('logs an error if the Jira update fails, without throwing', async () => {
     const app = makeApp();
     const jira = { updateIssueField: jest.fn().mockRejectedValue(new Error('Jira down')) };
-    registerReactionHandler(app, jira, attribution, config, new DedupCache());
+    registerReactionHandler(app, jira, config, new DedupCache());
 
     await expect(
       app._trigger('reaction_added', {

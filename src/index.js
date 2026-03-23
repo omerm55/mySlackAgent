@@ -4,7 +4,6 @@ require('dotenv').config();
 
 const { App } = require('@slack/bolt');
 const JiraService = require('./services/jiraService');
-const AttributionService = require('./services/attributionService');
 const { registerReplyHandler } = require('./handlers/replyHandler');
 const { registerReactionHandler } = require('./handlers/reactionHandler');
 const { loadIntegrations } = require('./loadIntegrations');
@@ -44,8 +43,6 @@ const jiraService = new JiraService({
   apiToken: process.env.JIRA_API_TOKEN,
 });
 
-const attributionService = new AttributionService(jiraService);
-
 for (const integration of integrations) {
   const config = {
     name: integration.name,
@@ -56,10 +53,10 @@ for (const integration of integrations) {
   };
 
   if (integration.triggers.includes('reply')) {
-    registerReplyHandler(app, jiraService, attributionService, config, dedupCache);
+    registerReplyHandler(app, jiraService, config, dedupCache);
   }
   if (integration.triggers.includes('reaction')) {
-    registerReactionHandler(app, jiraService, attributionService, config, dedupCache);
+    registerReactionHandler(app, jiraService, config, dedupCache);
   }
 }
 
