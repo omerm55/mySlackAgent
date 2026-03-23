@@ -7,7 +7,6 @@ const THUMBS_UP_EMOJIS = new Set(['+1', 'thumbsup', 'thumbs_up']);
 /**
  * @param {import('@slack/bolt').App} app
  * @param {import('../services/jiraService')} jiraService
- * @param {import('../services/attributionService')} attributionService
  * @param {object} config
  * @param {string} config.name
  * @param {string} config.watchChannelId
@@ -16,8 +15,8 @@ const THUMBS_UP_EMOJIS = new Set(['+1', 'thumbsup', 'thumbs_up']);
  * @param {string} [config.jiraFieldType]
  * @param {import('../utils/dedupCache')} dedupCache
  */
-function registerReactionHandler(app, jiraService, attributionService, config, dedupCache) {
-  const { name, watchChannelId, jiraFieldId, jiraFieldValue, jiraFieldType = 'select' } = config;
+function registerReactionHandler(app, jiraService, config, dedupCache) {
+  const { name, watchChannelId, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType = 'select' } = config;
   const tag = `[${name}/reaction]`;
 
   app.event('reaction_added', async ({ event, client, logger }) => {
@@ -52,9 +51,11 @@ function registerReactionHandler(app, jiraService, attributionService, config, d
           try {
             await jiraService.updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType);
             logger.info(`${tag} Updated ${key} ✓`);
-            await attributionService.postAttributionComment(
-              client, event.user, key, jiraFieldId, jiraFieldValue, '👍 reaction', name
-            );
+            await client.chat.postMessage({
+              channel: event.item.channel,
+              thread_ts: event.item.ts,
+              text: `✅ Jira issue *${key}* updated: *${jiraFieldName}* = *${jiraFieldValue}* (triggered by 👍 reaction)`,
+            });
           } catch (err) {
             logger.error(`${tag} Failed to update ${key}: ${err.message}`);
           }

@@ -4,7 +4,8 @@
     "description": "When the team responds to a doc-review notification, mark the Jira issue accordingly.",
     "slackChannelId": "C0123456789",
     "jiraFieldId": "customfield_10000",
-    "jiraFieldValue": "In Review",
+    "jiraFieldName": "PM reviewed",
+    "jiraFieldValue": "Yes",
     "jiraFieldType": "select",
     "triggers": ["reply", "reaction"]
   },
@@ -13,6 +14,7 @@
     "description": "Thumbs-up on a release-notes message marks the issue as approved.",
     "slackChannelId": "C9876543210",
     "jiraFieldId": "customfield_10001",
+    "jiraFieldName": "Release notes approved",
     "jiraFieldValue": "Approved",
     "jiraFieldType": "select",
     "triggers": ["reaction"]
