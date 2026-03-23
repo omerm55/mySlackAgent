@@ -1,2 +1,5 @@
 node_modules/
 .env
+# Deployment-specific configs — commit the .example versions only
+config/integrations.json
+logs/

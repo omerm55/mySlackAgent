@@ -4,10 +4,12 @@ require('dotenv').config();
 
 const { App } = require('@slack/bolt');
 const JiraService = require('./services/jiraService');
+const AttributionService = require('./services/attributionService');
 const { registerReplyHandler } = require('./handlers/replyHandler');
 const { registerReactionHandler } = require('./handlers/reactionHandler');
 const { loadIntegrations } = require('./loadIntegrations');
 const DedupCache = require('./utils/dedupCache');
+const { logger, boltLogger } = require('./utils/logger');
 
 // Validate required environment variables at startup.
 const REQUIRED_VARS = [
@@ -21,7 +23,7 @@ const REQUIRED_VARS = [
 
 const missing = REQUIRED_VARS.filter((v) => !process.env[v]);
 if (missing.length > 0) {
-  console.error(`Missing required environment variables: ${missing.join(', ')}`);
+  logger.error({ missing }, 'Missing required environment variables');
   process.exit(1);
 }
 
@@ -33,6 +35,7 @@ const app = new App({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
   socketMode: true,
   appToken: process.env.SLACK_APP_TOKEN,
+  logger: boltLogger,
 });
 
 const jiraService = new JiraService({
@@ -40,6 +43,8 @@ const jiraService = new JiraService({
   email: process.env.JIRA_USER_EMAIL,
   apiToken: process.env.JIRA_API_TOKEN,
 });
+
+const attributionService = new AttributionService(jiraService);
 
 for (const integration of integrations) {
   const config = {
@@ -51,18 +56,20 @@ for (const integration of integrations) {
   };
 
   if (integration.triggers.includes('reply')) {
-    registerReplyHandler(app, jiraService, config, dedupCache);
+    registerReplyHandler(app, jiraService, attributionService, config, dedupCache);
   }
   if (integration.triggers.includes('reaction')) {
-    registerReactionHandler(app, jiraService, config, dedupCache);
+    registerReactionHandler(app, jiraService, attributionService, config, dedupCache);
   }
 }
 
 (async () => {
   await app.start();
-  console.log('Slack-Jira integration bot is running (Socket Mode).');
-  console.log(`Loaded ${integrations.length} integration(s):`);
+  logger.info('Slack-Jira integration bot started (Socket Mode)');
   for (const i of integrations) {
-    console.log(`  • [${i.name}] channel=${i.slackChannelId} field=${i.jiraFieldId} → "${i.jiraFieldValue}" triggers=[${i.triggers.join(', ')}]`);
+    logger.info(
+      { integration: i.name, channel: i.slackChannelId, field: i.jiraFieldId, value: i.jiraFieldValue, triggers: i.triggers },
+      'Integration registered'
+    );
   }
 })();

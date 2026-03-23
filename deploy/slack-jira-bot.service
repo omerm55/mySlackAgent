@@ -1,0 +1,49 @@
+# systemd service for the Slack-Jira integration bot
+#
+# INSTALL (one-time setup on the server):
+#   sudo cp deploy/slack-jira-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable slack-jira-bot   # start on boot
+#   sudo systemctl start slack-jira-bot    # start now
+#
+# AFTER UPDATING THE APP:
+#   sudo systemctl restart slack-jira-bot
+#
+# ACCESS LOGS (no terminal session required after setup — use any SSH client or web-based log viewer):
+#   journalctl -u slack-jira-bot -f          # live tail
+#   journalctl -u slack-jira-bot --since today
+#   journalctl -u slack-jira-bot -n 200      # last 200 lines
+
+[Unit]
+Description=Slack-Jira Integration Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- Change these to match your server ---
+User=appuser
+WorkingDirectory=/opt/slack-jira-bot
+# -----------------------------------------
+
+# Load secrets from this file (chmod 600, owned by User above)
+EnvironmentFile=/opt/slack-jira-bot/.env
+
+ExecStart=/usr/bin/node src/index.js
+
+# Restart automatically on crash; wait 5s to avoid rapid restart loops
+Restart=on-failure
+RestartSec=5s
+# Give up after 5 quick restarts within 60 seconds
+StartLimitBurst=5
+StartLimitIntervalSec=60s
+
+# Hardening: prevent the process from writing outside its working directory
+# and from acquiring new privileges
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/slack-jira-bot
+
+[Install]
+WantedBy=multi-user.target

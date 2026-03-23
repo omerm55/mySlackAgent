@@ -16,6 +16,8 @@ const config = {
   jiraFieldType: 'select',
 };
 
+const attribution = { postAttributionComment: jest.fn().mockResolvedValue(undefined) };
+
 function makeApp() {
   const handlers = {};
   return {
@@ -35,41 +37,43 @@ function makeClient(rootMessageText) {
         messages: [{ text: rootMessageText, ts: '111.000' }],
       }),
     },
+    users: { info: jest.fn().mockResolvedValue({ user: { profile: { real_name: 'Test User', email: 'test@example.com' } } }) },
   };
 }
 
 const logger = { info: jest.fn(), error: jest.fn() };
 
 describe('replyHandler', () => {
-  test('updates Jira when a reply is posted and root message is the real-world format', async () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('updates Jira when a reply is posted and root message contains an issue key', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, config, new DedupCache());
+    registerReplyHandler(app, jira, attribution, config, new DedupCache());
 
     await app._trigger({
-      message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', text: 'Looks good!' },
+      message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U123', text: 'Looks good!' },
       client: makeClient(REAL_MESSAGE),
       logger,
     });
 
-    expect(jira.updateIssueField).toHaveBeenCalledWith(
-      'SNS-122172', 'customfield_10000', 'In Review', 'select'
-    );
+    expect(jira.updateIssueField).toHaveBeenCalledWith('SNS-122172', 'customfield_10000', 'In Review', 'select');
+    expect(attribution.postAttributionComment).toHaveBeenCalled();
   });
 
   test('does not update Jira twice for the same event (deduplication)', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, config, new DedupCache());
+    registerReplyHandler(app, jira, attribution, config, new DedupCache());
 
     const event = {
-      message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', text: 'Looks good!' },
+      message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U123', text: 'Looks good!' },
       client: makeClient(REAL_MESSAGE),
       logger,
     };
 
     await app._trigger(event);
-    await app._trigger(event); // second delivery of the same event
+    await app._trigger(event);
 
     expect(jira.updateIssueField).toHaveBeenCalledTimes(1);
   });
@@ -77,10 +81,10 @@ describe('replyHandler', () => {
   test('does nothing if the message is not a thread reply', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, config, new DedupCache());
+    registerReplyHandler(app, jira, attribution, config, new DedupCache());
 
     await app._trigger({
-      message: { channel: 'C_WATCH', ts: '111.000', thread_ts: '111.000' }, // root message
+      message: { channel: 'C_WATCH', ts: '111.000', thread_ts: '111.000', user: 'U123' },
       client: makeClient(REAL_MESSAGE),
       logger,
     });
@@ -91,10 +95,10 @@ describe('replyHandler', () => {
   test('does nothing if the channel does not match', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, config, new DedupCache());
+    registerReplyHandler(app, jira, attribution, config, new DedupCache());
 
     await app._trigger({
-      message: { channel: 'C_OTHER', ts: '222.000', thread_ts: '111.000' },
+      message: { channel: 'C_OTHER', ts: '222.000', thread_ts: '111.000', user: 'U123' },
       client: makeClient(REAL_MESSAGE),
       logger,
     });
@@ -105,10 +109,10 @@ describe('replyHandler', () => {
   test('does nothing if the root message has no Jira key', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, config, new DedupCache());
+    registerReplyHandler(app, jira, attribution, config, new DedupCache());
 
     await app._trigger({
-      message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000' },
+      message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U123' },
       client: makeClient('Please take a look at this issue.'),
       logger,
     });
@@ -119,11 +123,11 @@ describe('replyHandler', () => {
   test('logs an error if the Jira update fails, without throwing', async () => {
     const app = makeApp();
     const jira = { updateIssueField: jest.fn().mockRejectedValue(new Error('Jira down')) };
-    registerReplyHandler(app, jira, config, new DedupCache());
+    registerReplyHandler(app, jira, attribution, config, new DedupCache());
 
     await expect(
       app._trigger({
-        message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000' },
+        message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U123' },
         client: makeClient(REAL_MESSAGE),
         logger,
       })
