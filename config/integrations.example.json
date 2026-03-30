@@ -1,8 +1,11 @@
 [
   {
     "name": "doc-review-workflow",
-    "description": "When the team responds to a doc-review notification, mark the Jira issue accordingly.",
+    "description": "When the team responds to a doc-review notification, mark the Jira issue as PM-reviewed.",
+    "owner": "your-name@company.com",
     "slackChannelId": "C0123456789",
+    "allowedSlackUserIds": [],
+    "rateLimitPerHour": 20,
     "jiraFieldId": "customfield_10000",
     "jiraFieldName": "PM reviewed",
     "jiraFieldValue": "Yes",
@@ -12,7 +15,10 @@
   {
     "name": "release-notes-approval",
     "description": "Thumbs-up on a release-notes message marks the issue as approved.",
+    "owner": "your-name@company.com",
     "slackChannelId": "C9876543210",
+    "allowedSlackUserIds": ["U111AAA", "U222BBB"],
+    "rateLimitPerHour": 10,
     "jiraFieldId": "customfield_10001",
     "jiraFieldName": "Release notes approved",
     "jiraFieldValue": "Approved",
