@@ -5,13 +5,23 @@ const path = require('path');
 const os = require('os');
 const { loadIntegrations } = require('../src/loadIntegrations');
 
+// Minimal valid entry — used as the base for all tests
+const VALID_ENTRY = {
+  name: 'my-workflow',
+  owner: 'owner@company.com',
+  slackChannelId: 'C123',
+  jiraFieldId: 'customfield_10000',
+  jiraFieldValue: 'In Review',
+  jiraFieldType: 'select',
+  triggers: ['reply', 'reaction'],
+};
+
 function writeTempConfig(data) {
   const file = path.join(os.tmpdir(), `integrations-test-${Date.now()}.json`);
   fs.writeFileSync(file, JSON.stringify(data));
   return file;
 }
 
-// Capture process.exit calls without actually exiting
 let exitSpy;
 beforeEach(() => {
   exitSpy = jest.spyOn(process, 'exit').mockImplementation((code) => {
@@ -22,16 +32,7 @@ afterEach(() => exitSpy.mockRestore());
 
 describe('loadIntegrations', () => {
   test('loads a valid config successfully', () => {
-    const file = writeTempConfig([
-      {
-        name: 'my-workflow',
-        slackChannelId: 'C123',
-        jiraFieldId: 'customfield_10000',
-        jiraFieldValue: 'In Review',
-        jiraFieldType: 'select',
-        triggers: ['reply', 'reaction'],
-      },
-    ]);
+    const file = writeTempConfig([VALID_ENTRY]);
     const result = loadIntegrations(file);
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe('my-workflow');
@@ -48,28 +49,38 @@ describe('loadIntegrations', () => {
   });
 
   test('exits if config is an empty array', () => {
-    const file = writeTempConfig([]);
-    expect(() => loadIntegrations(file)).toThrow('process.exit(1)');
+    expect(() => loadIntegrations(writeTempConfig([]))).toThrow('process.exit(1)');
   });
 
   test('exits if name is missing', () => {
-    const file = writeTempConfig([{ slackChannelId: 'C123', jiraFieldId: 'f', jiraFieldValue: 'v', triggers: ['reply'] }]);
-    expect(() => loadIntegrations(file)).toThrow('process.exit(1)');
+    const { name, ...rest } = VALID_ENTRY;
+    expect(() => loadIntegrations(writeTempConfig([rest]))).toThrow('process.exit(1)');
+  });
+
+  test('exits if owner is missing', () => {
+    const { owner, ...rest } = VALID_ENTRY;
+    expect(() => loadIntegrations(writeTempConfig([rest]))).toThrow('process.exit(1)');
   });
 
   test('exits if duplicate names are found', () => {
-    const entry = { name: 'dupe', slackChannelId: 'C123', jiraFieldId: 'f', jiraFieldValue: 'v', triggers: ['reply'] };
-    const file = writeTempConfig([entry, entry]);
+    expect(() => loadIntegrations(writeTempConfig([VALID_ENTRY, VALID_ENTRY]))).toThrow('process.exit(1)');
+  });
+
+  test('exits if allowedSlackUserIds is not an array', () => {
+    const file = writeTempConfig([{ ...VALID_ENTRY, allowedSlackUserIds: 'U123' }]);
+    expect(() => loadIntegrations(file)).toThrow('process.exit(1)');
+  });
+
+  test('exits if rateLimitPerHour is not a positive number', () => {
+    const file = writeTempConfig([{ ...VALID_ENTRY, rateLimitPerHour: 0 }]);
     expect(() => loadIntegrations(file)).toThrow('process.exit(1)');
   });
 
   test('exits if triggers array is empty', () => {
-    const file = writeTempConfig([{ name: 'w', slackChannelId: 'C123', jiraFieldId: 'f', jiraFieldValue: 'v', triggers: [] }]);
-    expect(() => loadIntegrations(file)).toThrow('process.exit(1)');
+    expect(() => loadIntegrations(writeTempConfig([{ ...VALID_ENTRY, triggers: [] }]))).toThrow('process.exit(1)');
   });
 
   test('exits if an unknown trigger is specified', () => {
-    const file = writeTempConfig([{ name: 'w', slackChannelId: 'C123', jiraFieldId: 'f', jiraFieldValue: 'v', triggers: ['magic'] }]);
-    expect(() => loadIntegrations(file)).toThrow('process.exit(1)');
+    expect(() => loadIntegrations(writeTempConfig([{ ...VALID_ENTRY, triggers: ['magic'] }]))).toThrow('process.exit(1)');
   });
 });

@@ -67,6 +67,18 @@ function loadIntegrations(filePath) {
       console.error(`${ctx} ("${entry.name}"): "jiraFieldType" must be one of: ${[...VALID_FIELD_TYPES].join(', ')}.`);
       process.exit(1);
     }
+    if (!entry.owner || typeof entry.owner !== 'string') {
+      console.error(`${ctx} ("${entry.name}"): "owner" is required (email or name of the person responsible).`);
+      process.exit(1);
+    }
+    if (entry.allowedSlackUserIds !== undefined && !Array.isArray(entry.allowedSlackUserIds)) {
+      console.error(`${ctx} ("${entry.name}"): "allowedSlackUserIds" must be an array.`);
+      process.exit(1);
+    }
+    if (entry.rateLimitPerHour !== undefined && (typeof entry.rateLimitPerHour !== 'number' || entry.rateLimitPerHour < 1)) {
+      console.error(`${ctx} ("${entry.name}"): "rateLimitPerHour" must be a positive number.`);
+      process.exit(1);
+    }
     if (!Array.isArray(entry.triggers) || entry.triggers.length === 0) {
       console.error(`${ctx} ("${entry.name}"): "triggers" must be a non-empty array.`);
       process.exit(1);

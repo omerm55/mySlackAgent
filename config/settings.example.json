@@ -1,0 +1,14 @@
+{
+  "opsChannelId": "C_OPS_CHANNEL_ID",
+  "alerting": {
+    "errorThreshold": 3,
+    "errorWindowMinutes": 5
+  },
+  "rateLimiting": {
+    "defaultPerHour": 20
+  },
+  "dailySummary": {
+    "enabled": true,
+    "utcHour": 7
+  }
+}
