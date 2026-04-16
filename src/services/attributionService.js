@@ -1,5 +1,7 @@
 'use strict';
 
+const { logger } = require('../utils/logger');
+
 /**
  * Resolves who triggered an action and posts an attribution comment on the
  * Jira issue.
@@ -70,8 +72,10 @@ class AttributionService {
 
     try {
       await this.jiraService.addComment(issueKey, text);
-    } catch {
-      // non-fatal — the field update already succeeded
+    } catch (err) {
+      const detail = err.response ? `HTTP ${err.response.status}` : err.message;
+      // Log but don't rethrow — the field update already succeeded
+      logger.error(`[attribution] Failed to post comment on ${issueKey}: ${detail}`);
     }
   }
 }

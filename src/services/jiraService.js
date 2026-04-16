@@ -94,12 +94,16 @@ class JiraService {
    */
   async addComment(issueKey, text) {
     this._assertValidKey(issueKey);
+    // ADF requires each line to be a separate paragraph node.
+    // A single text node with \n characters is invalid and silently rejected.
+    const paragraphs = text
+      .split('\n')
+      .map((line) => ({
+        type: 'paragraph',
+        content: line ? [{ type: 'text', text: line }] : [],
+      }));
     await this.client.post(`/rest/api/3/issue/${issueKey}/comment`, {
-      body: {
-        type: 'doc',
-        version: 1,
-        content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
-      },
+      body: { type: 'doc', version: 1, content: paragraphs },
     });
   }
 
