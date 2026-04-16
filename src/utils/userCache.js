@@ -22,9 +22,13 @@ class UserCache {
       const result = await client.users.info({ user: userId });
       const profile = result.user?.profile;
       const name = profile?.real_name || profile?.display_name || userId;
+      if (name === userId) {
+        console.warn(`[userCache] users.info returned no display name for ${userId}`);
+      }
       this.cache.set(userId, name);
       return name;
-    } catch {
+    } catch (err) {
+      console.warn(`[userCache] users.info failed for ${userId}: ${err.message} — check users:read scope`);
       return userId;
     }
   }

@@ -84,7 +84,7 @@ function registerReplyHandler(app, jiraService, attributionService, config, serv
               text: `✅ Jira issue *${key}* updated: *${jiraFieldName}* = *${jiraFieldValue}* (triggered by thread reply)`,
             });
             await attributionService.postAttributionComment(
-              client, message.user, key, jiraFieldId, jiraFieldValue, 'thread reply', name, actorName
+              client, message.user, key, jiraFieldId, jiraFieldName, jiraFieldValue, 'thread reply', name, actorName
             );
           } catch (err) {
             success = false;

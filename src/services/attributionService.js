@@ -47,13 +47,14 @@ class AttributionService {
    * @param {object} client         Bolt's Slack WebClient
    * @param {string} slackUserId    Slack user who triggered the action
    * @param {string} issueKey       Jira issue key
-   * @param {string} fieldId        Field that was updated
+   * @param {string} fieldId        Field that was updated (e.g. 'customfield_10000')
+   * @param {string} fieldName      Human-readable field label (e.g. 'PM Reviewed')
    * @param {string} fieldValue     Value it was set to
    * @param {string} trigger        Human-readable trigger ('👍 reaction' | 'thread reply')
    * @param {string} integrationName
    * @param {string} [knownName]    Pre-resolved display name (avoids a redundant users.info call)
    */
-  async postAttributionComment(client, slackUserId, issueKey, fieldId, fieldValue, trigger, integrationName, knownName = null) {
+  async postAttributionComment(client, slackUserId, issueKey, fieldId, fieldName, fieldValue, trigger, integrationName, knownName = null) {
     logger.info(`[attribution] Resolving Slack user ${slackUserId}`);
     const { name: resolvedName, email } = await this._resolveSlackUser(client, slackUserId);
     const name = knownName || resolvedName;
@@ -74,7 +75,7 @@ class AttributionService {
     const text =
       `Automated update via Slack integration "${integrationName}"\n` +
       `Triggered by: ${actorDisplay} via ${trigger}\n` +
-      `Field "${fieldId}" set to "${fieldValue}"`;
+      `Field "${fieldName}" set to "${fieldValue}"`;
 
     logger.info(`[attribution] Posting comment on ${issueKey}`);
     try {

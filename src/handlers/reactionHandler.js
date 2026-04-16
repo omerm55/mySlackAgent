@@ -87,7 +87,7 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
               text: `✅ Jira issue *${key}* updated: *${jiraFieldName}* = *${jiraFieldValue}* (triggered by 👍 reaction)`,
             });
             await attributionService.postAttributionComment(
-              client, event.user, key, jiraFieldId, jiraFieldValue, '👍 reaction', name, actorName
+              client, event.user, key, jiraFieldId, jiraFieldName, jiraFieldValue, '👍 reaction', name, actorName
             );
           } catch (err) {
             success = false;
