@@ -52,12 +52,15 @@ class AttributionService {
    * @param {string} integrationName
    */
   async postAttributionComment(client, slackUserId, issueKey, fieldId, fieldValue, trigger, integrationName) {
+    logger.info(`[attribution] Resolving Slack user ${slackUserId}`);
     const { name, email } = await this._resolveSlackUser(client, slackUserId);
+    logger.info(`[attribution] Resolved user: name="${name}" email="${email || 'none'}"`);
 
     // Try to find their Jira account by email for a proper @-mention
     let actorDisplay = name;
     if (email) {
       const accountId = await this.jiraService.findUserByEmail(email);
+      logger.info(`[attribution] Jira account lookup for ${email}: ${accountId || 'not found'}`);
       if (accountId) {
         actorDisplay = `[~accountId:${accountId}]`;
       } else {
@@ -70,11 +73,14 @@ class AttributionService {
       `Triggered by: ${actorDisplay} via ${trigger}\n` +
       `Field "${fieldId}" set to "${fieldValue}"`;
 
+    logger.info(`[attribution] Posting comment on ${issueKey}`);
     try {
       await this.jiraService.addComment(issueKey, text);
+      logger.info(`[attribution] Comment posted on ${issueKey} ✓`);
     } catch (err) {
-      const detail = err.response ? `HTTP ${err.response.status}` : err.message;
-      // Log but don't rethrow — the field update already succeeded
+      const detail = err.response
+        ? `HTTP ${err.response.status} — ${JSON.stringify(err.response.data)}`
+        : err.message;
       logger.error(`[attribution] Failed to post comment on ${issueKey}: ${detail}`);
     }
   }
