@@ -34,7 +34,8 @@ class AttributionService {
         name: (profile && (profile.real_name || profile.display_name)) || slackUserId,
         email: (profile && profile.email) || null,
       };
-    } catch {
+    } catch (err) {
+      logger.warn(`[attribution] users.info failed for ${slackUserId}: ${err.message}`);
       return { name: slackUserId, email: null };
     }
   }
@@ -50,14 +51,19 @@ class AttributionService {
    * @param {string} fieldValue     Value it was set to
    * @param {string} trigger        Human-readable trigger ('👍 reaction' | 'thread reply')
    * @param {string} integrationName
+   * @param {string} [knownName]    Pre-resolved display name (avoids a redundant users.info call)
    */
-  async postAttributionComment(client, slackUserId, issueKey, fieldId, fieldValue, trigger, integrationName) {
-    const { name, email } = await this._resolveSlackUser(client, slackUserId);
+  async postAttributionComment(client, slackUserId, issueKey, fieldId, fieldValue, trigger, integrationName, knownName = null) {
+    logger.info(`[attribution] Resolving Slack user ${slackUserId}`);
+    const { name: resolvedName, email } = await this._resolveSlackUser(client, slackUserId);
+    const name = knownName || resolvedName;
+    logger.info(`[attribution] Resolved user: name="${name}" email="${email || 'none'}"`);
 
     // Try to find their Jira account by email for a proper @-mention
     let actorDisplay = name;
     if (email) {
       const accountId = await this.jiraService.findUserByEmail(email);
+      logger.info(`[attribution] Jira account lookup for ${email}: ${accountId || 'not found'}`);
       if (accountId) {
         actorDisplay = `[~accountId:${accountId}]`;
       } else {
@@ -70,11 +76,14 @@ class AttributionService {
       `Triggered by: ${actorDisplay} via ${trigger}\n` +
       `Field "${fieldId}" set to "${fieldValue}"`;
 
+    logger.info(`[attribution] Posting comment on ${issueKey}`);
     try {
       await this.jiraService.addComment(issueKey, text);
+      logger.info(`[attribution] Comment posted on ${issueKey} ✓`);
     } catch (err) {
-      const detail = err.response ? `HTTP ${err.response.status}` : err.message;
-      // Log but don't rethrow — the field update already succeeded
+      const detail = err.response
+        ? `HTTP ${err.response.status} — ${JSON.stringify(err.response.data)}`
+        : err.message;
       logger.error(`[attribution] Failed to post comment on ${issueKey}: ${detail}`);
     }
   }
