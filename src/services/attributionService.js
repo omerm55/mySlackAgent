@@ -34,7 +34,8 @@ class AttributionService {
         name: (profile && (profile.real_name || profile.display_name)) || slackUserId,
         email: (profile && profile.email) || null,
       };
-    } catch {
+    } catch (err) {
+      logger.warn(`[attribution] users.info failed for ${slackUserId}: ${err.message}`);
       return { name: slackUserId, email: null };
     }
   }
@@ -50,10 +51,12 @@ class AttributionService {
    * @param {string} fieldValue     Value it was set to
    * @param {string} trigger        Human-readable trigger ('👍 reaction' | 'thread reply')
    * @param {string} integrationName
+   * @param {string} [knownName]    Pre-resolved display name (avoids a redundant users.info call)
    */
-  async postAttributionComment(client, slackUserId, issueKey, fieldId, fieldValue, trigger, integrationName) {
+  async postAttributionComment(client, slackUserId, issueKey, fieldId, fieldValue, trigger, integrationName, knownName = null) {
     logger.info(`[attribution] Resolving Slack user ${slackUserId}`);
-    const { name, email } = await this._resolveSlackUser(client, slackUserId);
+    const { name: resolvedName, email } = await this._resolveSlackUser(client, slackUserId);
+    const name = knownName || resolvedName;
     logger.info(`[attribution] Resolved user: name="${name}" email="${email || 'none'}"`);
 
     // Try to find their Jira account by email for a proper @-mention
