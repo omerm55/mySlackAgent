@@ -108,6 +108,30 @@ class JiraService {
   }
 
   /**
+   * Create a JiraService instance that authenticates with a user's OAuth Bearer token
+   * instead of the global service-account Basic Auth credentials.
+   *
+   * OAuth API calls use the api.atlassian.com gateway, which requires the site's
+   * cloudId in the path rather than a direct instance hostname.
+   *
+   * @param {string} accessToken  OAuth 2.0 access token for the user
+   * @param {string} cloudId      Atlassian site cloudId (from accessible-resources)
+   * @returns {JiraService}
+   */
+  static fromOAuthToken(accessToken, cloudId) {
+    const svc = Object.create(JiraService.prototype);
+    svc.client = axios.create({
+      baseURL: `https://api.atlassian.com/ex/jira/${cloudId}`,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      timeout: 10_000,
+    });
+    return svc;
+  }
+
+  /**
    * Find a Jira user by email address.
    * Returns the first match's accountId, or null if not found.
    * @param {string} email

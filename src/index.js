@@ -14,6 +14,8 @@ const RateLimiter = require('./utils/rateLimiter');
 const AuditLog = require('./utils/auditLog');
 const Alerting = require('./utils/alerting');
 const UserCache = require('./utils/userCache');
+const OAuthService = require('./services/oauthService');
+const { startCallbackServer } = require('./server/callbackServer');
 const { logger, boltLogger } = require('./utils/logger');
 
 const REQUIRED_VARS = [
@@ -55,11 +57,21 @@ const rateLimiter = new RateLimiter();
 const auditLog = new AuditLog();
 const userCache = new UserCache();
 
+// OAuth impersonation — active only when JIRA_OAUTH_CLIENT_ID is set.
+const oauthService = process.env.JIRA_OAUTH_CLIENT_ID
+  ? new OAuthService({
+    clientId: process.env.JIRA_OAUTH_CLIENT_ID,
+    clientSecret: process.env.JIRA_OAUTH_CLIENT_SECRET,
+    redirectUri: process.env.OAUTH_REDIRECT_URI,
+    jiraBaseUrl: process.env.JIRA_BASE_URL,
+  })
+  : null;
+
 // Alerting is initialised after app.start() so app.client is available.
 // We declare it here and assign below.
 let alerting;
 
-const services = { dedupCache, rateLimiter, auditLog, userCache, get alerting() { return alerting; } };
+const services = { dedupCache, rateLimiter, auditLog, userCache, oauthService, get alerting() { return alerting; } };
 
 for (const integration of integrations) {
   const config = {
@@ -90,6 +102,12 @@ for (const integration of integrations) {
     errorThreshold: settings.alerting.errorThreshold,
     errorWindowMs: settings.alerting.errorWindowMinutes * 60 * 1000,
   });
+
+  if (oauthService) {
+    const oauthPort = parseInt(process.env.OAUTH_PORT || '3000', 10);
+    startCallbackServer(oauthService, oauthPort, logger);
+    logger.info({ redirectUri: process.env.OAUTH_REDIRECT_URI }, '[oauth] Impersonation enabled');
+  }
 
   if (settings.dailySummary.enabled) {
     auditLog.scheduleDailySummary(app.client, settings.opsChannelId, settings.dailySummary.utcHour, logger);

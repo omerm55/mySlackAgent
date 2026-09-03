@@ -71,12 +71,35 @@ function registerReplyHandler(app, jiraService, attributionService, config, serv
       const actorName = await userCache.getName(client, message.user);
       logger.info(`${tag} Reply by ${actorName} in thread ${message.thread_ts} → updating issue(s): ${issueKeys.join(', ')}`);
 
+      // Resolve per-user Jira client via OAuth if the user has authorized.
+      // On first trigger without a token, DM the user an auth link and fall
+      // back to the service account for this request.
+      let effectiveJira = jiraService;
+      const { oauthService } = services;
+      if (oauthService) {
+        if (oauthService.hasToken(message.user)) {
+          try {
+            effectiveJira = await oauthService.getJiraService(message.user);
+          } catch {
+            effectiveJira = jiraService;
+          }
+        } else {
+          const authUrl = oauthService.generateAuthUrl(message.user);
+          client.conversations.open({ users: message.user })
+            .then((dm) => client.chat.postMessage({
+              channel: dm.channel.id,
+              text: `👋 To make your Jira changes appear as you (not the bot), <${authUrl}|connect your Jira account>. This change was made by the bot account.`,
+            }))
+            .catch(() => {});
+        }
+      }
+
       await Promise.all(
         issueKeys.map(async (key) => {
           let success = true;
           let errorMsg;
           try {
-            await jiraService.updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType);
+            await effectiveJira.updateIssueField(key, jiraFieldId, jiraFieldValue, jiraFieldType);
             logger.info(`${tag} Updated ${key} ✓`);
             await client.chat.postMessage({
               channel: message.channel,
