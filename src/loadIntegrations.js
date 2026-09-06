@@ -16,20 +16,29 @@ const VALID_FIELD_TYPES = new Set(['select', 'text', 'array', 'raw']);
 function loadIntegrations(filePath) {
   const configPath = filePath || path.resolve(__dirname, '../config/integrations.json');
 
-  if (!fs.existsSync(configPath)) {
-    console.error(
-      `Integrations config not found at: ${configPath}\n` +
-      `Copy config/integrations.example.json to config/integrations.json and fill in your values.`
-    );
-    process.exit(1);
-  }
-
   let raw;
-  try {
-    raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  } catch (err) {
-    console.error(`Failed to parse integrations config: ${err.message}`);
-    process.exit(1);
+  if (!fs.existsSync(configPath)) {
+    const jsonStr = process.env.INTEGRATIONS_JSON;
+    if (!jsonStr) {
+      console.error(
+        `Integrations config not found at: ${configPath}\n` +
+        `Copy config/integrations.example.json to config/integrations.json, or set INTEGRATIONS_JSON env var.`
+      );
+      process.exit(1);
+    }
+    try {
+      raw = JSON.parse(jsonStr);
+    } catch (err) {
+      console.error(`Failed to parse INTEGRATIONS_JSON: ${err.message}`);
+      process.exit(1);
+    }
+  } else {
+    try {
+      raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    } catch (err) {
+      console.error(`Failed to parse integrations config: ${err.message}`);
+      process.exit(1);
+    }
   }
 
   if (!Array.isArray(raw) || raw.length === 0) {
