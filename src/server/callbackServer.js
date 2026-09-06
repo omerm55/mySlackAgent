@@ -4,20 +4,28 @@ const http = require('http');
 
 /**
  * Minimal HTTP server for the Atlassian OAuth 2.0 callback.
- * Runs alongside the Bolt Socket Mode process on OAUTH_PORT (default 3000).
+ * Runs alongside the Bolt Socket Mode process.
  *
- * For local development, expose it with:
- *   ngrok http 3000
- * then set OAUTH_REDIRECT_URI=https://<your-ngrok-url>/oauth/callback
+ * On Render (and other PaaS), PORT env var overrides the oauthPort argument.
+ * For local development, set OAUTH_PORT (default 3000) and expose with a tunnel.
  *
  * @param {import('../services/oauthService')} oauthService
- * @param {number} port
+ * @param {number} oauthPort  Fallback port (from OAUTH_PORT env var)
  * @param {import('pino').Logger} logger
  * @returns {http.Server}
  */
-function startCallbackServer(oauthService, port, logger) {
+function startCallbackServer(oauthService, oauthPort, logger) {
+  // Render (and most PaaS) set PORT; fall back to the configured OAUTH_PORT for local dev.
+  const port = process.env.PORT ? parseInt(process.env.PORT, 10) : oauthPort;
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
+
+    if (url.pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+      return;
+    }
 
     if (url.pathname !== '/oauth/callback') {
       res.writeHead(404);
@@ -51,6 +59,7 @@ function startCallbackServer(oauthService, port, logger) {
   server.listen(port, () => {
     logger.info({ port }, '[oauth] Callback server listening');
   });
+
 
   return server;
 }
