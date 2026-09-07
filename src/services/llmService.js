@@ -60,16 +60,23 @@ class LlmService {
   }
 
   async _callGemini(userMessage) {
-    const resp = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${this.apiKey}`,
-      {
-        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ role: 'user', parts: [{ text: userMessage }] }],
-        generationConfig: { maxOutputTokens: 512, temperature: 0.1 },
-      },
-      { headers: { 'content-type': 'application/json' }, timeout: 15_000 }
-    );
-    return resp.data.candidates[0].content.parts[0].text;
+    try {
+      const resp = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${this.apiKey}`,
+        {
+          system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          contents: [{ role: 'user', parts: [{ text: userMessage }] }],
+          generationConfig: { maxOutputTokens: 512, temperature: 0.1 },
+        },
+        { headers: { 'content-type': 'application/json' }, timeout: 15_000 }
+      );
+      return resp.data.candidates[0].content.parts[0].text;
+    } catch (err) {
+      if (err.response) {
+        throw new Error(`Gemini ${err.response.status}: ${JSON.stringify(err.response.data)}`);
+      }
+      throw err;
+    }
   }
 
   async _callAnthropic(userMessage) {
