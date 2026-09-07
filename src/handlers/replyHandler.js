@@ -90,7 +90,7 @@ function registerReplyHandler(app, jiraService, attributionService, config, serv
               channel: dm.channel.id,
               text: `👋 To make your Jira changes appear as you (not the bot), <${authUrl}|connect your Jira account>. This change was made by the bot account.`,
             }))
-            .catch(() => {});
+            .catch((err) => logger.warn(`${tag} Failed to send auth DM to ${message.user}: ${err.message}`));
         }
       }
 
@@ -106,9 +106,11 @@ function registerReplyHandler(app, jiraService, attributionService, config, serv
               thread_ts: message.thread_ts,
               text: `✅ Jira issue *${key}* updated: *${jiraFieldName}* = *${jiraFieldValue}* (triggered by thread reply)`,
             });
-            await attributionService.postAttributionComment(
-              client, message.user, key, jiraFieldId, jiraFieldName, jiraFieldValue, 'thread reply', name, actorName
-            );
+            if (effectiveJira === jiraService) {
+              await attributionService.postAttributionComment(
+                client, message.user, key, jiraFieldId, jiraFieldName, jiraFieldValue, 'thread reply', name, actorName
+              );
+            }
           } catch (err) {
             success = false;
             errorMsg = err.message;

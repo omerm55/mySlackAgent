@@ -93,7 +93,7 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
               channel: dm.channel.id,
               text: `👋 To make your Jira changes appear as you (not the bot), <${authUrl}|connect your Jira account>. This change was made by the bot account.`,
             }))
-            .catch(() => {});
+            .catch((err) => logger.warn(`${tag} Failed to send auth DM to ${event.user}: ${err.message}`));
         }
       }
 
@@ -109,9 +109,11 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
               thread_ts: event.item.ts,
               text: `✅ Jira issue *${key}* updated: *${jiraFieldName}* = *${jiraFieldValue}* (triggered by 👍 reaction)`,
             });
-            await attributionService.postAttributionComment(
-              client, event.user, key, jiraFieldId, jiraFieldName, jiraFieldValue, '👍 reaction', name, actorName
-            );
+            if (effectiveJira === jiraService) {
+              await attributionService.postAttributionComment(
+                client, event.user, key, jiraFieldId, jiraFieldName, jiraFieldValue, '👍 reaction', name, actorName
+              );
+            }
           } catch (err) {
             success = false;
             errorMsg = err.message;
