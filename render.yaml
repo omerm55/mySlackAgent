@@ -31,3 +31,5 @@ services:
         sync: false
       - key: INTEGRATIONS_JSON
         sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

@@ -15,6 +15,7 @@ const AuditLog = require('./utils/auditLog');
 const Alerting = require('./utils/alerting');
 const UserCache = require('./utils/userCache');
 const OAuthService = require('./services/oauthService');
+const LlmService = require('./services/llmService');
 const PendingQuestions = require('./services/pendingQuestions');
 const { startCallbackServer } = require('./server/callbackServer');
 const { registerDmHandler } = require('./handlers/dmHandler');
@@ -72,11 +73,15 @@ const oauthService = process.env.JIRA_OAUTH_CLIENT_ID
 
 const pendingQuestions = new PendingQuestions();
 
+const llmService = process.env.ANTHROPIC_API_KEY
+  ? new LlmService(process.env.ANTHROPIC_API_KEY)
+  : null;
+
 // Alerting is initialised after app.start() so app.client is available.
 // We declare it here and assign below.
 let alerting;
 
-const services = { dedupCache, rateLimiter, auditLog, userCache, oauthService, pendingQuestions, get alerting() { return alerting; } };
+const services = { dedupCache, rateLimiter, auditLog, userCache, oauthService, pendingQuestions, llmService, get alerting() { return alerting; } };
 
 for (const integration of integrations) {
   const config = {

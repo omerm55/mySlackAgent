@@ -47,6 +47,12 @@ async function sendDmQuestion(client, slackUserId, context, _pendingQuestions) {
             action_id: 'jira_confirm_no',
             value: ctx,
           },
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: '💬 Reply' },
+            action_id: 'jira_reply',
+            value: ctx,
+          },
         ],
       },
     ],
