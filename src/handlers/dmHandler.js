@@ -205,10 +205,21 @@ function registerDmHandler(app, jiraService, services) {
         logger.info(`[dm] LLM-driven comment added to ${issueKey}`);
       }
 
-      const confirmation = decision.confirmationMessage || (decision.action === 'no_action' ? 'OK, no changes made.' : `✅ Done — *${issueKey}* updated.`);
+      if (decision.assignee) {
+        const accountId = await effectiveJira.findUser(decision.assignee);
+        if (accountId) {
+          await effectiveJira.assignIssue(issueKey, accountId);
+          logger.info(`[dm] Assigned ${issueKey} to "${decision.assignee}" (${accountId}) ✓`);
+        } else {
+          logger.warn(`[dm] Could not find Jira user matching "${decision.assignee}"`);
+        }
+      }
+
+      const didSomething = decision.action !== 'no_action' || decision.comment || decision.assignee;
+      const confirmation = decision.confirmationMessage || (didSomething ? `✅ Done — *${issueKey}* updated.` : 'OK, no changes made.');
       if (dmChannelId && messageTs) {
         await replaceButtons(client, dmChannelId, messageTs, originalText,
-          decision.action !== 'no_action' ? `✅ ${confirmation}` : confirmation);
+          didSomething ? `✅ ${confirmation}` : confirmation);
       }
     } catch (err) {
       logger.error(`[dm] LLM-driven action failed for ${issueKey}: ${err.message}`);

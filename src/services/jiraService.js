@@ -148,6 +148,39 @@ class JiraService {
       return null; // non-fatal — attribution will fall back to name only
     }
   }
+
+  /**
+   * Search for a Jira user by display name or email.
+   * Returns the first match's accountId, or null if not found.
+   * @param {string} nameOrEmail
+   * @returns {Promise<string|null>}
+   */
+  async findUser(nameOrEmail) {
+    try {
+      const response = await this.client.get('/rest/api/3/user/search', {
+        params: { query: nameOrEmail, maxResults: 1 },
+      });
+      const users = response.data;
+      return users && users.length > 0 ? users[0].accountId : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Assign a Jira issue to a user by accountId.
+   * @param {string} issueKey
+   * @param {string} accountId
+   */
+  async assignIssue(issueKey, accountId) {
+    this._assertValidKey(issueKey);
+    try {
+      await this.client.put(`/rest/api/3/issue/${issueKey}/assignee`, { accountId });
+    } catch (err) {
+      const status = err.response ? `HTTP ${err.response.status}` : err.message;
+      throw new Error(`${status} — PUT assignee on ${issueKey}`);
+    }
+  }
 }
 
 module.exports = JiraService;
