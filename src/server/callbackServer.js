@@ -3,7 +3,7 @@
 const http = require('http');
 
 /**
- * Minimal HTTP server for the Atlassian OAuth 2.0 callback.
+ * Minimal HTTP server for the Atlassian OAuth 2.0 callback and test endpoints.
  * Runs alongside the Bolt Socket Mode process.
  *
  * On Render (and other PaaS), PORT env var overrides the oauthPort argument.
@@ -12,11 +12,17 @@ const http = require('http');
  * @param {import('../services/oauthService')} oauthService
  * @param {number} oauthPort  Fallback port (from OAUTH_PORT env var)
  * @param {import('pino').Logger} logger
+ * @param {object} [extras]
+ * @param {import('@slack/bolt').App['client']} [extras.slackClient]
+ * @param {import('../services/pendingQuestions')} [extras.pendingQuestions]
+ * @param {import('../utils/dmQuestion').sendDmQuestion} [extras.sendDmQuestion]
  * @returns {http.Server}
  */
-function startCallbackServer(oauthService, oauthPort, logger) {
+function startCallbackServer(oauthService, oauthPort, logger, extras = {}) {
   // Render (and most PaaS) set PORT; fall back to the configured OAUTH_PORT for local dev.
   const port = process.env.PORT ? parseInt(process.env.PORT, 10) : oauthPort;
+
+  const { slackClient, pendingQuestions, sendDmQuestion } = extras;
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
@@ -24,6 +30,38 @@ function startCallbackServer(oauthService, oauthPort, logger) {
     if (url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('ok');
+      return;
+    }
+
+    if (url.pathname === '/send-dm') {
+      if (!slackClient || !pendingQuestions || !sendDmQuestion) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'DM service not initialised' }));
+        return;
+      }
+      const user = url.searchParams.get('user');
+      const issue = url.searchParams.get('issue');
+      const fieldId = url.searchParams.get('fieldId');
+      const fieldName = url.searchParams.get('fieldName') || fieldId;
+      const value = url.searchParams.get('value');
+      const fieldType = url.searchParams.get('fieldType') || 'select';
+      const question = url.searchParams.get('question');
+      if (!user || !issue || !fieldId || !value || !question) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Missing required params: user, issue, fieldId, value, question' }));
+        return;
+      }
+      try {
+        const result = await sendDmQuestion(slackClient, user, {
+          issueKey: issue, question, jiraFieldId: fieldId, jiraFieldName: fieldName, jiraFieldValue: value, jiraFieldType: fieldType,
+        }, pendingQuestions);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, channelId: result.channelId, messageTs: result.messageTs }));
+      } catch (err) {
+        logger.error({ err: err.message }, '[send-dm] Error');
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
       return;
     }
 

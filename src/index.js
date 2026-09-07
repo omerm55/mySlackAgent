@@ -15,7 +15,10 @@ const AuditLog = require('./utils/auditLog');
 const Alerting = require('./utils/alerting');
 const UserCache = require('./utils/userCache');
 const OAuthService = require('./services/oauthService');
+const PendingQuestions = require('./services/pendingQuestions');
 const { startCallbackServer } = require('./server/callbackServer');
+const { registerDmHandler } = require('./handlers/dmHandler');
+const { sendDmQuestion } = require('./utils/dmQuestion');
 const { logger, boltLogger } = require('./utils/logger');
 
 const REQUIRED_VARS = [
@@ -67,11 +70,13 @@ const oauthService = process.env.JIRA_OAUTH_CLIENT_ID
   })
   : null;
 
+const pendingQuestions = new PendingQuestions();
+
 // Alerting is initialised after app.start() so app.client is available.
 // We declare it here and assign below.
 let alerting;
 
-const services = { dedupCache, rateLimiter, auditLog, userCache, oauthService, get alerting() { return alerting; } };
+const services = { dedupCache, rateLimiter, auditLog, userCache, oauthService, pendingQuestions, get alerting() { return alerting; } };
 
 for (const integration of integrations) {
   const config = {
@@ -93,6 +98,8 @@ for (const integration of integrations) {
   }
 }
 
+registerDmHandler(app, jiraService, services);
+
 (async () => {
   await app.start();
 
@@ -105,7 +112,11 @@ for (const integration of integrations) {
 
   if (oauthService) {
     const oauthPort = parseInt(process.env.OAUTH_PORT || '3000', 10);
-    startCallbackServer(oauthService, oauthPort, logger);
+    startCallbackServer(oauthService, oauthPort, logger, {
+      slackClient: app.client,
+      pendingQuestions,
+      sendDmQuestion,
+    });
     logger.info({ redirectUri: process.env.OAUTH_REDIRECT_URI }, '[oauth] Impersonation enabled');
   }
 
