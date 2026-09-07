@@ -29,7 +29,7 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
     name, watchChannelId, allowedSlackUserIds, rateLimitPerHour,
     jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType = 'select',
   } = config;
-  const { dedupCache, rateLimiter, auditLog, alerting, userCache } = services;
+  const { dedupCache, rateLimiter, auditLog, userCache } = services;
   const tag = `[${name}/reaction]`;
 
   app.event('reaction_added', async ({ event, client, logger }) => {
@@ -47,7 +47,7 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
       // Rate limiting
       if (!rateLimiter.isAllowed(name, rateLimitPerHour)) {
         logger.warn(`${tag} Rate limit of ${rateLimitPerHour}/hour exceeded — event dropped`);
-        await alerting.recordRateLimit(name, rateLimitPerHour, logger);
+        await services.alerting?.recordRateLimit(name, rateLimitPerHour, logger);
         return;
       }
 
@@ -116,7 +116,7 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
             success = false;
             errorMsg = err.message;
             logger.error(`${tag} Failed to update ${key}: ${err.message}`);
-            await alerting.recordError(name, err.message, logger);
+            await services.alerting?.recordError(name, err.message, logger);
           }
           auditLog.addEntry({
             ts: Date.now(),

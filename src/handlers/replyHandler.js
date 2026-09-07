@@ -27,7 +27,7 @@ function registerReplyHandler(app, jiraService, attributionService, config, serv
     name, watchChannelId, allowedSlackUserIds, rateLimitPerHour,
     jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType = 'select',
   } = config;
-  const { dedupCache, rateLimiter, auditLog, alerting, userCache } = services;
+  const { dedupCache, rateLimiter, auditLog, userCache } = services;
   const tag = `[${name}/reply]`;
 
   app.message(async ({ message, client, logger }) => {
@@ -44,7 +44,7 @@ function registerReplyHandler(app, jiraService, attributionService, config, serv
       // Rate limiting
       if (!rateLimiter.isAllowed(name, rateLimitPerHour)) {
         logger.warn(`${tag} Rate limit of ${rateLimitPerHour}/hour exceeded — event dropped`);
-        await alerting.recordRateLimit(name, rateLimitPerHour, logger);
+        await services.alerting?.recordRateLimit(name, rateLimitPerHour, logger);
         return;
       }
 
@@ -113,7 +113,7 @@ function registerReplyHandler(app, jiraService, attributionService, config, serv
             success = false;
             errorMsg = err.message;
             logger.error(`${tag} Failed to update ${key}: ${err.message}`);
-            await alerting.recordError(name, err.message, logger);
+            await services.alerting?.recordError(name, err.message, logger);
           }
           auditLog.addEntry({
             ts: Date.now(),
