@@ -24,14 +24,25 @@ Respond ONLY with valid JSON in this exact format (no markdown fences):
 Omit keys that don't apply. Always include confirmationMessage.`;
 
 class LlmService {
-  constructor(apiKey) {
+  /**
+   * @param {'anthropic'|'gemini'} provider
+   * @param {string} apiKey
+   */
+  constructor(provider, apiKey) {
+    this.provider = provider;
     this.apiKey = apiKey;
   }
 
   /**
-   * Given the bot's question and the user's free-text response, return a
-   * structured action to execute on the Jira issue.
+   * Factory: pick provider from env vars. Returns null if neither key is set.
+   * GEMINI_API_KEY takes precedence over ANTHROPIC_API_KEY.
    */
+  static fromEnv() {
+    if (process.env.GEMINI_API_KEY) return new LlmService('gemini', process.env.GEMINI_API_KEY);
+    if (process.env.ANTHROPIC_API_KEY) return new LlmService('anthropic', process.env.ANTHROPIC_API_KEY);
+    return null;
+  }
+
   async interpretJiraResponse({ issueKey, question, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType, userText }) {
     const userMessage =
       `Issue: ${issueKey}\n` +
@@ -40,6 +51,28 @@ class LlmService {
       `User's response: "${userText}"\n\n` +
       `What action should be taken?`;
 
+    const raw = this.provider === 'gemini'
+      ? await this._callGemini(userMessage)
+      : await this._callAnthropic(userMessage);
+
+    const cleaned = raw.trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+    return JSON.parse(cleaned);
+  }
+
+  async _callGemini(userMessage) {
+    const resp = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${this.apiKey}`,
+      {
+        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: [{ role: 'user', parts: [{ text: userMessage }] }],
+        generationConfig: { maxOutputTokens: 512, temperature: 0.1 },
+      },
+      { headers: { 'content-type': 'application/json' }, timeout: 15_000 }
+    );
+    return resp.data.candidates[0].content.parts[0].text;
+  }
+
+  async _callAnthropic(userMessage) {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
@@ -57,10 +90,7 @@ class LlmService {
         timeout: 15_000,
       }
     );
-
-    const raw = resp.data.content[0].text.trim()
-      .replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-    return JSON.parse(raw);
+    return resp.data.content[0].text;
   }
 }
 

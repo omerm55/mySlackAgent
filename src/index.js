@@ -73,9 +73,7 @@ const oauthService = process.env.JIRA_OAUTH_CLIENT_ID
 
 const pendingQuestions = new PendingQuestions();
 
-const llmService = process.env.ANTHROPIC_API_KEY
-  ? new LlmService(process.env.ANTHROPIC_API_KEY)
-  : null;
+const llmService = LlmService.fromEnv();
 
 // Alerting is initialised after app.start() so app.client is available.
 // We declare it here and assign below.
