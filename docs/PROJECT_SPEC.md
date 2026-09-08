@@ -33,6 +33,7 @@ SQL statement and configuration used so far is included verbatim.
 15. [Known limitations](#15-known-limitations)
 16. [Productization plan](#16-productization-plan)
 17. [Glossary](#17-glossary)
+18. [Scenario catalog and requirements](#18-scenario-catalog-and-requirements)
 
 ---
 
@@ -791,6 +792,10 @@ Chronological, with rationale (see `git log` for commits):
     user conversations. **Connect Jira** button embedded in first-contact DMs.
 14. **Render sleep** diagnosed → self-ping keep-alive; external monitor recommended.
 15. **Per-user notification digests** with tz-aware slots; default remains immediate.
+16. **Scenario catalog absorbed** (§18, `SCENARIO_CATALOG.md`): 35 Jira "asks" mapped to ask types,
+    audiences, triggers and Jira-side dependencies; nine requirements checked against the app. Decision:
+    **no new capabilities before the 9 Sept demo**; A1 (`collect` ask type with LLM-extracted field
+    values) is the first build afterwards, then A2, B1, D1/D3, claims.
 
 ---
 
@@ -869,6 +874,22 @@ Ordered by value ÷ effort; each item is independently shippable.
 - Rollout guide: pilot group via `scope=personal`/allowlists → team → org; announcement template (used
   in `#product-house-all`) kept in `docs/`.
 
+### 16.10 From the scenario catalog (see §18)
+- **Generalised ask model:** `ask_type` on Jira triggers — `yes_no` (today), `choose` (N options),
+  `collect` (free text → LLM-extracted field values → preview → one PUT), `claim` (channel, atomic first
+  click), `acknowledge`, `create`.
+- **Audiences beyond reporter/assignee:** `user_field:<cf>` (e.g. PM owner), `channel:<id>`, fixed
+  `user_list`, and lookup tables (team → PM, domain → lead).
+- **Writes distinguishable from human edits:** optional per-trigger marker field written in the same
+  PUT (precedent: `Auto: Renumbered`), so rules watching the field can exclude the bot's answers.
+- **`require_oauth` per trigger:** refuse to fall back to the service account for permission-gated
+  fields (e.g. *Included in Certified Roadmap*).
+- **Ask expiry:** `ask_ttl_hours`; buttons refuse after `expires_at`; `answered_at` recorded so an ask
+  goes inert once answered and Re-ask can skip answered ones.
+- **Context in the question:** changelog-derived placeholders (e.g. previous value and when it changed)
+  so an ask is answerable without opening Jira.
+- **Jira webhook trigger** so Automation rules can call the app directly, alongside JQL polling.
+
 ---
 
 ## 17. Glossary
@@ -882,3 +903,93 @@ Ordered by value ÷ effort; each item is independently shippable.
 - **Timeline fit / current** — release windows from `release_calendar` matched to the acceptance date / today.
 - **Ops channel** — Slack channel receiving all operational messages (`OPS_CHANNEL_ID`).
 - **Socket Mode** — Slack delivery over an outbound WebSocket; no public request URL needed.
+- **Ask type** — the interaction shape of a bot-initiated question (`yes_no`, `choose`, `collect`,
+  `claim`, `acknowledge`, `create`); see §18.
+
+---
+
+## 18. Scenario catalog and requirements
+
+In September 2026 a Claude Cowork pass over the Jira Makeover backlog, the automation library and live
+Slack history produced **"Jira asks in Slack"** — 35 places where Jira currently asks a person for
+something via a comment, an e-mail, or a read-only feed (artifact
+`32e5b730-dfb7-46dd-bbe9-3b5513f148b9`). The full scenario table is in
+[`SCENARIO_CATALOG.md`](SCENARIO_CATALOG.md). This section records what the catalog asks of the app,
+where we stand, and the order we intend to build.
+
+### 18.1 Four caveats from the catalog, in our terms
+
+1. **Gate first.** Several of the loudest comment-asks are broken at the *condition*, not the medium
+   (a rule mentions a field that doesn't exist; a fix-version rule is blind to every `2026.x`; an
+   invalid smart value drops the name). Moving them to Slack unfixed ships the same silence in a nicer
+   envelope. → Every scenario we adopt carries its Jira-side fix as a dependency (column in the catalog).
+2. **Write-back loops.** An impersonated write is indistinguishable from the person editing Jira, so
+   every rule watching that field fires. Right for C1, wrong for D1 (an answered ask would re-trigger
+   the notification that raised it). → Optional **marker field in the same PUT** per trigger, and the
+   corresponding exclusion added to the watching rule before the ask goes live.
+3. **Read-only feeds are archives.** `#initiative-updates` and friends are searchable history by
+   design; asks must not be routed there. → Pattern G is Jira hygiene, not app work.
+4. **Attribution closes the audit trail, except for the reason.** The changelog records the value,
+   never *why*. → Where the reason matters (C2, C6, D3), the answer must land in a field (Notes /
+   Planning Notes), not only in the Slack thread. This is what the `collect` ask type is for.
+
+### 18.2 Requirements vs. current state
+
+| Requirement (catalog) | Status today | Planned change |
+|---|---|---|
+| Impersonated write for text, single-select, 3-option select, long text, date + reason | ✅ `updateIssueField` (select/text/array/raw), transitions | `updateIssueFields()` — several fields in one PUT |
+| Writes distinguishable from a human edit | ❌ | Per-trigger `marker_field_id` / `marker_value` in the same PUT |
+| Defer to the field's own permission gate | ✅ inherent to OAuth writes | `require_oauth` per trigger; never launder through the service account |
+| Path for people who haven't authorised | ✅ service-account fallback, attribution comment, Connect button in the DM | Keep; disable via `require_oauth` where gated |
+| One answer only; message goes inert once answered | ✅ DMs (buttons replaced on click) · ⚠️ channel asks can race | `answered_at` on prompts; atomic first-click for `claim` |
+| Asks expire | ❌ | `ask_ttl_hours` → `expires_at`; handlers refuse stale clicks |
+| Batched asks with per-row action | ✅ digests: one message per item, each independent | Single-message digest later (needs per-item update) |
+| Read Jira as the user to state *why* | ⚠️ partial (status-entered date, children) | Changelog placeholders in question templates |
+| Answer lands in a field, not only the thread | ✅ field/transition asks · ❌ free-text reasons | `collect` ask type (A1 pilot); optional Notes-field target for LLM comments |
+
+### 18.3 Our build order
+
+1. **A1 — Customer-friendly name & Customer value** (first pilot of `collect`; written mandate
+   JM-352; no Jira fix needed). Design in §18.4.
+2. **A2 — Regression from build** (`collect` + per-field regex validation; largest comment volume).
+3. **B1 — Ratify release-notes decision** (`choose`; blocked on the `is EMPTY` write gate in Jira and a
+   team → PM mapping).
+4. **D1 / D3** (need the marker field and `require_oauth`).
+5. **E1 / E4 — Claim** (channel asks with atomic first click; a separate mini-project).
+6. **Pattern G** — Jira Automation hygiene; tracked, not built here.
+
+The catalog's own top five is A1, B1, C2, D1, A2; we swap A2 forward because it reuses A1's machinery
+with two hours of extra work, and C2 depends on a Jira rule fix (`addCommentOnce`) we don't control.
+
+### 18.4 Planned: A1 with LLM-extracted values
+
+**User experience.** The PM owner of an Initiative that moved to *Now* (or was flagged for the
+Certified Roadmap) and lacks a customer-friendly name or customer value gets a DM:
+
+> *[PR-1234 (Smart Alerts for KPI drift)] needs a customer-friendly name and a one-line customer
+> value before it reaches the roadmap.* — **✍️ Answer** · **Skip**
+
+**Answer** opens a modal with one free-text box ("describe it in your own words") plus one optional
+input per field, prefilled with current values. The LLM extracts the two values from the free text
+(never inventing; `null` when not stated); the bot shows a **preview** — *Name: … / Value: …* — with
+**Save / Edit / Cancel**. **Save** writes both fields **in one PUT as the user** (plus the optional marker
+field), replaces the DM with ✅ and a link, records `answered_at`, and reports to ops.
+
+**Trigger.** Jira trigger, `ask_type = collect`, cadence hourly/daily:
+`project = PR AND issuetype = Initiative AND (status = Now OR "Included in Certified Roadmap" = Yes)
+AND ("Customer-friendly name" is EMPTY OR "Customer value" is EMPTY)`; audience
+`user_field:<PM owner cf>` with fallback to reporter.
+
+**Data.** `jira_triggers`: `ask_type`, `collect_fields jsonb` (`[{id, name, type, required, hint,
+validation_regex?, options?}]`), `marker_field_id`, `marker_value`, `ask_ttl_hours`, `require_oauth`;
+`notify` accepts `user_field:<cf>`. `jira_prompts`: `answered_at`, `expires_at`.
+
+**Code.** `jiraService.updateIssueFields` + `getIssueFieldNames`; poller audience resolver for
+`user_field:`; `dmQuestion` renders Answer/Skip for `collect`; `dmHandler` adds
+`jira_collect_answer` → `jira_collect_modal` → preview → `jira_collect_save`; `llmService.extractFields`
+with a `COLLECT_FIELDS_PROMPT`; trigger modal gains ask type, fields editor, audience "user field",
+marker, TTL, require-OAuth; ops `collectSaved`.
+
+**Open items before building.** Confirm from Jira (`expand=names`) that `cf[11822]` and `cf[15249]`
+are plain text and identify the PM-owner user field id — the catalog doesn't name it and Jira wasn't
+reachable from the authoring session. Estimated effort: one day including tests; A2 about two hours more.
