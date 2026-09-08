@@ -58,6 +58,8 @@ function registerDmHandler(app, jiraService, services) {
     }
 
     try {
+      const { oauthService } = services;
+      const usingOAuth = oauthService?.hasToken(slackUserId) ?? false;
       const effectiveJira = await resolveJira(slackUserId);
       await effectiveJira.updateIssueField(issueKey, jiraFieldId, jiraFieldValue, jiraFieldType || 'select');
       logger.info(`[dm] Updated ${issueKey} ${jiraFieldId}=${jiraFieldValue} ✓`);
@@ -65,7 +67,7 @@ function registerDmHandler(app, jiraService, services) {
         await replaceButtons(client, channelId, messageTs, originalText,
           `✅ Done — *${issueKey}* updated: *${jiraFieldName}* = *${jiraFieldValue}*`);
       }
-      await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName: jiraFieldName, fieldValue: jiraFieldValue });
+      await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName: jiraFieldName, fieldValue: jiraFieldValue, usingOAuth });
     } catch (err) {
       logger.error(`[dm] Failed to update ${issueKey}: ${err.message}`);
       if (channelId && messageTs) {

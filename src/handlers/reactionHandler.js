@@ -41,6 +41,7 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
       // Authorization: check allowlist if one is configured
       if (allowedSlackUserIds.length > 0 && !allowedSlackUserIds.includes(event.user)) {
         logger.info(`${tag} User ${event.user} is not in the allowlist — ignoring`);
+        await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: `not in allowlist for *${name}*`, integration: name });
         return;
       }
 
@@ -48,6 +49,7 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
       if (!rateLimiter.isAllowed(name, rateLimitPerHour)) {
         logger.warn(`${tag} Rate limit of ${rateLimitPerHour}/hour exceeded — event dropped`);
         await services.alerting?.recordRateLimit(name, rateLimitPerHour, logger);
+        await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: `rate limit (${rateLimitPerHour}/hour) exceeded`, integration: name });
         return;
       }
 
@@ -69,7 +71,10 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
       if (!message) return;
 
       const issueKeys = extractJiraIssueKeys(message.text);
-      if (issueKeys.length === 0) return;
+      if (issueKeys.length === 0) {
+        await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: 'no Jira issue keys found in message text', integration: name });
+        return;
+      }
 
       const actorName = await userCache.getName(client, event.user);
       logger.info(`${tag} 👍 by ${actorName} on ${event.item.ts} → updating issue(s): ${issueKeys.join(', ')}`);
@@ -78,11 +83,13 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
       // On first trigger without a token, DM the user an auth link and fall
       // back to the service account for this request.
       let effectiveJira = jiraService;
+      let usingOAuth = false;
       const { oauthService } = services;
       if (oauthService) {
         if (oauthService.hasToken(event.user)) {
           try {
             effectiveJira = await oauthService.getJiraService(event.user);
+            usingOAuth = true;
           } catch {
             effectiveJira = jiraService;
           }
@@ -135,7 +142,7 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
           await services.opsNotifier?.jiraTriggered({
             trigger: '👍 reaction', actorName, slackUserId: event.user,
             issueKey: key, fieldName: jiraFieldName, fieldValue: jiraFieldValue,
-            success, error: errorMsg,
+            success, error: errorMsg, usingOAuth,
           });
         })
       );

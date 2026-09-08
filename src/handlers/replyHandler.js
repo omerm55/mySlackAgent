@@ -75,11 +75,13 @@ function registerReplyHandler(app, jiraService, attributionService, config, serv
       // On first trigger without a token, DM the user an auth link and fall
       // back to the service account for this request.
       let effectiveJira = jiraService;
+      let usingOAuth = false;
       const { oauthService } = services;
       if (oauthService) {
         if (oauthService.hasToken(message.user)) {
           try {
             effectiveJira = await oauthService.getJiraService(message.user);
+            usingOAuth = true;
           } catch {
             effectiveJira = jiraService;
           }
@@ -132,7 +134,7 @@ function registerReplyHandler(app, jiraService, attributionService, config, serv
           await services.opsNotifier?.jiraTriggered({
             trigger: 'thread reply', actorName, slackUserId: message.user,
             issueKey: key, fieldName: jiraFieldName, fieldValue: jiraFieldValue,
-            success, error: errorMsg,
+            success, error: errorMsg, usingOAuth,
           });
         })
       );

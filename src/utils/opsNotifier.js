@@ -12,14 +12,20 @@ class OpsNotifier {
   }
 
   // 👍 reaction or thread reply triggered a Jira update
-  async jiraTriggered({ trigger, actorName, slackUserId, issueKey, fieldName, fieldValue, success, error }) {
+  async jiraTriggered({ trigger, actorName, slackUserId, issueKey, fieldName, fieldValue, success, error, usingOAuth }) {
     const who = actorName ? `*${actorName}*` : `<@${slackUserId}>`;
     const icon = trigger === '👍 reaction' ? '👍' : '💬';
+    const auth = usingOAuth === true ? '_(OAuth ✅)_' : usingOAuth === false ? '_(no OAuth — acting as bot)_' : '';
     if (success) {
-      await this.post(`${icon} ${who} triggered via ${trigger} → *${issueKey}* updated: *${fieldName}* = *${fieldValue}*`);
+      await this.post(`${icon} ${who} triggered via ${trigger} → *${issueKey}* updated: *${fieldName}* = *${fieldValue}* ${auth}`.trim());
     } else {
       await this.post(`${icon} ${who} triggered via ${trigger} → ❌ failed to update *${issueKey}*: ${error}`);
     }
+  }
+
+  // Reaction caught but filtered before Jira update (debug visibility)
+  async reactionFiltered({ slackUserId, reason, integration }) {
+    await this.post(`👍 <@${slackUserId}> reacted in *${integration}* — filtered: ${reason}`);
   }
 
   // Bot sent a DM question to a user
@@ -30,10 +36,11 @@ class OpsNotifier {
   }
 
   // User clicked Yes/No on a DM question
-  async dmButtonClicked({ action, slackUserId, issueKey, fieldName, fieldValue, error }) {
+  async dmButtonClicked({ action, slackUserId, issueKey, fieldName, fieldValue, error, usingOAuth }) {
+    const auth = usingOAuth === true ? '_(OAuth ✅)_' : usingOAuth === false ? '_(no OAuth — acting as bot)_' : '';
     if (action === 'yes') {
       if (!error) {
-        await this.post(`✅ <@${slackUserId}> clicked *Yes* → *${issueKey}* *${fieldName}* = *${fieldValue}* updated`);
+        await this.post(`✅ <@${slackUserId}> clicked *Yes* → *${issueKey}* *${fieldName}* = *${fieldValue}* updated ${auth}`.trim());
       } else {
         await this.post(`✅ <@${slackUserId}> clicked *Yes* → ❌ failed to update *${issueKey}*: ${error}`);
       }
