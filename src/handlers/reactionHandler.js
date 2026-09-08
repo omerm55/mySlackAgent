@@ -1,6 +1,7 @@
 'use strict';
 
 const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
+const { issueLink } = require('../utils/jiraLink');
 
 const THUMBS_UP_EMOJIS = new Set(['+1', 'thumbsup', 'thumbs_up', 'white_check_mark']);
 const isThumbsUp = (r) => THUMBS_UP_EMOJIS.has(r) || THUMBS_UP_EMOJIS.has(r.split('::')[0]);
@@ -111,7 +112,7 @@ function registerReactionHandler(app, jiraService, attributionService, services)
             await client.chat.postMessage({
               channel: event.item.channel,
               thread_ts: event.item.ts,
-              text: `✅ Jira issue *${key}* updated: *${jiraFieldName}* = *${jiraFieldValue}* (triggered by 👍 reaction)`,
+              text: `✅ Jira issue *${issueLink(key)}* updated: *${jiraFieldName}* = *${jiraFieldValue}* (triggered by 👍 reaction)`,
             });
             if (effectiveJira === jiraService) {
               await attributionService.postAttributionComment(

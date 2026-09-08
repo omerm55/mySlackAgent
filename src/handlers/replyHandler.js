@@ -1,6 +1,7 @@
 'use strict';
 
 const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
+const { issueLink } = require('../utils/jiraLink');
 
 function registerReplyHandler(app, jiraService, attributionService, services) {
   const { dedupCache, rateLimiter, auditLog, userCache, integrationCache } = services;
@@ -95,7 +96,7 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
             await client.chat.postMessage({
               channel: message.channel,
               thread_ts: message.thread_ts,
-              text: `✅ Jira issue *${key}* updated: *${jiraFieldName}* = *${jiraFieldValue}* (triggered by thread reply)`,
+              text: `✅ Jira issue *${issueLink(key)}* updated: *${jiraFieldName}* = *${jiraFieldValue}* (triggered by thread reply)`,
             });
             if (effectiveJira === jiraService) {
               await attributionService.postAttributionComment(

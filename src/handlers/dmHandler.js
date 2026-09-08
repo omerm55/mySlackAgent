@@ -1,5 +1,7 @@
 'use strict';
 
+const { issueLink } = require('../utils/jiraLink');
+
 /**
  * Handles interactive button responses to bot-initiated DM questions.
  *
@@ -83,16 +85,18 @@ function registerDmHandler(app, jiraService, services) {
       if (channelId && messageTs) {
         await replaceButtons(client, channelId, messageTs, originalText,
           transitionTo
-            ? `✅ Done — *${issueKey}* moved to *${transitionTo}*`
-            : `✅ Done — *${issueKey}* updated: *${jiraFieldName}* = *${jiraFieldValue}*`);
+            ? `✅ Done — *${issueLink(issueKey)}* moved to *${transitionTo}*`
+            : `✅ Done — *${issueLink(issueKey)}* updated: *${jiraFieldName}* = *${jiraFieldValue}*`);
       }
       await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue, usingOAuth });
     } catch (err) {
       logger.error(`[dm] Failed to update ${issueKey}: ${err.message}`);
       if (channelId && messageTs) {
         await replaceButtons(client, channelId, messageTs, originalText,
-          `❌ Failed to update *${issueKey}*: ${err.message}`);
+          `❌ Failed to update *${issueLink(issueKey)}*: ${err.message}\n_I'll ask again on the next check if it still applies._`);
       }
+      // Let the Jira poller re-ask about this issue instead of treating it as handled
+      await services.db?.deletePromptsForIssue(issueKey, slackUserId).catch(() => {});
       await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue, error: err.message });
     }
   });
@@ -115,7 +119,7 @@ function registerDmHandler(app, jiraService, services) {
     logger.info(`[dm] User declined update for ${issueKey}`);
     if (channelId && messageTs) {
       await replaceButtons(client, channelId, messageTs, originalText,
-        `OK, no changes made to *${issueKey}*.`);
+        `OK, no changes made to *${issueLink(issueKey)}*.`);
     }
     await services.opsNotifier?.dmButtonClicked({ action: 'no', slackUserId: context.slackUserId, issueKey });
   });
@@ -253,18 +257,19 @@ function registerDmHandler(app, jiraService, services) {
       }
 
       const didSomething = decision.action !== 'no_action' || decision.comment || decision.assignee;
-      const confirmation = decision.confirmationMessage || (didSomething ? `✅ Done — *${issueKey}* updated.` : 'OK, no changes made.');
+      const confirmation = decision.confirmationMessage || (didSomething ? `Done — *${issueLink(issueKey)}* updated.` : 'OK, no changes made.');
       if (dmChannelId && messageTs) {
         await replaceButtons(client, dmChannelId, messageTs, originalText,
-          didSomething ? `✅ ${confirmation}` : confirmation);
+          didSomething ? `✅ ${confirmation} (${issueLink(issueKey)})` : confirmation);
       }
       await services.opsNotifier?.dmLlmDecision({ slackUserId, issueKey, userText, decision });
     } catch (err) {
       logger.error(`[dm] LLM-driven action failed for ${issueKey}: ${err.message}`);
       if (dmChannelId && messageTs) {
         await replaceButtons(client, dmChannelId, messageTs, originalText,
-          `❌ Failed: ${err.message}`);
+          `❌ Failed on *${issueLink(issueKey)}*: ${err.message}\n_I'll ask again on the next check if it still applies._`);
       }
+      await services.db?.deletePromptsForIssue(issueKey, slackUserId).catch(() => {});
     }
   });
 }

@@ -136,6 +136,16 @@ class SupabaseService {
     return new Set((res.data ?? []).map((r) => r.issue_key));
   }
 
+  /**
+   * Forget that an issue was asked about, so the next poll re-prompts.
+   * Used when the user's "Yes" failed to apply.
+   */
+  async deletePromptsForIssue(issueKey, slackUserId = null) {
+    const params = { issue_key: `eq.${issueKey}` };
+    if (slackUserId) params.slack_user_id = `eq.${slackUserId}`;
+    await this.client.delete('/jira_prompts', { params, headers: { Prefer: 'return=minimal' } });
+  }
+
   async recordPrompt(triggerId, issueKey, slackUserId) {
     await this.client.post('/jira_prompts', {
       trigger_id: triggerId,

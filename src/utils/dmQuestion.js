@@ -1,5 +1,7 @@
 'use strict';
 
+const { issueLink } = require('./jiraLink');
+
 /**
  * Send a Yes/No question to a Slack user via DM using interactive buttons.
  * The full context is embedded in the button values so no in-memory lookup
@@ -29,13 +31,14 @@ async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, o
     slackUserId,
   });
 
+  const headline = `*${issueLink(context.issueKey)}*: ${context.question}`;
   const result = await client.chat.postMessage({
     channel: dm.channel.id,
-    text: `*${context.issueKey}*: ${context.question}`,
+    text: headline,
     blocks: [
       {
         type: 'section',
-        text: { type: 'mrkdwn', text: `*${context.issueKey}*: ${context.question}` },
+        text: { type: 'mrkdwn', text: headline },
       },
       {
         type: 'actions',
