@@ -34,14 +34,15 @@ const FIX_VERSION_PROMPT = `You are a Jira release-planning assistant.
 An epic must be given a Fix Version before it can be closed. You are given:
 - the epic, the status it is in, and the date it entered that status (its work was complete by then)
 - its child issues with their statuses and fix versions, plus a tally of those versions
-- "timelineFit": the first release that branches out on/after the date the epic entered its status
-- "current": the release currently in progress
+- "timelineFit": the release whose branch-out window contains the date the epic entered its status
+  (releases are worked on during their branch-out window, so work finished then ships in that release)
+- "current": the release whose branch-out window contains today
 - the list of candidate versions that exist in the project
 
 Choose the single most appropriate Fix Version for the epic, weighing evidence in this order:
 1. The children's actual fix versions are the strongest evidence of where the code landed. If they
    span several versions, the epic ships with the LAST of them.
-2. Otherwise the timelineFit release: work finished on date D ships in the first release branching after D.
+2. Otherwise the timelineFit release: work finished on date D ships in the release being worked on at D.
 3. Otherwise the current release.
 Only pick from the candidates list and answer with the candidate's "id".
 
@@ -92,7 +93,7 @@ class LlmService {
       `Epic: ${epicKey} — ${epicSummary}\n` +
       `Status: ${statusName || 'unknown'}${acceptedAt ? ` (entered on ${acceptedAt})` : ''}\n` +
       `Today: ${today}\n` +
-      `timelineFit: ${timelineFit ? `id=${timelineFit.id} name="${timelineFit.name}" (branches out ${timelineFit.branchOut})` : 'unknown'}\n` +
+      `timelineFit: ${timelineFit ? `id=${timelineFit.id} name="${timelineFit.name}" (branch-out window ${timelineFit.branchOut})` : 'unknown'}\n` +
       `current: ${current ? `id=${current.id} name="${current.name}"` : 'unknown'}\n\n` +
       `Children (${children.length}):\n` +
       children.map((c) => `- ${c.key} [${c.status}] fixVersions=${c.fixVersions.length ? c.fixVersions.join(', ') : 'none'} — ${c.summary}`).join('\n') +

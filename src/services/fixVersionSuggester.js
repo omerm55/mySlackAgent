@@ -30,39 +30,58 @@ function candidateVersions(versions) {
 
 const norm = (s) => String(s || '').trim().toLowerCase();
 
+/** Parse 'YYYY-MM-DD' as a UTC date at start of day; end-of-window dates get 23:59:59. */
+const dayStart = (s) => new Date(`${String(s).slice(0, 10)}T00:00:00Z`);
+const dayEnd = (s) => new Date(`${String(s).slice(0, 10)}T23:59:59Z`);
+
 /**
- * Build the release timeline: [{ version, date, source }] sorted by date.
- * Prefers the Supabase release_calendar (branch_out); falls back to Jira's
- * version startDate, then releaseDate.
+ * Build the release timeline: [{ version, start, end, source }] sorted by start.
+ * Prefers the Supabase release_calendar (branch_out … branch_out_end window);
+ * falls back to Jira's version startDate, then releaseDate (single-day windows).
  */
 function buildTimeline(candidates, calendar) {
   const byName = new Map(candidates.map((c) => [norm(c.name), c]));
   const entries = [];
-  const seen = new Set();
 
   for (const row of calendar || []) {
     const version = byName.get(norm(row.version_name));
     if (!version || !row.branch_out) continue;
-    entries.push({ version, date: new Date(row.branch_out), source: 'calendar' });
-    seen.add(version.id);
+    entries.push({
+      version,
+      start: dayStart(row.branch_out),
+      end: dayEnd(row.branch_out_end || row.branch_out),
+      source: 'calendar',
+    });
   }
   if (entries.length === 0) {
     for (const v of candidates) {
       const d = v.startDate || v.releaseDate;
-      if (!d || seen.has(v.id)) continue;
-      entries.push({ version: v, date: new Date(d), source: v.startDate ? 'jira-start' : 'jira-release' });
+      if (!d) continue;
+      entries.push({ version: v, start: dayStart(d), end: dayEnd(d), source: v.startDate ? 'jira-start' : 'jira-release' });
     }
   }
-  return entries.sort((a, b) => a.date - b.date);
+  return entries.sort((a, b) => a.start - b.start);
 }
 
-/** First release branching on/after `date`. */
-function firstOnOrAfter(timeline, date) {
+/**
+ * The release "in progress" on `date`: the entry whose window contains it,
+ * otherwise the next window after it (dates in a gap roll forward).
+ */
+function releaseFor(timeline, date) {
   if (!date) return null;
-  return timeline.find((e) => e.date >= date) || null;
+  const d = date instanceof Date ? date : new Date(date);
+  return timeline.find((e) => e.start <= d && d <= e.end)
+    || timeline.find((e) => e.start > d)
+    || null;
 }
 
-const fmtDate = (d) => (d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '');
+const fmtDate = (d) => (d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : '');
+const fmtMonth = (d) => (d ? new Date(d).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' }) : '');
+const windowLabel = (e) => {
+  if (!e) return '';
+  const sameMonth = e.start.getUTCFullYear() === e.end.getUTCFullYear() && e.start.getUTCMonth() === e.end.getUTCMonth();
+  return sameMonth ? fmtMonth(e.start) : `${fmtDate(e.start)} – ${fmtDate(e.end)}`;
+};
 
 /**
  * Suggest a Fix Version for an epic.
@@ -111,17 +130,20 @@ async function suggestFixVersion({ jira, llm, db, issueKey, logger, now = new Da
 
   // Timeline evidence
   const timeline = buildTimeline(candidates, calendar);
-  const timelineFit = firstOnOrAfter(timeline, acceptedAt);
+  const timelineFit = releaseFor(timeline, acceptedAt);
+  const currentEntry = releaseFor(timeline, now);
   let current = null;
   const envCurrent = process.env.CURRENT_RELEASE_VERSION;
   if (envCurrent) current = candidates.find((c) => norm(c.name) === norm(envCurrent)) || null;
-  if (!current) current = firstOnOrAfter(timeline, now)?.version || null;
+  if (!current) current = currentEntry?.version || null;
 
   const reasons = {
     children: (t) => `all ${t.count} versioned child issue(s) are in ${t.name}`,
     mostCommon: (t) => `${t.count} of ${versionedChildren} versioned child issue(s) are in ${t.name}`,
-    timeline: () => `first release branching after the epic entered ${statusName} on ${fmtDate(acceptedAt)}`,
-    current: () => 'the release currently in progress',
+    timeline: () => `the release in progress when the epic entered ${statusName} on ${fmtDate(acceptedAt)}`
+      + (timelineFit?.source === 'calendar' ? ` (branch-out ${windowLabel(timelineFit)})` : ''),
+    current: () => 'the release currently in progress'
+      + (current && currentEntry?.version?.id === current.id && currentEntry.source === 'calendar' ? ` (branch-out ${windowLabel(currentEntry)})` : ''),
   };
 
   const result = {
@@ -153,7 +175,10 @@ async function suggestFixVersion({ jira, llm, db, issueKey, logger, now = new Da
         statusName,
         acceptedAt: acceptedAt ? acceptedAt.toISOString().slice(0, 10) : null,
         today: now.toISOString().slice(0, 10),
-        timelineFit: timelineFit ? { id: timelineFit.version.id, name: timelineFit.version.name, branchOut: timelineFit.date.toISOString().slice(0, 10) } : null,
+        timelineFit: timelineFit ? {
+          id: timelineFit.version.id, name: timelineFit.version.name,
+          branchOut: `${timelineFit.start.toISOString().slice(0, 10)}..${timelineFit.end.toISOString().slice(0, 10)}`,
+        } : null,
         current: current ? { id: current.id, name: current.name } : null,
         children: children.map((c) => ({
           key: c.key,
@@ -195,4 +220,4 @@ async function suggestFixVersion({ jira, llm, db, issueKey, logger, now = new Da
   return result;
 }
 
-module.exports = { suggestFixVersion, getEpicChildren, candidateVersions, buildTimeline, firstOnOrAfter };
+module.exports = { suggestFixVersion, getEpicChildren, candidateVersions, buildTimeline, releaseFor };

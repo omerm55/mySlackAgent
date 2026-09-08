@@ -128,10 +128,10 @@ class SupabaseService {
 
   // ── release_calendar (version name → branch-out date) ─────────────────
 
-  /** @returns {Promise<Array<{ version_name: string, branch_out: string, release_date: string|null }>>} */
+  /** @returns {Promise<Array<{ version_name: string, branch_out: string, branch_out_end: string|null, release_date: string|null }>>} */
   async getReleaseCalendar() {
     const res = await this.client.get('/release_calendar', {
-      params: { select: 'version_name,branch_out,release_date', order: 'branch_out.asc' },
+      params: { select: 'version_name,branch_out,branch_out_end,release_date', order: 'branch_out.asc' },
     });
     return res.data ?? [];
   }
