@@ -84,10 +84,11 @@ function registerTriggerHandler(app, services) {
         text: `✅ Trigger *${name}* created! It will fire on ${triggers.map((t) => t === 'reaction' ? '👍 reactions' : '💬 thread replies').join(' and ')} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.`,
       });
     } catch (err) {
-      logger.error(`[trigger] Failed to save integration: ${err.message}`);
+      const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+      logger.error(`[trigger] Failed to save integration: ${detail}`);
       await client.chat.postMessage({
         channel: userId,
-        text: `❌ Failed to create trigger: ${err.message}`,
+        text: `❌ Failed to create trigger: ${detail}`,
       });
     }
   });
