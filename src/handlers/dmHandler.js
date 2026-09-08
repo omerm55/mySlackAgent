@@ -56,11 +56,13 @@ function registerDmHandler(app, jiraService, services) {
           ...extraBlocks,
         ],
       });
+      return true;
     } catch (err) {
       // Don't swallow silently — a failed update leaves the user staring at a stale message.
       const detail = err.data?.error || err.message;
       const meta = err.data?.response_metadata?.messages?.join(' | ');
       baseLogger.error(`[dm] chat.update failed (${detail})${meta ? ` — ${meta}` : ''}`);
+      return false;
     }
   }
 
@@ -108,13 +110,16 @@ function registerDmHandler(app, jiraService, services) {
         : '\n_I couldn\'t compute a suggestion — pick a version manually._';
     }
 
+    let rendered = false;
     try {
-      await renderFixVersionOffer(client, channelId, messageTs, originalText, intro, suggestion, suggestionNote, baseCtx, pickerButton);
+      rendered = await renderFixVersionOffer(client, channelId, messageTs, originalText, intro, suggestion, suggestionNote, baseCtx, pickerButton);
     } catch (err) {
-      // Never leave the "Checking…" message up: fall back to the bare picker.
       logger.error(`[dm] Rendering Fix Version offer failed for ${issueKey}: ${err.message}`);
-      await replaceButtons(client, channelId, messageTs, originalText, intro,
-        [{ type: 'actions', elements: [pickerButton()] }]);
+    }
+    if (!rendered) {
+      // Never leave a progress message up: fall back to the bare picker.
+      await replaceButtons(client, channelId, messageTs, originalText,
+        `${intro}\n_Pick a version manually._`, [{ type: 'actions', elements: [pickerButton()] }]);
     }
   }
 
@@ -143,7 +148,8 @@ function registerDmHandler(app, jiraService, services) {
         buttons.push({
           type: 'button',
           text: { type: 'plain_text', text: `Use ${alternative.pick.name} instead`.slice(0, 75), emoji: true },
-          action_id: 'jira_fixversion_apply',
+          // action_ids must be unique within an actions block — same handler via regex below
+          action_id: 'jira_fixversion_apply_alt',
           value: JSON.stringify({ ...baseCtx, versionId: alternative.pick.id, versionName: alternative.pick.name }),
         });
       }
@@ -159,7 +165,7 @@ function registerDmHandler(app, jiraService, services) {
 
     buttons.push(pickerButton(suggestion?.pick?.id ?? null, suggestion?.pick ? '🏷 Choose another…' : '🏷 Choose a version'));
 
-    await replaceButtons(client, channelId, messageTs, originalText, text, [{ type: 'actions', elements: buttons }]);
+    return replaceButtons(client, channelId, messageTs, originalText, text, [{ type: 'actions', elements: buttons }]);
   }
 
   /** Set fixVersions on the issue, then apply the originally proposed action. Updates the DM. */
@@ -263,7 +269,8 @@ function registerDmHandler(app, jiraService, services) {
 
   // ── Fix Version: one-click apply of the suggestion ────────────────────────
 
-  app.action('jira_fixversion_apply', async ({ ack, body, client, logger }) => {
+  // Matches both the suggested ("jira_fixversion_apply") and alternative ("…_alt") buttons
+  app.action(/^jira_fixversion_apply(_alt)?$/, async ({ ack, body, client, logger }) => {
     await ack();
     let context;
     try { context = JSON.parse(body.actions[0].value); } catch {
