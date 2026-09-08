@@ -126,6 +126,16 @@ class SupabaseService {
     await this.updateJiraTrigger(id, { active: false });
   }
 
+  // ── release_calendar (version name → branch-out date) ─────────────────
+
+  /** @returns {Promise<Array<{ version_name: string, branch_out: string, release_date: string|null }>>} */
+  async getReleaseCalendar() {
+    const res = await this.client.get('/release_calendar', {
+      params: { select: 'version_name,branch_out,release_date', order: 'branch_out.asc' },
+    });
+    return res.data ?? [];
+  }
+
   // ── jira_prompts (one DM per trigger × issue) ─────────────────────────
 
   /** @returns {Promise<Set<string>>} issue keys already prompted for this trigger */

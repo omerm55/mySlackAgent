@@ -12,4 +12,16 @@ function issueLink(issueKey) {
   return url ? `<${url}|${issueKey}>` : issueKey;
 }
 
-module.exports = { issueUrl, issueLink };
+/** Slack mrkdwn link with a custom label, e.g. `<url|SNS-1 (Summary)>`. */
+function issueLinkLabelled(issueKey, label) {
+  const url = issueUrl(issueKey);
+  const text = label || issueKey;
+  return url ? `<${url}|${text}>` : text;
+}
+
+/** True when the text already references the issue (bare key or a link to it). */
+function mentionsIssue(text, issueKey) {
+  return typeof text === 'string' && text.includes(issueKey);
+}
+
+module.exports = { issueUrl, issueLink, issueLinkLabelled, mentionsIssue };

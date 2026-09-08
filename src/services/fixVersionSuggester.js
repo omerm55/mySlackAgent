@@ -28,29 +28,77 @@ function candidateVersions(versions) {
     .slice(0, 100);
 }
 
+const norm = (s) => String(s || '').trim().toLowerCase();
+
 /**
- * Suggest a Fix Version for an epic from its children.
- *
- * 1. Tally the children's fix versions.
- * 2. If every versioned child agrees on one candidate → use it (no LLM call).
- * 3. Otherwise ask the LLM to pick among candidates, given children + tally.
- * 4. Fall back to the most common child version, else nothing.
- *
- * @returns {Promise<{ pick: {id:string,name:string,released:boolean}|null, reason: string,
- *                     candidates: Array, children: Array, usedLlm: boolean }>}
+ * Build the release timeline: [{ version, date, source }] sorted by date.
+ * Prefers the Supabase release_calendar (branch_out); falls back to Jira's
+ * version startDate, then releaseDate.
  */
-async function suggestFixVersion({ jira, llm, issueKey, logger }) {
+function buildTimeline(candidates, calendar) {
+  const byName = new Map(candidates.map((c) => [norm(c.name), c]));
+  const entries = [];
+  const seen = new Set();
+
+  for (const row of calendar || []) {
+    const version = byName.get(norm(row.version_name));
+    if (!version || !row.branch_out) continue;
+    entries.push({ version, date: new Date(row.branch_out), source: 'calendar' });
+    seen.add(version.id);
+  }
+  if (entries.length === 0) {
+    for (const v of candidates) {
+      const d = v.startDate || v.releaseDate;
+      if (!d || seen.has(v.id)) continue;
+      entries.push({ version: v, date: new Date(d), source: v.startDate ? 'jira-start' : 'jira-release' });
+    }
+  }
+  return entries.sort((a, b) => a.date - b.date);
+}
+
+/** First release branching on/after `date`. */
+function firstOnOrAfter(timeline, date) {
+  if (!date) return null;
+  return timeline.find((e) => e.date >= date) || null;
+}
+
+const fmtDate = (d) => (d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '');
+
+/**
+ * Suggest a Fix Version for an epic.
+ *
+ * Evidence, strongest first:
+ *   1. The children's own fix versions (unanimous → decided, no LLM).
+ *   2. Timeline fit: first release branching after the epic entered its
+ *      current status (e.g. Acceptance), from release_calendar or Jira dates.
+ *   3. The release currently in progress (first branch-out on/after today,
+ *      or CURRENT_RELEASE_VERSION env).
+ * When evidence is mixed the LLM adjudicates; otherwise deterministic order.
+ *
+ * @returns {Promise<{
+ *   pick: object|null, reason: string,
+ *   alternative: { pick: object, reason: string }|null,
+ *   acceptedAt: Date|null, statusName: string,
+ *   candidates: Array, children: Array, usedLlm: boolean }>}
+ */
+async function suggestFixVersion({ jira, llm, db, issueKey, logger, now = new Date() }) {
   const projectKey = issueKey.split('-')[0];
-  const [epic, children, versions] = await Promise.all([
+  const [epic, children, versions, calendar] = await Promise.all([
     jira.getIssue(issueKey).catch(() => null),
     getEpicChildren(jira, issueKey),
     jira.getProjectVersions(projectKey),
+    db?.getReleaseCalendar ? db.getReleaseCalendar().catch(() => []) : Promise.resolve([]),
   ]);
-  const candidates = candidateVersions(versions);
-  const byId = new Map(candidates.map((c) => [c.id, c]));
+  const statusName = epic?.fields?.status?.name || '';
+  const acceptedAt = statusName && typeof jira.getStatusEnteredAt === 'function'
+    ? await jira.getStatusEnteredAt(issueKey, statusName).catch(() => null)
+    : null;
 
-  // Tally children's fix versions
-  const tally = new Map(); // versionId → { id, name, count }
+  const candidates = candidateVersions(versions);
+  const byId = new Map(candidates.map((c) => [String(c.id), c]));
+
+  // Children's versions
+  const tally = new Map();
   for (const child of children) {
     for (const fv of child.fields?.fixVersions || []) {
       const t = tally.get(fv.id) || { id: fv.id, name: fv.name, count: 0 };
@@ -61,23 +109,52 @@ async function suggestFixVersion({ jira, llm, issueKey, logger }) {
   const ranked = [...tally.values()].sort((a, b) => b.count - a.count);
   const versionedChildren = children.filter((c) => (c.fields?.fixVersions || []).length > 0).length;
 
-  let pick = null;
-  let reason = '';
-  let usedLlm = false;
+  // Timeline evidence
+  const timeline = buildTimeline(candidates, calendar);
+  const timelineFit = firstOnOrAfter(timeline, acceptedAt);
+  let current = null;
+  const envCurrent = process.env.CURRENT_RELEASE_VERSION;
+  if (envCurrent) current = candidates.find((c) => norm(c.name) === norm(envCurrent)) || null;
+  if (!current) current = firstOnOrAfter(timeline, now)?.version || null;
 
-  // Unanimous case — no need for the LLM
-  if (ranked.length === 1 && byId.has(ranked[0].id)) {
-    pick = byId.get(ranked[0].id);
-    reason = `all ${ranked[0].count} versioned child issue(s) are in ${pick.name}`;
-    return { pick, reason, candidates, children, usedLlm };
+  const reasons = {
+    children: (t) => `all ${t.count} versioned child issue(s) are in ${t.name}`,
+    mostCommon: (t) => `${t.count} of ${versionedChildren} versioned child issue(s) are in ${t.name}`,
+    timeline: () => `first release branching after the epic entered ${statusName} on ${fmtDate(acceptedAt)}`,
+    current: () => 'the release currently in progress',
+  };
+
+  const result = {
+    pick: null, reason: '', alternative: null,
+    acceptedAt, statusName, candidates, children, usedLlm: false,
+  };
+  const setAlternative = (primaryId) => {
+    const alts = [
+      timelineFit && { pick: timelineFit.version, reason: reasons.timeline() },
+      current && { pick: current, reason: reasons.current() },
+    ].filter(Boolean).filter((a) => String(a.pick.id) !== String(primaryId));
+    result.alternative = alts[0] || null;
+  };
+
+  // 1. Unanimous children — decided
+  if (ranked.length === 1 && byId.has(String(ranked[0].id))) {
+    result.pick = byId.get(String(ranked[0].id));
+    result.reason = reasons.children(ranked[0]);
+    setAlternative(result.pick.id);
+    return result;
   }
 
-  // Mixed / missing versions → ask the LLM
-  if (llm && candidates.length > 0 && children.length > 0) {
+  // 2. Mixed evidence → LLM
+  if (llm && candidates.length > 0 && (children.length > 0 || timelineFit || current)) {
     try {
       const res = await llm.suggestFixVersion({
         epicKey: issueKey,
         epicSummary: epic?.fields?.summary || '',
+        statusName,
+        acceptedAt: acceptedAt ? acceptedAt.toISOString().slice(0, 10) : null,
+        today: now.toISOString().slice(0, 10),
+        timelineFit: timelineFit ? { id: timelineFit.version.id, name: timelineFit.version.name, branchOut: timelineFit.date.toISOString().slice(0, 10) } : null,
+        current: current ? { id: current.id, name: current.name } : null,
         children: children.map((c) => ({
           key: c.key,
           summary: c.fields?.summary || '',
@@ -87,11 +164,12 @@ async function suggestFixVersion({ jira, llm, issueKey, logger }) {
         tally: ranked.map((t) => ({ name: t.name, count: t.count })),
         candidates: candidates.map((c) => ({ id: c.id, name: c.name, released: Boolean(c.released), releaseDate: c.releaseDate || null })),
       });
-      usedLlm = true;
+      result.usedLlm = true;
       if (res?.versionId && byId.has(String(res.versionId))) {
-        pick = byId.get(String(res.versionId));
-        reason = res.reason || 'chosen from the children\'s versions';
-        return { pick, reason, candidates, children, usedLlm };
+        result.pick = byId.get(String(res.versionId));
+        result.reason = res.reason || 'chosen from the children and the release timeline';
+        setAlternative(result.pick.id);
+        return result;
       }
       logger?.warn(`[fixVersion] LLM returned no usable versionId for ${issueKey}: ${JSON.stringify(res)}`);
     } catch (err) {
@@ -99,13 +177,22 @@ async function suggestFixVersion({ jira, llm, issueKey, logger }) {
     }
   }
 
-  // Heuristic fallback: most common child version that is a valid candidate
-  const top = ranked.find((t) => byId.has(t.id));
-  if (top) {
-    pick = byId.get(top.id);
-    reason = `${top.count} of ${versionedChildren} versioned child issue(s) are in ${pick.name}`;
+  // 3. Deterministic fallback: timeline → current → most common child version
+  if (timelineFit) {
+    result.pick = timelineFit.version;
+    result.reason = reasons.timeline();
+  } else if (current) {
+    result.pick = current;
+    result.reason = reasons.current();
+  } else {
+    const top = ranked.find((t) => byId.has(String(t.id)));
+    if (top) {
+      result.pick = byId.get(String(top.id));
+      result.reason = reasons.mostCommon(top);
+    }
   }
-  return { pick, reason, candidates, children, usedLlm };
+  if (result.pick) setAlternative(result.pick.id);
+  return result;
 }
 
-module.exports = { suggestFixVersion, getEpicChildren, candidateVersions };
+module.exports = { suggestFixVersion, getEpicChildren, candidateVersions, buildTimeline, firstOnOrAfter };

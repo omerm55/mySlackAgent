@@ -202,6 +202,38 @@ class JiraService {
   }
 
   /**
+   * When did the issue most recently enter the given status?
+   * Walks the changelog (newest first, up to 500 entries).
+   * @param {string} issueKey
+   * @param {string} statusName  e.g. 'Acceptance'
+   * @returns {Promise<Date|null>}
+   */
+  async getStatusEnteredAt(issueKey, statusName) {
+    this._assertValidKey(issueKey);
+    const want = statusName.trim().toLowerCase();
+    let latest = null;
+    let startAt = 0;
+    for (let page = 0; page < 5; page += 1) {
+      const res = await this.client.get(`/rest/api/3/issue/${issueKey}/changelog`, {
+        params: { startAt, maxResults: 100 },
+      });
+      const values = res.data?.values ?? [];
+      for (const history of values) {
+        const hit = (history.items || []).some(
+          (it) => it.field === 'status' && (it.toString || '').toLowerCase() === want,
+        );
+        if (hit) {
+          const when = new Date(history.created);
+          if (!latest || when > latest) latest = when;
+        }
+      }
+      if (res.data?.isLast || values.length === 0) break;
+      startAt += values.length;
+    }
+    return latest;
+  }
+
+  /**
    * List a project's versions (for Fix Version pickers).
    * @param {string} projectKey e.g. 'SNS'
    * @returns {Promise<Array<{ id: string, name: string, released: boolean, archived: boolean, releaseDate?: string }>>}

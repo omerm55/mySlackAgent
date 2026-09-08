@@ -51,3 +51,5 @@ services:
         sync: false
       - key: JIRA_POLL_INTERVAL_SEC
         value: "60"
+      - key: CURRENT_RELEASE_VERSION
+        sync: false

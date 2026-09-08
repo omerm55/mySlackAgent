@@ -1,6 +1,6 @@
 'use strict';
 
-const { issueLink } = require('./jiraLink');
+const { issueLink, mentionsIssue } = require('./jiraLink');
 
 /**
  * Send a Yes/No question to a Slack user via DM using interactive buttons.
@@ -31,7 +31,10 @@ async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, o
     slackUserId,
   });
 
-  const headline = `*${issueLink(context.issueKey)}*: ${context.question}`;
+  // Only prefix the key when the question doesn't already name the issue
+  const headline = mentionsIssue(context.question, context.issueKey)
+    ? context.question
+    : `*${issueLink(context.issueKey)}*: ${context.question}`;
   const result = await client.chat.postMessage({
     channel: dm.channel.id,
     text: headline,

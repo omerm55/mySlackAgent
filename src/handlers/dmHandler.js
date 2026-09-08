@@ -61,24 +61,31 @@ function registerDmHandler(app, jiraService, services) {
   async function offerFixVersion(client, context, channelId, messageTs, originalText, logger) {
     const { issueKey, transitionTo } = context;
     const target = transitionTo || 'the next status';
+    const intro = `ℹ️ One more thing before I can move *${issueLink(issueKey)}* to *${target}*: Jira needs a *Fix Version*.`;
     await replaceButtons(client, channelId, messageTs, originalText,
-      `⚠️ Jira needs a *Fix Version* on *${issueLink(issueKey)}* before it can move to *${target}*.\n_Looking at its child issues for a suggestion…_`);
+      `${intro}\n_Checking its child issues and the release calendar for a suggestion…_`);
 
     let suggestion = null;
     try {
-      suggestion = await suggestFixVersion({ jira: jiraService, llm: services.llmService, issueKey, logger });
+      suggestion = await suggestFixVersion({ jira: jiraService, llm: services.llmService, db: services.db, issueKey, logger });
     } catch (err) {
       logger.warn(`[dm] Fix Version suggestion failed for ${issueKey}: ${err.message}`);
     }
 
     const baseCtx = { ...context, dmChannelId: channelId, messageTs, originalText: (originalText || '').slice(0, 600) };
     const buttons = [];
-    let text = `⚠️ Jira needs a *Fix Version* on *${issueLink(issueKey)}* before it can move to *${target}*.`;
+    let text = intro;
 
     if (suggestion?.pick) {
-      const { pick, reason, children, usedLlm } = suggestion;
+      const { pick, reason, alternative, children, usedLlm, acceptedAt, statusName } = suggestion;
       text += `\n💡 Suggested: *${pick.name}*${pick.released ? ' _(already released)_' : ''} — ${reason}.`;
-      text += `\n_Based on ${children.length} child issue(s)${usedLlm ? ', chosen by AI' : ''}._`;
+      if (alternative) text += `\nAlternative: *${alternative.pick.name}* — ${alternative.reason}.`;
+      const basis = [
+        `${children.length} child issue(s)`,
+        acceptedAt ? `entered ${statusName} ${new Date(acceptedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : null,
+        usedLlm ? 'chosen by AI' : null,
+      ].filter(Boolean).join(' · ');
+      text += `\n_Based on ${basis}._`;
       buttons.push({
         type: 'button',
         style: 'primary',
@@ -86,10 +93,18 @@ function registerDmHandler(app, jiraService, services) {
         action_id: 'jira_fixversion_apply',
         value: JSON.stringify({ ...baseCtx, versionId: pick.id, versionName: pick.name }),
       });
-    } else if (suggestion && suggestion.children.length === 0) {
-      text += '\n_No child issues found to base a suggestion on._';
+      if (alternative) {
+        buttons.push({
+          type: 'button',
+          text: { type: 'plain_text', text: `Use ${alternative.pick.name} instead`.slice(0, 75), emoji: true },
+          action_id: 'jira_fixversion_apply',
+          value: JSON.stringify({ ...baseCtx, versionId: alternative.pick.id, versionName: alternative.pick.name }),
+        });
+      }
+    } else if (suggestion && suggestion.children.length === 0 && !suggestion.acceptedAt) {
+      text += '\n_I couldn\'t find child issues or a release calendar to base a suggestion on._';
     } else {
-      text += '\n_The child issues don\'t point to a single version._';
+      text += '\n_I couldn\'t narrow it down to one version._';
     }
 
     buttons.push({
@@ -256,7 +271,7 @@ function registerDmHandler(app, jiraService, services) {
           submit: { type: 'plain_text', text: 'Set & retry' },
           close: { type: 'plain_text', text: 'Cancel' },
           blocks: [
-            { type: 'section', text: { type: 'mrkdwn', text: `*${issueLink(issueKey)}* needs a Fix Version before moving to *${context.transitionTo || 'the next status'}*.` } },
+            { type: 'section', text: { type: 'mrkdwn', text: `ℹ️ *${issueLink(issueKey)}* needs a Fix Version before moving to *${context.transitionTo || 'the next status'}*.` } },
             {
               type: 'input',
               block_id: 'fv_block',

@@ -31,18 +31,22 @@ Respond ONLY with valid JSON (no markdown fences):
 Omit keys that don't apply. Always include confirmationMessage.`;
 
 const FIX_VERSION_PROMPT = `You are a Jira release-planning assistant.
-An epic must be given a Fix Version before it can be closed. You are given the epic, its child issues
-(with their statuses and fix versions), a tally of the children's versions, and the list of candidate
-versions that exist in the project.
+An epic must be given a Fix Version before it can be closed. You are given:
+- the epic, the status it is in, and the date it entered that status (its work was complete by then)
+- its child issues with their statuses and fix versions, plus a tally of those versions
+- "timelineFit": the first release that branches out on/after the date the epic entered its status
+- "current": the release currently in progress
+- the list of candidate versions that exist in the project
 
-Choose the single most appropriate Fix Version for the epic:
-- The epic ships when its LAST child ships, so if children span several versions prefer the latest of them.
-- Prefer versions that appear on the children over versions that don't.
-- Only pick from the candidates list; use the candidate's "id".
-- If the children carry no versions at all, pick the earliest unreleased candidate.
+Choose the single most appropriate Fix Version for the epic, weighing evidence in this order:
+1. The children's actual fix versions are the strongest evidence of where the code landed. If they
+   span several versions, the epic ships with the LAST of them.
+2. Otherwise the timelineFit release: work finished on date D ships in the first release branching after D.
+3. Otherwise the current release.
+Only pick from the candidates list and answer with the candidate's "id".
 
 Respond ONLY with valid JSON (no markdown fences):
-{ "versionId": "<candidate id>", "reason": "<one short sentence a PM would find useful>" }`;
+{ "versionId": "<candidate id>", "reason": "<one short sentence a PM would find useful, mention the evidence used>" }`;
 
 class LlmService {
   /**
@@ -83,9 +87,13 @@ class LlmService {
    * Pick a Fix Version for an epic from its children.
    * @returns {Promise<{ versionId: string, reason: string }>}
    */
-  async suggestFixVersion({ epicKey, epicSummary, children, tally, candidates }) {
+  async suggestFixVersion({ epicKey, epicSummary, statusName, acceptedAt, today, timelineFit, current, children, tally, candidates }) {
     const userMessage =
-      `Epic: ${epicKey} — ${epicSummary}\n\n` +
+      `Epic: ${epicKey} — ${epicSummary}\n` +
+      `Status: ${statusName || 'unknown'}${acceptedAt ? ` (entered on ${acceptedAt})` : ''}\n` +
+      `Today: ${today}\n` +
+      `timelineFit: ${timelineFit ? `id=${timelineFit.id} name="${timelineFit.name}" (branches out ${timelineFit.branchOut})` : 'unknown'}\n` +
+      `current: ${current ? `id=${current.id} name="${current.name}"` : 'unknown'}\n\n` +
       `Children (${children.length}):\n` +
       children.map((c) => `- ${c.key} [${c.status}] fixVersions=${c.fixVersions.length ? c.fixVersions.join(', ') : 'none'} — ${c.summary}`).join('\n') +
       `\n\nTally of children's versions: ${tally.length ? tally.map((t) => `${t.name}×${t.count}`).join(', ') : 'none'}\n\n` +

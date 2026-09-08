@@ -1,6 +1,7 @@
 'use strict';
 
 const { sendDmQuestion } = require('../utils/dmQuestion');
+const { issueLink, issueLinkLabelled } = require('../utils/jiraLink');
 
 const MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN = 10;
 
@@ -173,15 +174,26 @@ function isDue(trigger, nowMs) {
   return nowMs - new Date(trigger.last_polled_at).getTime() >= intervalMs - 5_000; // 5s slack for tick jitter
 }
 
-/** Replace {key}, {summary}, {status}, {reporter}, {assignee} in a question template. */
+/**
+ * Replace placeholders in a question template.
+ *   {key} ({summary})  → one link labelled "KEY (summary)"
+ *   {link}             → same as above
+ *   {key}              → link labelled "KEY"
+ *   {summary} {status} {reporter} {assignee} → plain text
+ */
 function renderTemplate(template, issue) {
   const f = issue.fields || {};
-  return (template || 'Approve {key}?')
-    .replace(/\{key\}/g, issue.key)
-    .replace(/\{summary\}/g, f.summary || '')
+  const summary = f.summary || '';
+  const combined = issueLinkLabelled(issue.key, summary ? `${issue.key} (${summary})` : issue.key);
+  return (template || 'Approve {link}?')
+    .replace(/\{key\}\s*\(\{summary\}\)/g, combined)
+    .replace(/\{link\}/g, combined)
+    .replace(/\{key\}/g, issueLink(issue.key))
+    .replace(/\{summary\}/g, summary)
     .replace(/\{status\}/g, f.status?.name || '')
     .replace(/\{reporter\}/g, f.reporter?.displayName || '')
     .replace(/\{assignee\}/g, f.assignee?.displayName || 'unassigned');
 }
 
 module.exports = JiraPoller;
+module.exports.renderTemplate = renderTemplate;
