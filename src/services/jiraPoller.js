@@ -57,9 +57,15 @@ class JiraPoller {
    * poll_interval_min, or { onlyId } to run a single trigger (e.g. right
    * after it was created or edited).
    */
+  /**
+   * @returns {Promise<Array<{ trigger: object, matched: number, fresh: number, sent: number,
+   *                            skipped: string[], sentTo: string[], error?: string }>>}
+   *          one entry per trigger evaluated (empty if nothing was due)
+   */
   async runOnce({ force = false, onlyId = null } = {}) {
-    if (this._running) return; // skip overlapping runs
+    if (this._running) return []; // skip overlapping runs
     this._running = true;
+    const results = [];
     try {
       let triggers = await this.db.getActiveJiraTriggers();
       if (onlyId) triggers = triggers.filter((t) => t.id === onlyId);
@@ -67,9 +73,10 @@ class JiraPoller {
       for (const trigger of triggers) {
         if (!force && !isDue(trigger, now)) continue;
         try {
-          await this._evaluateTrigger(trigger);
+          results.push(await this._evaluateTrigger(trigger));
         } catch (err) {
           this.logger.error(`[jiraPoller] Trigger "${trigger.name}" failed: ${err.message}`);
+          results.push({ trigger, matched: 0, fresh: 0, sent: 0, skipped: [], sentTo: [], error: err.message });
         } finally {
           // Record the evaluation even on failure so a broken JQL doesn't hammer Jira every tick
           await this.db.updateJiraTrigger(trigger.id, { last_polled_at: new Date().toISOString() })
@@ -81,16 +88,21 @@ class JiraPoller {
     } finally {
       this._running = false;
     }
+    return results;
   }
 
   async _evaluateTrigger(trigger) {
     const tag = `[jiraPoller/${trigger.name}]`;
+    const stats = { trigger, matched: 0, fresh: 0, sent: 0, skipped: [], sentTo: [] };
+
     const issues = await this.jira.searchIssues(trigger.jql, ['summary', 'status', 'reporter', 'assignee']);
-    if (issues.length === 0) return;
+    stats.matched = issues.length;
+    if (issues.length === 0) return stats;
 
     const prompted = await this.db.getPromptedIssueKeys(trigger.id);
     const fresh = issues.filter((i) => !prompted.has(i.key));
-    if (fresh.length === 0) return;
+    stats.fresh = fresh.length;
+    if (fresh.length === 0) return stats;
 
     this.logger.info(`${tag} ${issues.length} match, ${fresh.length} new`);
 
@@ -98,6 +110,7 @@ class JiraPoller {
     for (const issue of fresh) {
       if (sent >= MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN) {
         this.logger.warn(`${tag} Reached ${MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN} prompts this run — rest deferred to next run`);
+        stats.skipped.push(`${fresh.length - sent} more deferred to the next run (cap ${MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN}/run)`);
         break;
       }
 
@@ -109,6 +122,7 @@ class JiraPoller {
         this.logger.warn(`${tag} ${issue.key}: no email on ${trigger.notify} (${displayName}) — skipping`);
         await this.db.recordPrompt(trigger.id, issue.key, null); // don't retry every run
         await this.ops?.jiraTriggerSkipped?.({ trigger: trigger.name, issueKey: issue.key, reason: `no email for ${trigger.notify} ${displayName}` });
+        stats.skipped.push(`${issue.key}: no email for ${trigger.notify} ${displayName}`);
         continue;
       }
 
@@ -117,11 +131,13 @@ class JiraPoller {
         this.logger.warn(`${tag} ${issue.key}: no Slack user for ${email} — skipping`);
         await this.db.recordPrompt(trigger.id, issue.key, null);
         await this.ops?.jiraTriggerSkipped?.({ trigger: trigger.name, issueKey: issue.key, reason: `no Slack user for ${email}` });
+        stats.skipped.push(`${issue.key}: no Slack user for ${email}`);
         continue;
       }
 
       // Personal-scope triggers only DM their creator
       if (trigger.scope === 'personal' && slackUserId !== trigger.created_by) {
+        stats.skipped.push(`${issue.key}: personal trigger, ${displayName} is not the creator`);
         continue;
       }
 
@@ -143,11 +159,15 @@ class JiraPoller {
         await sendDmQuestion(this.slack, slackUserId, context, null, this.ops);
         await this.db.recordPrompt(trigger.id, issue.key, slackUserId);
         sent += 1;
+        stats.sentTo.push(`${issue.key} → <@${slackUserId}>`);
         this.logger.info(`${tag} DM sent to ${slackUserId} for ${issue.key}`);
       } catch (err) {
         this.logger.error(`${tag} Failed to DM ${slackUserId} for ${issue.key}: ${err.message}`);
+        stats.skipped.push(`${issue.key}: DM failed (${err.message})`);
       }
     }
+    stats.sent = sent;
+    return stats;
   }
 
   async _resolveSlackUser(email) {

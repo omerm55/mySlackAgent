@@ -320,15 +320,46 @@ function registerJiraTriggerHandler(app, services) {
       return;
     }
 
+    if (op === 'run') {
+      if (!services.jiraPoller) {
+        await client.chat.postMessage({ channel: userId, text: '⚠️ The Jira poller is not running (Supabase not configured).' });
+        return;
+      }
+      try {
+        const [stats] = await services.jiraPoller.runOnce({ force: true, onlyId: id });
+        if (!stats) {
+          await client.chat.postMessage({ channel: userId, text: `⏳ *${existing.name}* is already being evaluated — try again in a moment.` });
+          return;
+        }
+        const lines = [`▶️ Ran *${existing.name}* — \`${existing.jql}\``];
+        if (stats.error) {
+          lines.push(`❌ ${stats.error}`);
+        } else {
+          lines.push(`${stats.matched} issue(s) match · ${stats.fresh} not yet asked · ${stats.sent} DM(s) sent`);
+          if (stats.sentTo.length) lines.push(...stats.sentTo.map((s) => `  • ${s}`));
+          if (stats.skipped.length) lines.push(...stats.skipped.slice(0, 10).map((s) => `  ⏭ ${s}`));
+          if (stats.matched > 0 && stats.fresh === 0) lines.push('_Everyone matching has already been asked. Use 🔁 Re-ask open matches to ask again._');
+        }
+        await client.chat.postMessage({ channel: userId, text: lines.join('\n') });
+      } catch (err) {
+        logger.error(`[jiraTrigger] Run now failed for ${id}: ${errDetail(err)}`);
+        await client.chat.postMessage({ channel: userId, text: `❌ Run failed: ${errDetail(err)}` });
+      }
+      return;
+    }
+
     if (op === 'reask') {
       try {
         const cleared = await services.db.deletePromptsForTrigger(id);
         logger.info(`[jiraTrigger] Re-ask "${existing.name}" (${id}) by ${userId} — cleared ${cleared} prompt(s)`);
+        const [stats] = services.jiraPoller ? await services.jiraPoller.runOnce({ force: true, onlyId: id }) : [];
+        const summary = stats && !stats.error
+          ? `${stats.matched} issue(s) match · ${stats.sent} DM(s) sent${stats.skipped.length ? ` · ${stats.skipped.length} skipped` : ''}`
+          : (stats?.error ? `❌ ${stats.error}` : 'poller not available');
         await client.chat.postMessage({
           channel: userId,
-          text: `🔁 Re-asking for *${existing.name}*: cleared ${cleared} previous prompt(s). Everyone whose issue still matches \`${existing.jql}\` will get a fresh DM now (up to 10 per run, the rest on following runs).`,
+          text: `🔁 Re-asked *${existing.name}*: cleared ${cleared} previous prompt(s).\n${summary}${stats?.sentTo?.length ? `\n${stats.sentTo.map((s) => `  • ${s}`).join('\n')}` : ''}`,
         });
-        services.jiraPoller?.runOnce({ force: true, onlyId: id }).catch(() => {});
       } catch (err) {
         logger.error(`[jiraTrigger] Re-ask failed for ${id}: ${errDetail(err)}`);
         await client.chat.postMessage({ channel: userId, text: `❌ Re-ask failed: ${errDetail(err)}` });

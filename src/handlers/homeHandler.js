@@ -142,7 +142,10 @@ async function buildHomeBlocks(userId, services, logger) {
         },
       };
       if (canManage(t.created_by, userId)) {
-        block.accessory = manageMenu('jira_trigger_menu', t.id, [['reask', '🔁 Re-ask open matches']]);
+        block.accessory = manageMenu('jira_trigger_menu', t.id, [
+          ['run', '▶️ Run now'],
+          ['reask', '🔁 Re-ask open matches'],
+        ]);
       }
       return block;
     }) : [{
