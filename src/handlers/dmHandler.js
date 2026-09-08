@@ -36,7 +36,7 @@ function registerDmHandler(app, jiraService, services) {
     return jiraService;
   }
 
-  async function replaceButtons(client, channelId, messageTs, originalText, newText) {
+  async function replaceButtons(client, channelId, messageTs, originalText, newText, extraBlocks = []) {
     await client.chat.update({
       channel: channelId,
       ts: messageTs,
@@ -44,8 +44,25 @@ function registerDmHandler(app, jiraService, services) {
       blocks: [
         { type: 'section', text: { type: 'mrkdwn', text: originalText } },
         { type: 'section', text: { type: 'mrkdwn', text: newText } },
+        ...extraBlocks,
       ],
     }).catch(() => {});
+  }
+
+  const needsFixVersion = (err) => /fix\s*version/i.test(err?.message || '');
+
+  /** Button that opens the Fix Version picker; carries the original ctx + message location. */
+  function fixVersionButtonBlock(context, channelId, messageTs, originalText) {
+    return {
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        style: 'primary',
+        text: { type: 'plain_text', text: '🏷 Set Fix Version & retry', emoji: true },
+        action_id: 'jira_set_fixversion',
+        value: JSON.stringify({ ...context, dmChannelId: channelId, messageTs, originalText: (originalText || '').slice(0, 600) }),
+      }],
+    };
   }
 
   // ── Quick Yes ─────────────────────────────────────────────────────────────
@@ -91,11 +108,124 @@ function registerDmHandler(app, jiraService, services) {
       await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue, usingOAuth });
     } catch (err) {
       logger.error(`[dm] Failed to update ${issueKey}: ${err.message}`);
-      if (channelId && messageTs) {
+      if (needsFixVersion(err) && channelId && messageTs) {
+        // Jira wants a Fix Version before this transition — offer to set one and retry.
         await replaceButtons(client, channelId, messageTs, originalText,
-          `❌ Failed to update *${issueLink(issueKey)}*: ${err.message}\n_I'll ask again on the next check if it still applies._`);
+          `⚠️ Jira needs a *Fix Version* on *${issueLink(issueKey)}* before it can move to *${transitionTo}*.`,
+          [fixVersionButtonBlock(context, channelId, messageTs, originalText)]);
+      } else {
+        if (channelId && messageTs) {
+          await replaceButtons(client, channelId, messageTs, originalText,
+            `❌ Failed to update *${issueLink(issueKey)}*: ${err.message}\n_I'll ask again on the next check if it still applies._`);
+        }
+        // Let the Jira poller re-ask about this issue instead of treating it as handled
+        await services.db?.deletePromptsForIssue(issueKey, slackUserId).catch(() => {});
       }
-      // Let the Jira poller re-ask about this issue instead of treating it as handled
+      await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue, error: err.message });
+    }
+  });
+
+  // ── Set Fix Version & retry ───────────────────────────────────────────────
+
+  app.action('jira_set_fixversion', async ({ ack, body, client, logger }) => {
+    await ack();
+    let context;
+    try { context = JSON.parse(body.actions[0].value); } catch {
+      logger.error('[dm] Could not parse Fix Version button context');
+      return;
+    }
+    const { issueKey, slackUserId } = context;
+    const projectKey = issueKey.split('-')[0];
+
+    try {
+      const jira = await resolveJira(slackUserId, client);
+      const versions = (await jira.getProjectVersions(projectKey))
+        .filter((v) => !v.released && !v.archived)
+        .sort((a, b) => (b.releaseDate || '').localeCompare(a.releaseDate || '') || b.name.localeCompare(a.name))
+        .slice(0, 100);
+
+      if (versions.length === 0) {
+        await client.chat.postMessage({ channel: slackUserId, text: `😕 No unreleased versions found in project *${projectKey}*. Please set the Fix Version in Jira: ${issueLink(issueKey)}` });
+        return;
+      }
+
+      await client.views.open({
+        trigger_id: body.trigger_id,
+        view: {
+          type: 'modal',
+          callback_id: 'jira_fixversion_modal',
+          private_metadata: JSON.stringify(context),
+          title: { type: 'plain_text', text: 'Set Fix Version' },
+          submit: { type: 'plain_text', text: 'Set & retry' },
+          close: { type: 'plain_text', text: 'Cancel' },
+          blocks: [
+            { type: 'section', text: { type: 'mrkdwn', text: `*${issueLink(issueKey)}* needs a Fix Version before moving to *${context.transitionTo || 'the next status'}*.` } },
+            {
+              type: 'input',
+              block_id: 'fv_block',
+              label: { type: 'plain_text', text: 'Fix Version' },
+              element: {
+                type: 'static_select',
+                action_id: 'fv',
+                placeholder: { type: 'plain_text', text: 'Choose a version' },
+                options: versions.map((v) => ({
+                  text: { type: 'plain_text', text: (v.releaseDate ? `${v.name}  (${v.releaseDate})` : v.name).slice(0, 75) },
+                  value: v.id,
+                })),
+              },
+            },
+          ],
+        },
+      });
+    } catch (err) {
+      logger.error(`[dm] Fix Version picker failed for ${issueKey}: ${err.message}`);
+      await client.chat.postMessage({ channel: slackUserId, text: `❌ Couldn't load versions for *${projectKey}*: ${err.message}` }).catch(() => {});
+    }
+  });
+
+  app.view('jira_fixversion_modal', async ({ ack, body, view, client, logger }) => {
+    await ack();
+    let context;
+    try { context = JSON.parse(view.private_metadata); } catch {
+      logger.error('[dm] Could not parse Fix Version modal metadata');
+      return;
+    }
+    const { issueKey, transitionTo, jiraFieldId, jiraFieldValue, jiraFieldType, jiraFieldName,
+            slackUserId, dmChannelId, messageTs, originalText = '' } = context;
+    const selected = view.state.values.fv_block?.fv?.selected_option;
+    if (!selected) return;
+
+    if (dmChannelId && messageTs) {
+      await replaceButtons(client, dmChannelId, messageTs, originalText, '_Setting Fix Version and retrying…_');
+    }
+
+    const fieldName = transitionTo ? 'status' : jiraFieldName;
+    const fieldValue = transitionTo || jiraFieldValue;
+    try {
+      const { oauthService } = services;
+      const usingOAuth = oauthService?.hasToken(slackUserId) ?? false;
+      const jira = await resolveJira(slackUserId, client);
+      await jira.updateIssueField(issueKey, 'fixVersions', [{ id: selected.value }], 'raw');
+      if (transitionTo) {
+        await jira.transitionIssue(issueKey, transitionTo);
+      } else {
+        await jira.updateIssueField(issueKey, jiraFieldId, jiraFieldValue, jiraFieldType || 'select');
+      }
+      const versionLabel = selected.text.text.split('  (')[0];
+      logger.info(`[dm] Set Fix Version "${versionLabel}" and applied ${fieldName}=${fieldValue} on ${issueKey} ✓`);
+      if (dmChannelId && messageTs) {
+        await replaceButtons(client, dmChannelId, messageTs, originalText,
+          transitionTo
+            ? `✅ Done — Fix Version set to *${versionLabel}*, *${issueLink(issueKey)}* moved to *${transitionTo}*`
+            : `✅ Done — Fix Version set to *${versionLabel}*, *${issueLink(issueKey)}* updated: *${jiraFieldName}* = *${jiraFieldValue}*`);
+      }
+      await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue: `${fieldValue} (fixVersion: ${versionLabel})`, usingOAuth });
+    } catch (err) {
+      logger.error(`[dm] Fix Version retry failed for ${issueKey}: ${err.message}`);
+      if (dmChannelId && messageTs) {
+        await replaceButtons(client, dmChannelId, messageTs, originalText,
+          `❌ Still failed on *${issueLink(issueKey)}*: ${err.message}\n_I'll ask again on the next check if it still applies._`);
+      }
       await services.db?.deletePromptsForIssue(issueKey, slackUserId).catch(() => {});
       await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue, error: err.message });
     }
@@ -265,11 +395,18 @@ function registerDmHandler(app, jiraService, services) {
       await services.opsNotifier?.dmLlmDecision({ slackUserId, issueKey, userText, decision });
     } catch (err) {
       logger.error(`[dm] LLM-driven action failed for ${issueKey}: ${err.message}`);
-      if (dmChannelId && messageTs) {
+      if (needsFixVersion(err) && dmChannelId && messageTs) {
+        const target = decision.transitionTo || transitionTo;
         await replaceButtons(client, dmChannelId, messageTs, originalText,
-          `❌ Failed on *${issueLink(issueKey)}*: ${err.message}\n_I'll ask again on the next check if it still applies._`);
+          `⚠️ Jira needs a *Fix Version* on *${issueLink(issueKey)}* before it can move to *${target}*.`,
+          [fixVersionButtonBlock({ ...context, transitionTo: target }, dmChannelId, messageTs, originalText)]);
+      } else {
+        if (dmChannelId && messageTs) {
+          await replaceButtons(client, dmChannelId, messageTs, originalText,
+            `❌ Failed on *${issueLink(issueKey)}*: ${err.message}\n_I'll ask again on the next check if it still applies._`);
+        }
+        await services.db?.deletePromptsForIssue(issueKey, slackUserId).catch(() => {});
       }
-      await services.db?.deletePromptsForIssue(issueKey, slackUserId).catch(() => {});
     }
   });
 }

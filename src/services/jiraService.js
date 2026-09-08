@@ -202,6 +202,17 @@ class JiraService {
   }
 
   /**
+   * List a project's versions (for Fix Version pickers).
+   * @param {string} projectKey e.g. 'SNS'
+   * @returns {Promise<Array<{ id: string, name: string, released: boolean, archived: boolean, releaseDate?: string }>>}
+   */
+  async getProjectVersions(projectKey) {
+    if (!/^[A-Z][A-Z0-9_]+$/.test(projectKey)) throw new Error(`Invalid project key: "${projectKey}"`);
+    const response = await this.client.get(`/rest/api/3/project/${projectKey}/versions`);
+    return response.data ?? [];
+  }
+
+  /**
    * List available workflow transitions for an issue.
    * @param {string} issueKey
    * @returns {Promise<Array<{ id: string, name: string, to: { name: string } }>>}
