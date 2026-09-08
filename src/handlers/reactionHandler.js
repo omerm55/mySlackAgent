@@ -3,6 +3,7 @@
 const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 
 const THUMBS_UP_EMOJIS = new Set(['+1', 'thumbsup', 'thumbs_up']);
+const isThumbsUp = (r) => THUMBS_UP_EMOJIS.has(r) || THUMBS_UP_EMOJIS.has(r.split('::')[0]);
 
 /**
  * @param {import('@slack/bolt').App} app
@@ -34,7 +35,7 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
 
   app.event('reaction_added', async ({ event, client, logger }) => {
     try {
-      if (!THUMBS_UP_EMOJIS.has(event.reaction)) return;
+      if (!isThumbsUp(event.reaction)) return;
       if (event.item.type !== 'message') return;
       logger.info(`${tag} 👍 received from ${event.user} in channel ${event.item.channel} (watching: ${watchChannelId})`);
       if (event.item.channel !== watchChannelId) return;
