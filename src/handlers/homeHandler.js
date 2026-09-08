@@ -18,7 +18,7 @@ function registerHomeHandler(app, jiraService, services) {
     if (event.tab !== 'home') return;
 
     const userId = event.user;
-    const { oauthService, auditLog } = services;
+    const { oauthService, auditLog, integrations = [] } = services;
 
     try {
       // OAuth connection status
@@ -53,7 +53,7 @@ function registerHomeHandler(app, jiraService, services) {
             type: 'mrkdwn',
             text: hasOAuth
               ? '✅  *Jira account connected*\nYour Jira changes will appear as you, not the bot.'
-              : '🔌  *Jira account not connected*\nConnect your Jira account so updates appear under your name instead of the bot account.',
+              : '🔌  *Jira account not connected*\nConnect your Jira account so updates appear under your name instead of the bot account.\n_Note: connection resets if the bot restarts — just reconnect if this appears unexpectedly._',
           },
           ...((!hasOAuth && authUrl) ? {
             accessory: {
@@ -72,13 +72,23 @@ function registerHomeHandler(app, jiraService, services) {
           type: 'section',
           text: { type: 'mrkdwn', text: '*How it works*' },
         },
+        ...(integrations.length > 0 ? [{
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: integrations.map((i) => {
+              const triggers = [];
+              if (i.triggers?.includes('reaction')) triggers.push('👍 reaction');
+              if (i.triggers?.includes('reply')) triggers.push('💬 thread reply');
+              return `*${i.name}* — <#${i.slackChannelId}>\n_Triggers: ${triggers.join(', ')} → sets *${i.jiraFieldName || i.jiraFieldId}* = *${i.jiraFieldValue}*_`;
+            }).join('\n\n'),
+          },
+        }] : []),
         {
           type: 'section',
           fields: [
-            { type: 'mrkdwn', text: '👍  *React with thumbs-up or ✅*\nUpdates the configured Jira field on the linked issue.' },
-            { type: 'mrkdwn', text: '💬  *Reply in a Jira-linked thread*\nSame effect as a reaction — triggers the field update.' },
-            { type: 'mrkdwn', text: '📨  *Respond to bot DM questions*\nClick Yes/No or reply in free text — AI interprets your intent.' },
-            { type: 'mrkdwn', text: '🔐  *OAuth impersonation*\nAfter connecting Jira, all changes appear as you in the issue history.' },
+            { type: 'mrkdwn', text: '📨  *Bot-initiated DM questions*\nClick Yes/No or reply in free text — AI interprets your intent and updates Jira accordingly.' },
+            { type: 'mrkdwn', text: '🔐  *OAuth impersonation*\nAfter connecting Jira above, all changes appear as you in the issue history — not the bot account.' },
           ],
         },
         { type: 'divider' },

@@ -83,6 +83,7 @@ let opsNotifier;
 
 const services = {
   dedupCache, rateLimiter, auditLog, userCache, oauthService, pendingQuestions, llmService,
+  integrations,
   get alerting() { return alerting; },
   get opsNotifier() { return opsNotifier; },
 };
