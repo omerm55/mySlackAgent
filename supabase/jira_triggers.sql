@@ -16,9 +16,16 @@ create table if not exists public.jira_triggers (
   jira_field_name   text null,
   jira_field_value  text null,
   jira_field_type   text null default 'select',
+  poll_interval_min integer not null default 2,               -- how often to evaluate this trigger
+  last_polled_at    timestamptz null,                         -- set by the poller after each evaluation
   active            boolean not null default true,
   created_at        timestamptz not null default now()
 );
+
+-- Migration for tables created before poll_interval_min existed:
+alter table public.jira_triggers
+  add column if not exists poll_interval_min integer not null default 2,
+  add column if not exists last_polled_at timestamptz null;
 
 create index if not exists jira_triggers_active_idx
   on public.jira_triggers (active, created_at);

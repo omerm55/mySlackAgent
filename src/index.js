@@ -148,7 +148,8 @@ registerJiraTriggerHandler(app, services);
 
   // Jira triggers: poll JQL conditions and DM the relevant person
   if (supabaseService) {
-    const intervalSec = parseInt(process.env.JIRA_POLL_INTERVAL_SEC || '120', 10);
+    // Tick cadence — the floor for per-trigger poll_interval_min (default 60s)
+    const intervalSec = parseInt(process.env.JIRA_POLL_INTERVAL_SEC || '60', 10);
     jiraPoller = new JiraPoller({
       jiraService, db: supabaseService, slackClient: app.client, opsNotifier, logger,
       intervalMs: intervalSec * 1000,

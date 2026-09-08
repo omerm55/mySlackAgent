@@ -24,7 +24,7 @@ class JiraPoller {
    * @param {import('pino').Logger} deps.logger
    * @param {number} [deps.intervalMs]
    */
-  constructor({ jiraService, db, slackClient, opsNotifier, logger, intervalMs = 120_000 }) {
+  constructor({ jiraService, db, slackClient, opsNotifier, logger, intervalMs = 60_000 }) {
     this.jira = jiraService;
     this.db = db;
     this.slack = slackClient;
@@ -41,8 +41,8 @@ class JiraPoller {
       this.logger.warn('[jiraPoller] Supabase not configured — Jira triggers disabled');
       return;
     }
-    this.logger.info(`[jiraPoller] Started, polling every ${Math.round(this.intervalMs / 1000)}s`);
-    // First run shortly after boot, then on the interval
+    this.logger.info(`[jiraPoller] Started, ticking every ${Math.round(this.intervalMs / 1000)}s; each trigger runs on its own poll_interval_min`);
+    // First tick shortly after boot, then on the interval
     setTimeout(() => this.runOnce(), 5_000);
     this._timer = setInterval(() => this.runOnce(), this.intervalMs);
   }
@@ -51,16 +51,28 @@ class JiraPoller {
     if (this._timer) clearInterval(this._timer);
   }
 
-  async runOnce() {
+  /**
+   * Evaluate all triggers that are due. Pass { force: true } to ignore
+   * poll_interval_min, or { onlyId } to run a single trigger (e.g. right
+   * after it was created or edited).
+   */
+  async runOnce({ force = false, onlyId = null } = {}) {
     if (this._running) return; // skip overlapping runs
     this._running = true;
     try {
-      const triggers = await this.db.getActiveJiraTriggers();
+      let triggers = await this.db.getActiveJiraTriggers();
+      if (onlyId) triggers = triggers.filter((t) => t.id === onlyId);
+      const now = Date.now();
       for (const trigger of triggers) {
+        if (!force && !isDue(trigger, now)) continue;
         try {
           await this._evaluateTrigger(trigger);
         } catch (err) {
           this.logger.error(`[jiraPoller] Trigger "${trigger.name}" failed: ${err.message}`);
+        } finally {
+          // Record the evaluation even on failure so a broken JQL doesn't hammer Jira every tick
+          await this.db.updateJiraTrigger(trigger.id, { last_polled_at: new Date().toISOString() })
+            .catch((err) => this.logger.warn(`[jiraPoller] Could not stamp last_polled_at: ${err.message}`));
         }
       }
     } catch (err) {
@@ -152,6 +164,13 @@ class JiraPoller {
     this.emailToSlack.set(key, id);
     return id;
   }
+}
+
+/** A trigger is due when it has never been polled or its interval has elapsed. */
+function isDue(trigger, nowMs) {
+  if (!trigger.last_polled_at) return true;
+  const intervalMs = Math.max(1, Number(trigger.poll_interval_min) || 2) * 60_000;
+  return nowMs - new Date(trigger.last_polled_at).getTime() >= intervalMs - 5_000; // 5s slack for tick jitter
 }
 
 /** Replace {key}, {summary}, {status}, {reporter}, {assignee} in a question template. */

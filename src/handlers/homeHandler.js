@@ -127,11 +127,17 @@ async function buildHomeBlocks(userId, services, logger) {
         ? `move to *${t.transition_to}*`
         : `set *${t.jira_field_name || t.jira_field_id}* = *${t.jira_field_value}*`;
       const scopeLabel = t.scope === 'personal' ? ' _(personal)_' : '';
+      const every = (() => {
+        const m = Number(t.poll_interval_min) || 2;
+        if (m >= 1440) return 'daily';
+        if (m % 60 === 0) return m === 60 ? 'hourly' : `every ${m / 60}h`;
+        return `every ${m}m`;
+      })();
       const block = {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*${t.name}*${scopeLabel}\n\`${t.jql}\`\n_DMs the ${t.notify} → on Yes: ${action}_`,
+          text: `*${t.name}*${scopeLabel} · ⏱ ${every}\n\`${t.jql}\`\n_DMs the ${t.notify} → on Yes: ${action}_`,
         },
       };
       if (canManage(t.created_by, userId)) block.accessory = manageMenu('jira_trigger_menu', t.id);

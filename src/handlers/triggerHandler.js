@@ -35,6 +35,29 @@ function checkboxes(options, initialValues = []) {
   return el;
 }
 
+const POLL_INTERVALS = [
+  [2, 'Every 2 minutes'], [5, 'Every 5 minutes'], [15, 'Every 15 minutes'], [30, 'Every 30 minutes'],
+  [60, 'Every hour'], [240, 'Every 4 hours'], [1440, 'Once a day'],
+];
+
+function pollIntervalSelect(initialMin) {
+  const list = POLL_INTERVALS.some(([m]) => m === initialMin) || !initialMin
+    ? POLL_INTERVALS
+    : [...POLL_INTERVALS, [initialMin, `Every ${initialMin} minutes`]].sort((a, b) => a[0] - b[0]);
+  const opts = list.map(([m, label]) => ({ text: plain(label), value: String(m) }));
+  const el = { type: 'static_select', options: opts, placeholder: plain('How often to check') };
+  const init = opts.find((o) => o.value === String(initialMin ?? 2));
+  if (init) el.initial_option = init;
+  return el;
+}
+
+function describeInterval(min) {
+  const m = Number(min) || 2;
+  const known = POLL_INTERVALS.find(([v]) => v === m);
+  if (known) return known[1].toLowerCase();
+  return m % 60 === 0 ? `every ${m / 60} hours` : `every ${m} minutes`;
+}
+
 function parseMenu(body) {
   const value = body.actions?.[0]?.selected_option?.value || '';
   const [op, id] = value.split(':');
@@ -232,6 +255,9 @@ function buildJiraTriggerModal(admin, existing = null) {
     input('jt_jql', 'JQL condition', textInput('issuetype = Epic AND status = Acceptance', { multiline: true, initial: existing?.jql }), {
       hint: plain('Checked every few minutes. Each matching issue is asked about once.'),
     }),
+    input('jt_interval', 'Check Jira', pollIntervalSelect(existing?.poll_interval_min), {
+      hint: plain('Pick a slower cadence for conditions that change rarely, to keep Jira API usage low.'),
+    }),
     input('jt_question', 'Question to ask', textInput('All children of {key} ({summary}) are done. Approve and move to Done?', { multiline: true, initial: existing?.question }), {
       hint: plain('Placeholders: {key} {summary} {status} {reporter} {assignee}'),
     }),
@@ -318,6 +344,7 @@ function registerJiraTriggerHandler(app, services) {
     const jql = v.jt_jql.value.value?.trim();
     const question = v.jt_question.value.value?.trim();
     const notify = v.jt_notify.value.selected_option?.value || 'reporter';
+    const pollIntervalMin = parseInt(v.jt_interval?.value?.selected_option?.value || '2', 10) || 2;
     const actionType = v.jt_action.value.selected_option?.value || 'transition';
     const transitionTo = v.jt_transition?.value?.value?.trim();
     const fieldId = v.jt_field_id?.value?.value?.trim();
@@ -354,6 +381,7 @@ function registerJiraTriggerHandler(app, services) {
 
     const fields = {
       name, jql, question, notify, scope,
+      poll_interval_min: pollIntervalMin,
       action_type: actionType,
       transition_to: actionType === 'transition' ? transitionTo : null,
       jira_field_id: actionType === 'field' ? fieldId : null,
@@ -364,12 +392,14 @@ function registerJiraTriggerHandler(app, services) {
 
     try {
       if (!services.db) throw new Error('Supabase is not configured');
+      let savedId = editId;
       if (editId) {
         await services.db.updateJiraTrigger(editId, fields);
         logger.info(`[jiraTrigger] Updated "${name}" (${editId}) by ${userId}`);
       } else {
-        await services.db.insertJiraTrigger({ ...fields, created_by: userId, active: true });
-        logger.info(`[jiraTrigger] Created "${name}" by ${userId} (scope: ${scope})`);
+        const row = await services.db.insertJiraTrigger({ ...fields, created_by: userId, active: true });
+        savedId = row?.id ?? null;
+        logger.info(`[jiraTrigger] Created "${name}" by ${userId} (scope: ${scope}, every ${pollIntervalMin}m)`);
       }
 
       await publishHome(client, userId, services, logger);
@@ -379,9 +409,10 @@ function registerJiraTriggerHandler(app, services) {
         : `set *${fieldName || fieldId}* = *${fieldValue}*`;
       await client.chat.postMessage({
         channel: userId,
-        text: `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. Every few minutes I'll check \`${jql}\` and DM the *${notify}* of any new match. On *Yes* I'll ${actionText}.`,
+        text: `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${notify}* of any new match. On *Yes* I'll ${actionText}.`,
       });
-      services.jiraPoller?.runOnce().catch(() => {});
+      // Evaluate this trigger right away regardless of its cadence
+      services.jiraPoller?.runOnce({ force: true, onlyId: savedId }).catch(() => {});
     } catch (err) {
       logger.error(`[jiraTrigger] Failed to save: ${errDetail(err)}`);
       await client.chat.postMessage({ channel: userId, text: `❌ Failed to save Jira trigger: ${errDetail(err)}` });
