@@ -81,3 +81,8 @@ src/
     jiraLinkParser.js       # Extracts Jira issue keys from text
 .env.example                # Environment variable template
 ```
+
+## Documentation
+
+- **Full project specification** (architecture, data model, flows, LLM prompts, external configuration, operations runbook, productization plan): [`docs/PROJECT_SPEC.md`](docs/PROJECT_SPEC.md)
+- Earlier architecture notes: [`docs/architecture.md`](docs/architecture.md)
