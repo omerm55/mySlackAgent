@@ -146,6 +146,15 @@ class SupabaseService {
     await this.client.delete('/jira_prompts', { params, headers: { Prefer: 'return=minimal' } });
   }
 
+  /** Forget every prompt for a trigger so its next run re-asks all current matches. */
+  async deletePromptsForTrigger(triggerId) {
+    const res = await this.client.delete('/jira_prompts', {
+      params: { trigger_id: `eq.${triggerId}` },
+      headers: { Prefer: 'return=representation' },
+    });
+    return Array.isArray(res.data) ? res.data.length : 0;
+  }
+
   async recordPrompt(triggerId, issueKey, slackUserId) {
     await this.client.post('/jira_prompts', {
       trigger_id: triggerId,

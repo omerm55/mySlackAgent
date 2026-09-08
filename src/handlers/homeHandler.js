@@ -7,12 +7,13 @@ const { canManage } = require('../utils/admins');
  * @param {string} actionId  'trigger_menu' | 'jira_trigger_menu'
  * @param {string} id
  */
-function manageMenu(actionId, id) {
+function manageMenu(actionId, id, extraOptions = []) {
   return {
     type: 'overflow',
     action_id: actionId,
     options: [
       { text: { type: 'plain_text', text: '✏️ Edit', emoji: true }, value: `edit:${id}` },
+      ...extraOptions.map(([value, label]) => ({ text: { type: 'plain_text', text: label, emoji: true }, value: `${value}:${id}` })),
       { text: { type: 'plain_text', text: '🗑 Delete', emoji: true }, value: `delete:${id}` },
     ],
   };
@@ -140,7 +141,9 @@ async function buildHomeBlocks(userId, services, logger) {
           text: `*${t.name}*${scopeLabel} · ⏱ ${every}\n\`${t.jql}\`\n_DMs the ${t.notify} → on Yes: ${action}_`,
         },
       };
-      if (canManage(t.created_by, userId)) block.accessory = manageMenu('jira_trigger_menu', t.id);
+      if (canManage(t.created_by, userId)) {
+        block.accessory = manageMenu('jira_trigger_menu', t.id, [['reask', '🔁 Re-ask open matches']]);
+      }
       return block;
     }) : [{
       type: 'section',

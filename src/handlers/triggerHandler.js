@@ -320,6 +320,22 @@ function registerJiraTriggerHandler(app, services) {
       return;
     }
 
+    if (op === 'reask') {
+      try {
+        const cleared = await services.db.deletePromptsForTrigger(id);
+        logger.info(`[jiraTrigger] Re-ask "${existing.name}" (${id}) by ${userId} — cleared ${cleared} prompt(s)`);
+        await client.chat.postMessage({
+          channel: userId,
+          text: `🔁 Re-asking for *${existing.name}*: cleared ${cleared} previous prompt(s). Everyone whose issue still matches \`${existing.jql}\` will get a fresh DM now (up to 10 per run, the rest on following runs).`,
+        });
+        services.jiraPoller?.runOnce({ force: true, onlyId: id }).catch(() => {});
+      } catch (err) {
+        logger.error(`[jiraTrigger] Re-ask failed for ${id}: ${errDetail(err)}`);
+        await client.chat.postMessage({ channel: userId, text: `❌ Re-ask failed: ${errDetail(err)}` });
+      }
+      return;
+    }
+
     if (op === 'delete') {
       try {
         await services.db.deactivateJiraTrigger(id);
