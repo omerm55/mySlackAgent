@@ -7,6 +7,7 @@ const JiraService = require('./services/jiraService');
 const AttributionService = require('./services/attributionService');
 const { registerReplyHandler } = require('./handlers/replyHandler');
 const { registerReactionHandler } = require('./handlers/reactionHandler');
+const { registerTriggerHandler } = require('./handlers/triggerHandler');
 const { loadIntegrations } = require('./loadIntegrations');
 const { loadSettings } = require('./loadSettings');
 const DedupCache = require('./utils/dedupCache');
@@ -16,6 +17,7 @@ const Alerting = require('./utils/alerting');
 const UserCache = require('./utils/userCache');
 const OAuthService = require('./services/oauthService');
 const SupabaseService = require('./services/supabaseService');
+const IntegrationCache = require('./services/integrationCache');
 const LlmService = require('./services/llmService');
 const PendingQuestions = require('./services/pendingQuestions');
 const { startCallbackServer } = require('./server/callbackServer');
@@ -41,7 +43,7 @@ if (missing.length > 0) {
 }
 
 const settings = loadSettings();
-const integrations = loadIntegrations();
+const staticIntegrations = loadIntegrations();
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -77,8 +79,25 @@ const oauthService = process.env.JIRA_OAUTH_CLIENT_ID
   })
   : null;
 
-const pendingQuestions = new PendingQuestions();
+// Normalize static integrations to the same shape as DB rows
+const normalizedStatic = staticIntegrations.map((i) => ({
+  id: null,
+  name: i.name,
+  slackChannelId: i.slackChannelId,
+  triggers: i.triggers || [],
+  jiraFieldId: i.jiraFieldId,
+  jiraFieldName: i.jiraFieldName || i.jiraFieldId,
+  jiraFieldValue: i.jiraFieldValue,
+  jiraFieldType: i.jiraFieldType || 'select',
+  allowedSlackUserIds: i.allowedSlackUserIds || [],
+  rateLimitPerHour: i.rateLimitPerHour ?? settings.rateLimiting.defaultPerHour,
+  scope: 'global',
+  createdBy: null,
+}));
 
+const integrationCache = new IntegrationCache(supabaseService, normalizedStatic);
+
+const pendingQuestions = new PendingQuestions();
 const llmService = LlmService.fromEnv();
 
 // Alerting and opsNotifier are initialised after app.start() so app.client is available.
@@ -87,33 +106,18 @@ let opsNotifier;
 
 const services = {
   dedupCache, rateLimiter, auditLog, userCache, oauthService, pendingQuestions, llmService,
-  integrations,
+  integrationCache,
+  db: supabaseService,
   get alerting() { return alerting; },
   get opsNotifier() { return opsNotifier; },
 };
 
-for (const integration of integrations) {
-  const config = {
-    name: integration.name,
-    watchChannelId: integration.slackChannelId,
-    allowedSlackUserIds: integration.allowedSlackUserIds || [],
-    rateLimitPerHour: integration.rateLimitPerHour ?? settings.rateLimiting.defaultPerHour,
-    jiraFieldId: integration.jiraFieldId,
-    jiraFieldName: integration.jiraFieldName || integration.jiraFieldId,
-    jiraFieldValue: integration.jiraFieldValue,
-    jiraFieldType: integration.jiraFieldType || 'select',
-  };
-
-  if (integration.triggers.includes('reply')) {
-    registerReplyHandler(app, jiraService, attributionService, config, services);
-  }
-  if (integration.triggers.includes('reaction')) {
-    registerReactionHandler(app, jiraService, attributionService, config, services);
-  }
-}
-
+// Single generic handlers — each queries integrationCache at event time
+registerReactionHandler(app, jiraService, attributionService, services);
+registerReplyHandler(app, jiraService, attributionService, services);
 registerDmHandler(app, jiraService, services);
 registerHomeHandler(app, jiraService, services);
+registerTriggerHandler(app, services);
 
 (async () => {
   await app.start();
@@ -143,19 +147,11 @@ registerHomeHandler(app, jiraService, services);
   }
 
   logger.info({ opsChannel: settings.opsChannelId }, 'Slack-Jira integration bot started (Socket Mode)');
-  for (const i of integrations) {
+  const allIntegrations = await integrationCache.getAll();
+  for (const i of allIntegrations) {
     logger.info(
-      {
-        integration: i.name,
-        owner: i.owner,
-        channel: i.slackChannelId,
-        allowlist: i.allowedSlackUserIds?.length ? i.allowedSlackUserIds : 'open',
-        rateLimit: `${i.rateLimitPerHour ?? settings.rateLimiting.defaultPerHour}/hour`,
-        field: i.jiraFieldId,
-        value: i.jiraFieldValue,
-        triggers: i.triggers,
-      },
-      'Integration registered'
+      { integration: i.name, channel: i.slackChannelId, scope: i.scope, triggers: i.triggers },
+      'Integration active',
     );
   }
 })();

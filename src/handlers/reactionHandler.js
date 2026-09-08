@@ -5,62 +5,21 @@ const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 const THUMBS_UP_EMOJIS = new Set(['+1', 'thumbsup', 'thumbs_up', 'white_check_mark']);
 const isThumbsUp = (r) => THUMBS_UP_EMOJIS.has(r) || THUMBS_UP_EMOJIS.has(r.split('::')[0]);
 
-/**
- * @param {import('@slack/bolt').App} app
- * @param {import('../services/jiraService')} jiraService
- * @param {import('../services/attributionService')} attributionService
- * @param {object} config
- * @param {string}   config.name
- * @param {string}   config.watchChannelId
- * @param {string[]} config.allowedSlackUserIds  Empty = all channel members allowed
- * @param {number}   config.rateLimitPerHour
- * @param {string}   config.jiraFieldId
- * @param {string}   config.jiraFieldName
- * @param {string}   config.jiraFieldValue
- * @param {string}   config.jiraFieldType
- * @param {object} services
- * @param {import('../utils/dedupCache')}   services.dedupCache
- * @param {import('../utils/rateLimiter')}  services.rateLimiter
- * @param {import('../utils/auditLog')}     services.auditLog
- * @param {import('../utils/alerting')}     services.alerting
- * @param {import('../utils/userCache')}    services.userCache
- */
-function registerReactionHandler(app, jiraService, attributionService, config, services) {
-  const {
-    name, watchChannelId, allowedSlackUserIds, rateLimitPerHour,
-    jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType = 'select',
-  } = config;
-  const { dedupCache, rateLimiter, auditLog, userCache } = services;
-  const tag = `[${name}/reaction]`;
+function registerReactionHandler(app, jiraService, attributionService, services) {
+  const { dedupCache, rateLimiter, auditLog, userCache, integrationCache } = services;
 
   app.event('reaction_added', async ({ event, client, logger }) => {
     try {
       if (!isThumbsUp(event.reaction)) return;
       if (event.item.type !== 'message') return;
-      logger.info(`${tag} 👍 received from ${event.user} in channel ${event.item.channel} (watching: ${watchChannelId})`);
-      if (event.item.channel !== watchChannelId) return;
 
-      // Authorization: check allowlist if one is configured
-      if (allowedSlackUserIds.length > 0 && !allowedSlackUserIds.includes(event.user)) {
-        logger.info(`${tag} User ${event.user} is not in the allowlist — ignoring`);
-        await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: `not in allowlist for *${name}*`, integration: name });
-        return;
-      }
+      const all = await integrationCache.getAll();
+      const matching = all.filter(
+        (i) => i.triggers.includes('reaction') && i.slackChannelId === event.item.channel,
+      );
+      if (matching.length === 0) return;
 
-      // Rate limiting
-      if (!rateLimiter.isAllowed(name, rateLimitPerHour)) {
-        logger.warn(`${tag} Rate limit of ${rateLimitPerHour}/hour exceeded — event dropped`);
-        await services.alerting?.recordRateLimit(name, rateLimitPerHour, logger);
-        await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: `rate limit (${rateLimitPerHour}/hour) exceeded`, integration: name });
-        return;
-      }
-
-      // Deduplication
-      const dedupKey = `reaction:${watchChannelId}:${event.item.ts}:${event.user}`;
-      if (dedupCache.isDuplicate(dedupKey)) {
-        logger.info(`${tag} Duplicate event on ${event.item.ts} — skipping`);
-        return;
-      }
+      logger.info(`[reaction] 👍 from ${event.user} in ${event.item.channel} — ${matching.length} integration(s) match`);
 
       const result = await client.conversations.history({
         channel: event.item.channel,
@@ -68,22 +27,20 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
         limit: 1,
         inclusive: true,
       });
-
       const message = result.messages?.[0];
       if (!message) return;
 
       const issueKeys = extractJiraIssueKeys(message.text);
       if (issueKeys.length === 0) {
-        await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: 'no Jira issue keys found in message text', integration: name });
+        for (const i of matching) {
+          await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: 'no Jira issue keys in message', integration: i.name });
+        }
         return;
       }
 
       const actorName = await userCache.getName(client, event.user);
-      logger.info(`${tag} 👍 by ${actorName} on ${event.item.ts} → updating issue(s): ${issueKeys.join(', ')}`);
 
-      // Resolve per-user Jira client via OAuth if the user has authorized.
-      // On first trigger without a token, DM the user an auth link and fall
-      // back to the service account for this request.
+      // Resolve OAuth once per event
       let effectiveJira = jiraService;
       let usingOAuth = false;
       const { oauthService } = services;
@@ -102,12 +59,46 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
               channel: dm.channel.id,
               text: `👋 To make your Jira changes appear as you (not the bot), <${authUrl}|connect your Jira account>. This change was made by the bot account.`,
             }))
-            .catch((err) => logger.warn(`${tag} Failed to send auth DM to ${event.user}: ${err.message}`));
+            .catch((err) => logger.warn(`[reaction] Failed to send auth DM to ${event.user}: ${err.message}`));
         }
       }
 
-      await Promise.all(
-        issueKeys.map(async (key) => {
+      for (const integration of matching) {
+        const {
+          name, allowedSlackUserIds, rateLimitPerHour,
+          jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType = 'select',
+          scope, createdBy,
+        } = integration;
+        const tag = `[${name}/reaction]`;
+
+        // Personal scope: only fires for the creator
+        if (scope === 'personal' && event.user !== createdBy) continue;
+
+        // Allowlist
+        if (allowedSlackUserIds.length > 0 && !allowedSlackUserIds.includes(event.user)) {
+          logger.info(`${tag} User ${event.user} not in allowlist — ignoring`);
+          await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: `not in allowlist for *${name}*`, integration: name });
+          continue;
+        }
+
+        // Rate limiting
+        if (!rateLimiter.isAllowed(name, rateLimitPerHour)) {
+          logger.warn(`${tag} Rate limit ${rateLimitPerHour}/hour exceeded`);
+          await services.alerting?.recordRateLimit(name, rateLimitPerHour, logger);
+          await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: `rate limit (${rateLimitPerHour}/hour) exceeded`, integration: name });
+          continue;
+        }
+
+        // Deduplication (per-integration)
+        const dedupKey = `reaction:${name}:${event.item.channel}:${event.item.ts}:${event.user}`;
+        if (dedupCache.isDuplicate(dedupKey)) {
+          logger.info(`${tag} Duplicate — skipping`);
+          continue;
+        }
+
+        logger.info(`${tag} 👍 by ${actorName} → updating: ${issueKeys.join(', ')}`);
+
+        await Promise.all(issueKeys.map(async (key) => {
           let success = true;
           let errorMsg;
           try {
@@ -120,7 +111,7 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
             });
             if (effectiveJira === jiraService) {
               await attributionService.postAttributionComment(
-                client, event.user, key, jiraFieldId, jiraFieldName, jiraFieldValue, '👍 reaction', name, actorName
+                client, event.user, key, jiraFieldId, jiraFieldName, jiraFieldValue, '👍 reaction', name, actorName,
               );
             }
           } catch (err) {
@@ -130,26 +121,19 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
             await services.alerting?.recordError(name, err.message, logger);
           }
           auditLog.addEntry({
-            ts: Date.now(),
-            integrationName: name,
-            trigger: '👍 reaction',
-            slackUserId: event.user,
-            slackUserName: actorName,
-            issueKey: key,
-            fieldName: jiraFieldName,
-            fieldValue: jiraFieldValue,
-            success,
-            error: errorMsg,
+            ts: Date.now(), integrationName: name, trigger: '👍 reaction',
+            slackUserId: event.user, slackUserName: actorName, issueKey: key,
+            fieldName: jiraFieldName, fieldValue: jiraFieldValue, success, error: errorMsg,
           });
           await services.opsNotifier?.jiraTriggered({
             trigger: '👍 reaction', actorName, slackUserId: event.user,
             issueKey: key, fieldName: jiraFieldName, fieldValue: jiraFieldValue,
             success, error: errorMsg, usingOAuth,
           });
-        })
-      );
+        }));
+      }
     } catch (err) {
-      logger.error(`${tag} Unexpected error: ${err.message}`);
+      logger.error(`[reaction] Unexpected error: ${err.message}`);
     }
   });
 }

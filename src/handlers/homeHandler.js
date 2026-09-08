@@ -1,31 +1,24 @@
 'use strict';
 
-/**
- * Publishes the App Home view when a user opens it.
- *
- * Sections:
- *  1. Welcome + OAuth connection status
- *  2. How it works (what the bot does)
- *  3. Your recent activity (last 5 audit log entries for this user)
- *
- * @param {import('@slack/bolt').App} app
- * @param {import('../services/jiraService')} jiraService
- * @param {object} services
- */
 function registerHomeHandler(app, jiraService, services) {
 
   app.event('app_home_opened', async ({ event, client, logger }) => {
     if (event.tab !== 'home') return;
 
     const userId = event.user;
-    const { oauthService, auditLog, integrations = [] } = services;
+    const { oauthService, auditLog, integrationCache } = services;
 
     try {
-      // OAuth connection status
       const hasOAuth = oauthService?.hasToken(userId) ?? false;
       const authUrl = oauthService?.generateAuthUrl(userId);
 
-      // Last 5 audit entries for this user
+      const allIntegrations = integrationCache ? await integrationCache.getAll() : [];
+
+      // Split: global integrations visible to all, personal ones only to their creator
+      const visibleIntegrations = allIntegrations.filter(
+        (i) => i.scope !== 'personal' || i.createdBy === userId,
+      );
+
       const userEntries = (auditLog?.entries ?? [])
         .filter((e) => e.slackUserId === userId)
         .slice(-5)
@@ -53,7 +46,7 @@ function registerHomeHandler(app, jiraService, services) {
             type: 'mrkdwn',
             text: hasOAuth
               ? '✅  *Jira account connected*\nYour Jira changes will appear as you, not the bot.'
-              : '🔌  *Jira account not connected*\nConnect your Jira account so updates appear under your name instead of the bot account.\n_Note: connection resets if the bot restarts — just reconnect if this appears unexpectedly._',
+              : '🔌  *Jira account not connected*\nConnect your Jira account so updates appear under your name instead of the bot account.',
           },
           ...((!hasOAuth && authUrl) ? {
             accessory: {
@@ -67,23 +60,39 @@ function registerHomeHandler(app, jiraService, services) {
         },
         { type: 'divider' },
 
+        // ── Active triggers ──────────────────────────────────────
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: '*Active triggers*' },
+          accessory: {
+            type: 'button',
+            text: { type: 'plain_text', text: '➕ Create Trigger', emoji: true },
+            action_id: 'home_create_trigger',
+          },
+        },
+        ...(visibleIntegrations.length > 0 ? visibleIntegrations.map((i) => {
+          const triggerLabels = [];
+          if (i.triggers?.includes('reaction')) triggerLabels.push('👍 reaction');
+          if (i.triggers?.includes('reply')) triggerLabels.push('💬 thread reply');
+          const scopeLabel = i.scope === 'personal' ? ' _(personal)_' : '';
+          return {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*${i.name}*${scopeLabel} — <#${i.slackChannelId}>\n_Triggers: ${triggerLabels.join(', ')} → sets *${i.jiraFieldName || i.jiraFieldId}* = *${i.jiraFieldValue}*_`,
+            },
+          };
+        }) : [{
+          type: 'section',
+          text: { type: 'mrkdwn', text: '_No active triggers yet. Click *➕ Create Trigger* to set one up._' },
+        }]),
+        { type: 'divider' },
+
         // ── How it works ──────────────────────────────────────────
         {
           type: 'section',
           text: { type: 'mrkdwn', text: '*How it works*' },
         },
-        ...(integrations.length > 0 ? [{
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: integrations.map((i) => {
-              const triggers = [];
-              if (i.triggers?.includes('reaction')) triggers.push('👍 reaction');
-              if (i.triggers?.includes('reply')) triggers.push('💬 thread reply');
-              return `*${i.name}* — <#${i.slackChannelId}>\n_Triggers: ${triggers.join(', ')} → sets *${i.jiraFieldName || i.jiraFieldId}* = *${i.jiraFieldValue}*_`;
-            }).join('\n\n'),
-          },
-        }] : []),
         {
           type: 'section',
           fields: [
