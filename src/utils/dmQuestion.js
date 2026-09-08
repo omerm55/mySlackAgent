@@ -35,6 +35,27 @@ async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, o
   const headline = mentionsIssue(context.question, context.issueKey)
     ? context.question
     : `*${issueLink(context.issueKey)}*: ${context.question}`;
+  // First contact with someone who hasn't connected Jira: nudge them to connect
+  // right here, so the action is done as them rather than as the bot account.
+  const connectBlocks = context.authUrl ? [
+    {
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: '🔐 *Not connected to Jira yet.* Connect once (takes ~10 seconds) so this and future changes appear under your name. Until then, changes are made by the bot account.',
+      }],
+    },
+    {
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: '🔗 Connect Jira', emoji: true },
+        url: context.authUrl,
+        action_id: 'dm_connect_jira',
+      }],
+    },
+  ] : [];
+
   const result = await client.chat.postMessage({
     channel: dm.channel.id,
     text: headline,
@@ -67,6 +88,7 @@ async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, o
           },
         ],
       },
+      ...connectBlocks,
     ],
   });
 

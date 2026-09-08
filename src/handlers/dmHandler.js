@@ -208,6 +208,10 @@ function registerDmHandler(app, jiraService, services) {
     }
   }
 
+  // URL buttons still emit block_actions — ack them so Bolt doesn't log "no handler".
+  app.action('dm_connect_jira', async ({ ack }) => { await ack(); });
+  app.action('home_connect_jira', async ({ ack }) => { await ack(); });
+
   // ── Quick Yes ─────────────────────────────────────────────────────────────
 
   app.action('jira_confirm_yes', async ({ ack, body, client, logger }) => {

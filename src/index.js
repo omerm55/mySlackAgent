@@ -151,7 +151,7 @@ registerJiraTriggerHandler(app, services);
     // Tick cadence — the floor for per-trigger poll_interval_min (default 60s)
     const intervalSec = parseInt(process.env.JIRA_POLL_INTERVAL_SEC || '60', 10);
     jiraPoller = new JiraPoller({
-      jiraService, db: supabaseService, slackClient: app.client, opsNotifier, logger,
+      jiraService, db: supabaseService, slackClient: app.client, opsNotifier, oauthService, logger,
       intervalMs: intervalSec * 1000,
     });
     jiraPoller.start();

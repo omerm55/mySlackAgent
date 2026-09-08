@@ -3,7 +3,8 @@
 const { sendDmQuestion } = require('../utils/dmQuestion');
 const { issueLink, issueLinkLabelled } = require('../utils/jiraLink');
 
-const MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN = 10;
+// How many people one trigger may DM per run (env JIRA_MAX_PROMPTS_PER_RUN, default 10).
+const MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN = Math.max(1, parseInt(process.env.JIRA_MAX_PROMPTS_PER_RUN || '10', 10) || 10);
 
 /**
  * Polls Jira on an interval for each active "Jira trigger" stored in Supabase.
@@ -25,11 +26,12 @@ class JiraPoller {
    * @param {import('pino').Logger} deps.logger
    * @param {number} [deps.intervalMs]
    */
-  constructor({ jiraService, db, slackClient, opsNotifier, logger, intervalMs = 60_000 }) {
+  constructor({ jiraService, db, slackClient, opsNotifier, oauthService = null, logger, intervalMs = 60_000 }) {
     this.jira = jiraService;
     this.db = db;
     this.slack = slackClient;
     this.ops = opsNotifier;
+    this.oauth = oauthService;
     this.logger = logger;
     this.intervalMs = intervalMs;
     this.emailToSlack = new Map(); // email → slackUserId | null
@@ -146,9 +148,14 @@ class JiraPoller {
       }
 
       const question = renderTemplate(trigger.question, issue);
+      // Not connected yet? Put a Connect button right in the question DM.
+      const authUrl = this.oauth && !this.oauth.hasToken(slackUserId)
+        ? this.oauth.generateAuthUrl(slackUserId)
+        : null;
       const context = {
         issueKey: issue.key,
         question,
+        ...(authUrl ? { authUrl } : {}),
         ...(trigger.action_type === 'transition'
           ? { transitionTo: trigger.transition_to }
           : {
