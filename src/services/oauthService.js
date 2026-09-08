@@ -23,13 +23,36 @@ class OAuthService {
    * @param {string} opts.redirectUri    OAUTH_REDIRECT_URI (must match Atlassian dev console)
    * @param {string} opts.jiraBaseUrl    JIRA_BASE_URL — used to match the right cloud resource
    */
-  constructor({ clientId, clientSecret, redirectUri, jiraBaseUrl }) {
+  constructor({ clientId, clientSecret, redirectUri, jiraBaseUrl, supabaseService = null }) {
     this.clientId = clientId;
     this.clientSecret = clientSecret;
     this.redirectUri = redirectUri;
     this.jiraBaseUrl = jiraBaseUrl;
-    // slackUserId → { accessToken, refreshToken, expiresAt, cloudId }
+    this.db = supabaseService;
+    // In-memory cache — populated from Supabase at startup and on each write
     this.tokens = new Map();
+  }
+
+  /**
+   * Load all tokens from Supabase into the in-memory cache.
+   * Called once at startup so hasToken() works without a DB round-trip per event.
+   */
+  async loadFromDb() {
+    if (!this.db) return;
+    try {
+      const rows = await this.db.getAllTokens();
+      for (const row of rows) {
+        this.tokens.set(row.slack_user_id, {
+          accessToken: row.access_token,
+          refreshToken: row.refresh_token,
+          expiresAt: new Date(row.expires_at).getTime(),
+          cloudId: row.cloud_id,
+        });
+      }
+      logger.info(`[oauth] Loaded ${rows.length} token(s) from Supabase`);
+    } catch (err) {
+      logger.warn(`[oauth] Could not load tokens from Supabase: ${err.message}`);
+    }
   }
 
   /**
@@ -68,12 +91,18 @@ class OAuthService {
 
     const cloudId = await this._resolveCloudId(access_token);
 
-    this.tokens.set(slackUserId, {
+    const tokenData = {
       accessToken: access_token,
       refreshToken: refresh_token,
       expiresAt: Date.now() + expires_in * 1000,
       cloudId,
-    });
+    };
+    this.tokens.set(slackUserId, tokenData);
+    if (this.db) {
+      await this.db.upsertToken(slackUserId, tokenData).catch((err) =>
+        logger.warn(`[oauth] Failed to persist token to Supabase: ${err.message}`)
+      );
+    }
     logger.info(`[oauth] Token stored for Slack user ${slackUserId} (cloudId: ${cloudId})`);
   }
 
@@ -130,12 +159,18 @@ class OAuthService {
         refresh_token: token.refreshToken,
       });
       const { access_token, refresh_token, expires_in } = res.data;
-      this.tokens.set(slackUserId, {
+      const refreshed = {
         ...token,
         accessToken: access_token,
         refreshToken: refresh_token,
         expiresAt: Date.now() + expires_in * 1000,
-      });
+      };
+      this.tokens.set(slackUserId, refreshed);
+      if (this.db) {
+        await this.db.upsertToken(slackUserId, refreshed).catch((err) =>
+          logger.warn(`[oauth] Failed to persist refreshed token: ${err.message}`)
+        );
+      }
     } catch (err) {
       logger.error(`[oauth] Token refresh failed for ${slackUserId}: ${err.message}`);
       // Remove the stale token so the user gets re-prompted on next trigger

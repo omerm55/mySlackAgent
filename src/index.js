@@ -15,6 +15,7 @@ const AuditLog = require('./utils/auditLog');
 const Alerting = require('./utils/alerting');
 const UserCache = require('./utils/userCache');
 const OAuthService = require('./services/oauthService');
+const SupabaseService = require('./services/supabaseService');
 const LlmService = require('./services/llmService');
 const PendingQuestions = require('./services/pendingQuestions');
 const { startCallbackServer } = require('./server/callbackServer');
@@ -63,6 +64,8 @@ const rateLimiter = new RateLimiter();
 const auditLog = new AuditLog();
 const userCache = new UserCache();
 
+const supabaseService = SupabaseService.fromEnv();
+
 // OAuth impersonation — active only when JIRA_OAUTH_CLIENT_ID is set.
 const oauthService = process.env.JIRA_OAUTH_CLIENT_ID
   ? new OAuthService({
@@ -70,6 +73,7 @@ const oauthService = process.env.JIRA_OAUTH_CLIENT_ID
     clientSecret: process.env.JIRA_OAUTH_CLIENT_SECRET,
     redirectUri: process.env.OAUTH_REDIRECT_URI,
     jiraBaseUrl: process.env.JIRA_BASE_URL,
+    supabaseService,
   })
   : null;
 
@@ -123,6 +127,7 @@ registerHomeHandler(app, jiraService, services);
   opsNotifier = new OpsNotifier(app.client, settings.opsChannelId);
 
   if (oauthService) {
+    await oauthService.loadFromDb();
     const oauthPort = parseInt(process.env.OAUTH_PORT || '3000', 10);
     startCallbackServer(oauthService, oauthPort, logger, {
       slackClient: app.client,
