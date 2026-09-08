@@ -32,13 +32,13 @@ function registerTriggerHandler(app, services) {
 
   // Handle modal submission
   app.view('create_trigger_modal', async ({ ack, body, view, client, logger }) => {
-    await ack();
     const userId = body.user.id;
     const isAdmin = ADMIN_USER_IDS.has(userId);
     const v = view.state.values;
 
     const name = v.name_block.trigger_name.value?.trim();
-    const channelId = v.channel_block.trigger_channel.selected_conversation;
+    const manualChannelId = v.channel_id_block?.trigger_channel_id?.value?.trim();
+    const channelId = manualChannelId || v.channel_block?.trigger_channel?.selected_conversation;
     const triggers = v.triggers_block.trigger_events.selected_options?.map((o) => o.value) ?? [];
     const jiraFieldId = v.field_id_block.jira_field_id.value?.trim();
     const jiraFieldName = v.field_name_block.jira_field_name.value?.trim() || jiraFieldId;
@@ -47,10 +47,18 @@ function registerTriggerHandler(app, services) {
       ? (v.scope_block?.trigger_scope?.selected_option?.value ?? 'personal')
       : 'personal';
 
-    if (!name || !channelId || triggers.length === 0 || !jiraFieldId || !jiraFieldValue) {
-      logger.warn('[trigger] Modal submitted with missing fields');
+    // Inline validation — shown under the offending field in the modal
+    const errors = {};
+    if (!channelId) errors.channel_block = 'Pick a channel or paste a channel ID below.';
+    if (manualChannelId && !/^[CG][A-Z0-9]{8,}$/.test(manualChannelId)) {
+      errors.channel_id_block = 'That does not look like a Slack channel ID (should start with C or G).';
+    }
+    if (triggers.length === 0) errors.triggers_block = 'Select at least one trigger.';
+    if (Object.keys(errors).length > 0) {
+      await ack({ response_action: 'errors', errors });
       return;
     }
+    await ack();
 
     const integration = {
       name,
@@ -116,12 +124,21 @@ function buildCreateModal(isAdmin) {
       type: 'input',
       block_id: 'channel_block',
       label: { type: 'plain_text', text: 'Slack channel to watch' },
+      optional: true,
       element: {
         type: 'conversations_select',
         action_id: 'trigger_channel',
-        placeholder: { type: 'plain_text', text: 'Select a channel' },
+        placeholder: { type: 'plain_text', text: 'Select a channel (type to search)' },
         filter: { include: ['public', 'private'], exclude_bot_users: true },
       },
+    },
+    {
+      type: 'input',
+      block_id: 'channel_id_block',
+      label: { type: 'plain_text', text: '…or paste a channel ID' },
+      optional: true,
+      element: { type: 'plain_text_input', action_id: 'trigger_channel_id', placeholder: { type: 'plain_text', text: 'e.g. C0123ABCDEF' } },
+      hint: { type: 'plain_text', text: 'Use this if the channel does not appear in the picker. Right-click the channel → View channel details → copy the ID at the bottom.' },
     },
     {
       type: 'input',
