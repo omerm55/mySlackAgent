@@ -94,6 +94,50 @@ class SupabaseService {
       headers: { Prefer: 'return=minimal' },
     });
   }
+
+  // ── jira_triggers (JQL-polled, DM-driven) ─────────────────────────────
+
+  async getActiveJiraTriggers() {
+    const res = await this.client.get('/jira_triggers', {
+      params: { active: 'eq.true', select: '*', order: 'created_at.asc' },
+    });
+    return res.data ?? [];
+  }
+
+  async insertJiraTrigger(trigger) {
+    const res = await this.client.post('/jira_triggers', trigger,
+      { headers: { Prefer: 'return=representation' } },
+    );
+    return res.data?.[0];
+  }
+
+  async deactivateJiraTrigger(id) {
+    await this.client.patch('/jira_triggers', { active: false }, {
+      params: { id: `eq.${id}` },
+      headers: { Prefer: 'return=minimal' },
+    });
+  }
+
+  // ── jira_prompts (one DM per trigger × issue) ─────────────────────────
+
+  /** @returns {Promise<Set<string>>} issue keys already prompted for this trigger */
+  async getPromptedIssueKeys(triggerId) {
+    const res = await this.client.get('/jira_prompts', {
+      params: { trigger_id: `eq.${triggerId}`, select: 'issue_key' },
+    });
+    return new Set((res.data ?? []).map((r) => r.issue_key));
+  }
+
+  async recordPrompt(triggerId, issueKey, slackUserId) {
+    await this.client.post('/jira_prompts', {
+      trigger_id: triggerId,
+      issue_key: issueKey,
+      slack_user_id: slackUserId,
+    }, {
+      params: { on_conflict: 'trigger_id,issue_key' },
+      headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' },
+    });
+  }
 }
 
 module.exports = SupabaseService;

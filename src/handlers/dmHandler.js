@@ -56,10 +56,14 @@ function registerDmHandler(app, jiraService, services) {
       return;
     }
 
-    const { issueKey, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType, slackUserId } = context;
+    const { issueKey, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType, transitionTo, slackUserId } = context;
     const channelId = body.channel?.id;
     const messageTs = body.message?.ts;
     const originalText = body.message?.text || '';
+
+    // For ops/audit reporting, a transition is reported as status=<target>
+    const fieldName = transitionTo ? 'status' : jiraFieldName;
+    const fieldValue = transitionTo || jiraFieldValue;
 
     if (channelId && messageTs) {
       await replaceButtons(client, channelId, messageTs, originalText, '_Processing…_');
@@ -69,20 +73,27 @@ function registerDmHandler(app, jiraService, services) {
       const { oauthService } = services;
       const usingOAuth = oauthService?.hasToken(slackUserId) ?? false;
       const effectiveJira = await resolveJira(slackUserId, client);
-      await effectiveJira.updateIssueField(issueKey, jiraFieldId, jiraFieldValue, jiraFieldType || 'select');
-      logger.info(`[dm] Updated ${issueKey} ${jiraFieldId}=${jiraFieldValue} ✓`);
+      if (transitionTo) {
+        await effectiveJira.transitionIssue(issueKey, transitionTo);
+        logger.info(`[dm] Transitioned ${issueKey} → ${transitionTo} ✓`);
+      } else {
+        await effectiveJira.updateIssueField(issueKey, jiraFieldId, jiraFieldValue, jiraFieldType || 'select');
+        logger.info(`[dm] Updated ${issueKey} ${jiraFieldId}=${jiraFieldValue} ✓`);
+      }
       if (channelId && messageTs) {
         await replaceButtons(client, channelId, messageTs, originalText,
-          `✅ Done — *${issueKey}* updated: *${jiraFieldName}* = *${jiraFieldValue}*`);
+          transitionTo
+            ? `✅ Done — *${issueKey}* moved to *${transitionTo}*`
+            : `✅ Done — *${issueKey}* updated: *${jiraFieldName}* = *${jiraFieldValue}*`);
       }
-      await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName: jiraFieldName, fieldValue: jiraFieldValue, usingOAuth });
+      await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue, usingOAuth });
     } catch (err) {
       logger.error(`[dm] Failed to update ${issueKey}: ${err.message}`);
       if (channelId && messageTs) {
         await replaceButtons(client, channelId, messageTs, originalText,
           `❌ Failed to update *${issueKey}*: ${err.message}`);
       }
-      await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName: jiraFieldName, fieldValue: jiraFieldValue, error: err.message });
+      await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue, error: err.message });
     }
   });
 
@@ -141,7 +152,9 @@ function registerDmHandler(app, jiraService, services) {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `*${context.issueKey}*: ${context.question || `Set *${context.jiraFieldName}* to *${context.jiraFieldValue}*?`}`,
+              text: `*${context.issueKey}*: ${context.question || (context.transitionTo
+                ? `Move to *${context.transitionTo}*?`
+                : `Set *${context.jiraFieldName}* to *${context.jiraFieldValue}*?`)}`,
             },
           },
           {
@@ -172,7 +185,7 @@ function registerDmHandler(app, jiraService, services) {
     }
 
     const userText = view.state.values.response_block?.response_input?.value?.trim() || '';
-    const { issueKey, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType,
+    const { issueKey, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType, transitionTo,
             slackUserId, dmChannelId, messageTs, originalText = '' } = context;
 
     const { llmService } = services;
@@ -192,7 +205,7 @@ function registerDmHandler(app, jiraService, services) {
     let decision;
     try {
       decision = await llmService.interpretJiraResponse({
-        issueKey, question: context.question, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType, userText,
+        issueKey, question: context.question, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType, transitionTo, userText,
       });
       logger.info({ issueKey, action: decision.action, userText }, '[dm] LLM decision');
     } catch (err) {
@@ -208,10 +221,20 @@ function registerDmHandler(app, jiraService, services) {
     const effectiveJira = await resolveJira(slackUserId, client);
 
     try {
-      if (decision.action === 'update_field') {
-        const finalValue = decision.fieldValue ?? jiraFieldValue;
-        await effectiveJira.updateIssueField(issueKey, jiraFieldId, finalValue, jiraFieldType || 'select');
-        logger.info(`[dm] LLM-driven update ${issueKey} ${jiraFieldId}=${finalValue} ✓`);
+      if (decision.action === 'transition') {
+        const target = decision.transitionTo || transitionTo;
+        await effectiveJira.transitionIssue(issueKey, target);
+        logger.info(`[dm] LLM-driven transition ${issueKey} → ${target} ✓`);
+      } else if (decision.action === 'update_field') {
+        if (transitionTo && !jiraFieldId) {
+          // Proposed action was a transition but LLM chose update_field — treat as approval
+          await effectiveJira.transitionIssue(issueKey, transitionTo);
+          logger.info(`[dm] LLM approved transition ${issueKey} → ${transitionTo} ✓`);
+        } else {
+          const finalValue = decision.fieldValue ?? jiraFieldValue;
+          await effectiveJira.updateIssueField(issueKey, jiraFieldId, finalValue, jiraFieldType || 'select');
+          logger.info(`[dm] LLM-driven update ${issueKey} ${jiraFieldId}=${finalValue} ✓`);
+        }
       }
 
       if (decision.comment) {

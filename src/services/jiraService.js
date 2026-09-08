@@ -168,6 +168,64 @@ class JiraService {
   }
 
   /**
+   * Run a JQL search. Returns the raw issue objects (key + requested fields).
+   * @param {string} jql
+   * @param {string[]} [fields]
+   * @param {number} [maxResults]
+   * @returns {Promise<Array<{ key: string, fields: object }>>}
+   */
+  async searchIssues(jql, fields = ['summary', 'status', 'reporter', 'assignee'], maxResults = 50) {
+    try {
+      const response = await this.client.post('/rest/api/3/search/jql', {
+        jql, fields, maxResults,
+      });
+      return response.data.issues ?? [];
+    } catch (err) {
+      const status = err.response ? `HTTP ${err.response.status}` : err.message;
+      const detail = err.response?.data?.errorMessages?.join('; ') || '';
+      throw new Error(`${status} — JQL search failed${detail ? `: ${detail}` : ''}`);
+    }
+  }
+
+  /**
+   * List available workflow transitions for an issue.
+   * @param {string} issueKey
+   * @returns {Promise<Array<{ id: string, name: string, to: { name: string } }>>}
+   */
+  async getTransitions(issueKey) {
+    this._assertValidKey(issueKey);
+    const response = await this.client.get(`/rest/api/3/issue/${issueKey}/transitions`);
+    return response.data.transitions ?? [];
+  }
+
+  /**
+   * Transition an issue to a target status. Matches on the transition's
+   * destination status name or the transition name, case-insensitively.
+   * @param {string} issueKey
+   * @param {string} targetStatus  e.g. 'Done'
+   */
+  async transitionIssue(issueKey, targetStatus) {
+    this._assertValidKey(issueKey);
+    const transitions = await this.getTransitions(issueKey);
+    const want = targetStatus.trim().toLowerCase();
+    const match = transitions.find(
+      (t) => t.to?.name?.toLowerCase() === want || t.name?.toLowerCase() === want,
+    );
+    if (!match) {
+      const available = transitions.map((t) => t.to?.name || t.name).join(', ') || 'none';
+      throw new Error(`No transition to "${targetStatus}" from current status (available: ${available})`);
+    }
+    try {
+      await this.client.post(`/rest/api/3/issue/${issueKey}/transitions`, {
+        transition: { id: match.id },
+      });
+    } catch (err) {
+      const status = err.response ? `HTTP ${err.response.status}` : err.message;
+      throw new Error(`${status} — transition ${issueKey} → ${targetStatus}`);
+    }
+  }
+
+  /**
    * Assign a Jira issue to a user by accountId.
    * @param {string} issueKey
    * @param {string} accountId

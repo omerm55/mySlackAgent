@@ -19,6 +19,16 @@ function registerHomeHandler(app, jiraService, services) {
         (i) => i.scope !== 'personal' || i.createdBy === userId,
       );
 
+      let jiraTriggers = [];
+      if (services.db) {
+        try {
+          jiraTriggers = (await services.db.getActiveJiraTriggers())
+            .filter((t) => t.scope !== 'personal' || t.created_by === userId);
+        } catch (err) {
+          logger.warn(`[home] Could not load Jira triggers: ${err.message}`);
+        }
+      }
+
       const userEntries = (auditLog?.entries ?? [])
         .filter((e) => e.slackUserId === userId)
         .slice(-5)
@@ -85,6 +95,34 @@ function registerHomeHandler(app, jiraService, services) {
         }) : [{
           type: 'section',
           text: { type: 'mrkdwn', text: '_No active triggers yet. Click *➕ Create Trigger* to set one up._' },
+        }]),
+        { type: 'divider' },
+
+        // ── Jira triggers (JQL → DM) ─────────────────────────────
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: '*Jira triggers*\n_Watch Jira with a JQL and DM the right person a Yes / No / Reply question._' },
+          accessory: {
+            type: 'button',
+            text: { type: 'plain_text', text: '➕ Create Jira Trigger', emoji: true },
+            action_id: 'home_create_jira_trigger',
+          },
+        },
+        ...(jiraTriggers.length > 0 ? jiraTriggers.map((t) => {
+          const action = t.action_type === 'transition'
+            ? `move to *${t.transition_to}*`
+            : `set *${t.jira_field_name || t.jira_field_id}* = *${t.jira_field_value}*`;
+          const scopeLabel = t.scope === 'personal' ? ' _(personal)_' : '';
+          return {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*${t.name}*${scopeLabel}\n\`${t.jql}\`\n_DMs the ${t.notify} → on Yes: ${action}_`,
+            },
+          };
+        }) : [{
+          type: 'section',
+          text: { type: 'mrkdwn', text: '_No Jira triggers yet._' },
         }]),
         { type: 'divider' },
 

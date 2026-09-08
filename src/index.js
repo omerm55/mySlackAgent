@@ -7,7 +7,8 @@ const JiraService = require('./services/jiraService');
 const AttributionService = require('./services/attributionService');
 const { registerReplyHandler } = require('./handlers/replyHandler');
 const { registerReactionHandler } = require('./handlers/reactionHandler');
-const { registerTriggerHandler } = require('./handlers/triggerHandler');
+const { registerTriggerHandler, registerJiraTriggerHandler } = require('./handlers/triggerHandler');
+const JiraPoller = require('./services/jiraPoller');
 const { loadIntegrations } = require('./loadIntegrations');
 const { loadSettings } = require('./loadSettings');
 const DedupCache = require('./utils/dedupCache');
@@ -100,16 +101,18 @@ const integrationCache = new IntegrationCache(supabaseService, normalizedStatic)
 const pendingQuestions = new PendingQuestions();
 const llmService = LlmService.fromEnv();
 
-// Alerting and opsNotifier are initialised after app.start() so app.client is available.
+// Alerting, opsNotifier and jiraPoller are initialised after app.start() so app.client is available.
 let alerting;
 let opsNotifier;
+let jiraPoller;
 
 const services = {
   dedupCache, rateLimiter, auditLog, userCache, oauthService, pendingQuestions, llmService,
-  integrationCache,
+  integrationCache, jiraService,
   db: supabaseService,
   get alerting() { return alerting; },
   get opsNotifier() { return opsNotifier; },
+  get jiraPoller() { return jiraPoller; },
 };
 
 // Single generic handlers — each queries integrationCache at event time
@@ -118,6 +121,7 @@ registerReplyHandler(app, jiraService, attributionService, services);
 registerDmHandler(app, jiraService, services);
 registerHomeHandler(app, jiraService, services);
 registerTriggerHandler(app, services);
+registerJiraTriggerHandler(app, services);
 
 (async () => {
   await app.start();
@@ -140,6 +144,16 @@ registerTriggerHandler(app, services);
       opsNotifier,
     });
     logger.info({ redirectUri: process.env.OAUTH_REDIRECT_URI }, '[oauth] Impersonation enabled');
+  }
+
+  // Jira triggers: poll JQL conditions and DM the relevant person
+  if (supabaseService) {
+    const intervalSec = parseInt(process.env.JIRA_POLL_INTERVAL_SEC || '120', 10);
+    jiraPoller = new JiraPoller({
+      jiraService, db: supabaseService, slackClient: app.client, opsNotifier, logger,
+      intervalMs: intervalSec * 1000,
+    });
+    jiraPoller.start();
   }
 
   if (settings.dailySummary.enabled) {

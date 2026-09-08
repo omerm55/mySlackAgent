@@ -57,17 +57,46 @@ function makeClient(messageText) {
 
 const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
+// The handler is registered once and reads integrations from services.integrationCache
+// at event time. Wrap a legacy-style config in a fake cache for these tests.
+function register(app, jira, cfg, services) {
+  services.integrationCache = {
+    getAll: async () => [{
+      ...cfg,
+      slackChannelId: cfg.watchChannelId,
+      triggers: cfg.triggers || ['reaction'],
+      scope: cfg.scope || 'global',
+    }],
+  };
+  registerReactionHandler(app, jira, attribution, services);
+}
+
 describe('reactionHandler', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test.each(['+1', 'thumbsup', 'thumbs_up'])(
+  test('personal-scope integration only fires for its creator', async () => {
+    const app = makeApp();
+    const jira = makeJira();
+    register(app, jira, { ...config, scope: 'personal', createdBy: 'U_OWNER' }, makeServices());
+
+    const base = { client: makeClient(REAL_MESSAGE), logger };
+    await app._trigger('reaction_added', { ...base,
+      event: { reaction: '+1', user: 'U_OTHER', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } } });
+    expect(jira.updateIssueField).not.toHaveBeenCalled();
+
+    await app._trigger('reaction_added', { ...base,
+      event: { reaction: '+1', user: 'U_OWNER', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } } });
+    expect(jira.updateIssueField).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['+1', 'thumbsup', 'thumbs_up', 'white_check_mark', '+1::skin-tone-3'])(
     'updates Jira on "%s" reaction and posts Slack confirmation',
     async (emoji) => {
       const app = makeApp();
       const jira = makeJira();
       const client = makeClient(REAL_MESSAGE);
       const services = makeServices();
-      registerReactionHandler(app, jira, attribution, config, services);
+      register(app, jira, config, services);
 
       await app._trigger('reaction_added', {
         event: { reaction: emoji, user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
@@ -92,7 +121,7 @@ describe('reactionHandler', () => {
     const app = makeApp();
     const jira = makeJira();
     const restrictedConfig = { ...config, allowedSlackUserIds: ['U_ALLOWED'] };
-    registerReactionHandler(app, jira, attribution, restrictedConfig, makeServices());
+    register(app, jira, restrictedConfig, makeServices());
 
     await app._trigger('reaction_added', {
       event: { reaction: '+1', user: 'U_OTHER', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
@@ -107,7 +136,7 @@ describe('reactionHandler', () => {
     const app = makeApp();
     const jira = makeJira();
     const restrictedConfig = { ...config, allowedSlackUserIds: ['U_ALLOWED'] };
-    registerReactionHandler(app, jira, attribution, restrictedConfig, makeServices());
+    register(app, jira, restrictedConfig, makeServices());
 
     await app._trigger('reaction_added', {
       event: { reaction: '+1', user: 'U_ALLOWED', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
@@ -123,7 +152,7 @@ describe('reactionHandler', () => {
     const jira = makeJira();
     const services = makeServices();
     const limitedConfig = { ...config, rateLimitPerHour: 1 };
-    registerReactionHandler(app, jira, attribution, limitedConfig, services);
+    register(app, jira, limitedConfig, services);
 
     const payload = {
       event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
@@ -142,7 +171,7 @@ describe('reactionHandler', () => {
   test('does not update Jira twice for the same event (deduplication)', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReactionHandler(app, jira, attribution, config, makeServices());
+    register(app, jira, config, makeServices());
 
     const payload = {
       event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
@@ -159,7 +188,7 @@ describe('reactionHandler', () => {
     const app = makeApp();
     const jira = { updateIssueField: jest.fn().mockRejectedValue(new Error('Jira down')) };
     const services = makeServices();
-    registerReactionHandler(app, jira, attribution, config, services);
+    register(app, jira, config, services);
 
     await app._trigger('reaction_added', {
       event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
@@ -174,7 +203,7 @@ describe('reactionHandler', () => {
   test('does nothing for a non-thumbs-up reaction', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReactionHandler(app, jira, attribution, config, makeServices());
+    register(app, jira, config, makeServices());
 
     await app._trigger('reaction_added', {
       event: { reaction: 'heart', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
@@ -188,7 +217,7 @@ describe('reactionHandler', () => {
   test('does nothing if the channel does not match', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReactionHandler(app, jira, attribution, config, makeServices());
+    register(app, jira, config, makeServices());
 
     await app._trigger('reaction_added', {
       event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_OTHER', ts: '111.000' } },
@@ -202,7 +231,7 @@ describe('reactionHandler', () => {
   test('does nothing if the message has no Jira key', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReactionHandler(app, jira, attribution, config, makeServices());
+    register(app, jira, config, makeServices());
 
     await app._trigger('reaction_added', {
       event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },

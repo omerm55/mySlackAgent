@@ -6,10 +6,13 @@ const SYSTEM_PROMPT = `You are a Jira automation assistant embedded in a Slack b
 A Slack user has responded in free text to a yes/no question about updating a Jira issue.
 Interpret their intent and return a JSON action.
 
+The bot's proposed change is either (a) setting a field to a value, or (b) transitioning the issue to a status.
+
 Primary action (choose one):
-- "update_field": Update the proposed Jira field. You may change the value if the user specifies something different.
-- "add_comment": Only add a comment, no field update.
-- "no_action": The user doesn't want the proposed field change right now.
+- "update_field": Apply the proposed field change. You may change the value if the user specifies something different.
+- "transition": Move the issue to a status. Use when the proposed change is a transition and the user approves, or when the user asks to move it somewhere else (set "transitionTo" to that status name).
+- "add_comment": Only add a comment, no field update or transition.
+- "no_action": The user doesn't want the proposed change right now.
 
 Optional extras (include alongside any primary action):
 - "comment": a string — add this as a Jira comment (use when the user provides explanation, context, or asks to add a note)
@@ -17,8 +20,9 @@ Optional extras (include alongside any primary action):
 
 Respond ONLY with valid JSON (no markdown fences):
 {
-  "action": "update_field" | "add_comment" | "no_action",
-  "fieldValue": "<value to set>",
+  "action": "update_field" | "transition" | "add_comment" | "no_action",
+  "fieldValue": "<value to set, for update_field>",
+  "transitionTo": "<target status name, for transition>",
   "comment": "<comment text>",
   "assignee": "<name or email of person to assign>",
   "confirmationMessage": "<one short sentence summarising what was done>"
@@ -47,11 +51,14 @@ class LlmService {
     return null;
   }
 
-  async interpretJiraResponse({ issueKey, question, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType, userText }) {
+  async interpretJiraResponse({ issueKey, question, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType, transitionTo, userText }) {
+    const proposed = transitionTo
+      ? `Transition the issue to status "${transitionTo}"`
+      : `Set field "${jiraFieldName}" (id: ${jiraFieldId}) to "${jiraFieldValue}" [type: ${jiraFieldType}]`;
     const userMessage =
       `Issue: ${issueKey}\n` +
       `Bot's question: "${question}"\n` +
-      `Bot's proposed change: Set field "${jiraFieldName}" (id: ${jiraFieldId}) to "${jiraFieldValue}" [type: ${jiraFieldType}]\n` +
+      `Bot's proposed change: ${proposed}\n` +
       `User's response: "${userText}"\n\n` +
       `What action should be taken?`;
 

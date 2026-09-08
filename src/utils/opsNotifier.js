@@ -23,6 +23,11 @@ class OpsNotifier {
     }
   }
 
+  // Jira poller matched an issue but could not DM anyone
+  async jiraTriggerSkipped({ trigger, issueKey, reason }) {
+    await this.post(`🔍 Jira trigger *${trigger}* matched *${issueKey}* — skipped: ${reason}`);
+  }
+
   // Reaction caught but filtered before Jira update (debug visibility)
   async reactionFiltered({ slackUserId, reason, integration }) {
     await this.post(`👍 <@${slackUserId}> reacted in *${integration}* — filtered: ${reason}`);
@@ -57,6 +62,7 @@ class OpsNotifier {
     }
     const parts = [`action: *${decision.action}*`];
     if (decision.fieldValue) parts.push(`value: *${decision.fieldValue}*`);
+    if (decision.transitionTo) parts.push(`move to: *${decision.transitionTo}*`);
     if (decision.comment) parts.push(`comment: "${decision.comment}"`);
     if (decision.assignee) parts.push(`assign to: *${decision.assignee}*`);
     await this.post(

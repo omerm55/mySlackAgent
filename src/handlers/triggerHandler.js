@@ -112,6 +112,133 @@ function registerTriggerHandler(app, services) {
   });
 }
 
+/**
+ * Registers the "Create Jira Trigger" button + modal.
+ * A Jira trigger polls a JQL and DMs the reporter/assignee a Yes/No/Reply question.
+ */
+function registerJiraTriggerHandler(app, services) {
+  app.action('home_create_jira_trigger', async ({ ack, body, client, logger }) => {
+    await ack();
+    const isAdmin = ADMIN_USER_IDS.has(body.user.id);
+    try {
+      await client.views.open({ trigger_id: body.trigger_id, view: buildJiraTriggerModal(isAdmin) });
+    } catch (err) {
+      logger.error(`[jiraTrigger] Failed to open modal: ${err.message}`);
+    }
+  });
+
+  app.view('create_jira_trigger_modal', async ({ ack, body, view, client, logger }) => {
+    const userId = body.user.id;
+    const isAdmin = ADMIN_USER_IDS.has(userId);
+    const v = view.state.values;
+
+    const name = v.jt_name.value.value?.trim();
+    const jql = v.jt_jql.value.value?.trim();
+    const question = v.jt_question.value.value?.trim();
+    const notify = v.jt_notify.value.selected_option?.value || 'reporter';
+    const actionType = v.jt_action.value.selected_option?.value || 'transition';
+    const transitionTo = v.jt_transition?.value?.value?.trim();
+    const fieldId = v.jt_field_id?.value?.value?.trim();
+    const fieldName = v.jt_field_name?.value?.value?.trim();
+    const fieldValue = v.jt_field_value?.value?.value?.trim();
+    const scope = isAdmin ? (v.jt_scope?.value?.selected_option?.value ?? 'global') : 'personal';
+
+    const errors = {};
+    if (actionType === 'transition' && !transitionTo) errors.jt_transition = 'Enter the target status, e.g. Done.';
+    if (actionType === 'field' && !fieldId) errors.jt_field_id = 'Enter the Jira field ID.';
+    if (actionType === 'field' && !fieldValue) errors.jt_field_value = 'Enter the value to set.';
+    if (!/\{key\}/.test(question || '')) errors.jt_question = 'Include {key} so the user knows which issue this is about.';
+
+    // Validate the JQL against Jira before saving
+    if (jql && Object.keys(errors).length === 0) {
+      try {
+        await services.jiraService.searchIssues(jql, ['summary'], 1);
+      } catch (err) {
+        errors.jt_jql = `Jira rejected this JQL: ${err.message}`.slice(0, 250);
+      }
+    }
+    if (Object.keys(errors).length > 0) {
+      await ack({ response_action: 'errors', errors });
+      return;
+    }
+    await ack();
+
+    const trigger = {
+      name, jql, question, notify, scope,
+      action_type: actionType,
+      transition_to: actionType === 'transition' ? transitionTo : null,
+      jira_field_id: actionType === 'field' ? fieldId : null,
+      jira_field_name: actionType === 'field' ? (fieldName || fieldId) : null,
+      jira_field_value: actionType === 'field' ? fieldValue : null,
+      jira_field_type: 'select',
+      created_by: userId,
+      active: true,
+    };
+
+    try {
+      if (!services.db) throw new Error('Supabase is not configured');
+      await services.db.insertJiraTrigger(trigger);
+      logger.info(`[jiraTrigger] Created "${name}" by ${userId} (scope: ${scope})`);
+      const actionText = actionType === 'transition'
+        ? `move the issue to *${transitionTo}*`
+        : `set *${fieldName || fieldId}* = *${fieldValue}*`;
+      await client.chat.postMessage({
+        channel: userId,
+        text: `✅ Jira trigger *${name}* created. Every few minutes I'll check \`${jql}\` and DM the *${notify}* of any new match. On *Yes* I'll ${actionText}.`,
+      });
+      // Kick off an immediate poll so the demo doesn't wait for the interval
+      services.jiraPoller?.runOnce().catch(() => {});
+    } catch (err) {
+      const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+      logger.error(`[jiraTrigger] Failed to save: ${detail}`);
+      await client.chat.postMessage({ channel: userId, text: `❌ Failed to create Jira trigger: ${detail}` });
+    }
+  });
+}
+
+function buildJiraTriggerModal(isAdmin) {
+  const input = (blockId, label, element, extra = {}) => ({
+    type: 'input', block_id: blockId, label: { type: 'plain_text', text: label },
+    element: { action_id: 'value', ...element }, ...extra,
+  });
+  const text = (placeholder, multiline = false) => ({
+    type: 'plain_text_input', multiline, placeholder: { type: 'plain_text', text: placeholder },
+  });
+  const radios = (options, initial) => ({
+    type: 'radio_buttons',
+    options: options.map(([value, label]) => ({ text: { type: 'plain_text', text: label }, value })),
+    initial_option: { text: { type: 'plain_text', text: options.find(([v]) => v === initial)[1] }, value: initial },
+  });
+
+  const blocks = [
+    input('jt_name', 'Trigger name', text('e.g. Epic ready for PM acceptance')),
+    input('jt_jql', 'JQL condition', text('issuetype = Epic AND status = Acceptance', true), {
+      hint: { type: 'plain_text', text: 'Checked every few minutes. Each matching issue is asked about once.' },
+    }),
+    input('jt_question', 'Question to ask', text('All children of {key} ({summary}) are done. Approve and move to Done?', true), {
+      hint: { type: 'plain_text', text: 'Placeholders: {key} {summary} {status} {reporter} {assignee}' },
+    }),
+    input('jt_notify', 'Who to DM', radios([['reporter', 'Reporter'], ['assignee', 'Assignee']], 'reporter')),
+    input('jt_action', 'On "Yes", do this', radios([['transition', 'Move to a status'], ['field', 'Set a field']], 'transition')),
+    input('jt_transition', 'Target status (for "Move to a status")', text('e.g. Done'), { optional: true }),
+    input('jt_field_id', 'Jira field ID (for "Set a field")', text('e.g. customfield_11296'), { optional: true }),
+    input('jt_field_name', 'Field display name (optional)', text('e.g. PM Reviewed'), { optional: true }),
+    input('jt_field_value', 'Value to set (for "Set a field")', text('e.g. Yes'), { optional: true }),
+  ];
+  if (isAdmin) {
+    blocks.push(input('jt_scope', 'Who does this apply to?', radios([['global', 'Anyone matched by the JQL'], ['personal', 'Only me (DM me only)']], 'global')));
+  }
+
+  return {
+    type: 'modal',
+    callback_id: 'create_jira_trigger_modal',
+    title: { type: 'plain_text', text: 'Create Jira Trigger' },
+    submit: { type: 'plain_text', text: 'Save' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks,
+  };
+}
+
 function buildCreateModal(isAdmin) {
   const blocks = [
     {
@@ -210,4 +337,4 @@ async function buildRefreshBlocks() {
   ];
 }
 
-module.exports = { registerTriggerHandler };
+module.exports = { registerTriggerHandler, registerJiraTriggerHandler };

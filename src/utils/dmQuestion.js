@@ -14,12 +14,18 @@
 async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, opsNotifier) {
   const dm = await client.conversations.open({ users: slackUserId });
 
+  // Button values are capped at 2000 chars — keep the question short in ctx.
   const ctx = JSON.stringify({
     issueKey: context.issueKey,
-    jiraFieldId: context.jiraFieldId,
-    jiraFieldName: context.jiraFieldName || context.jiraFieldId,
-    jiraFieldValue: context.jiraFieldValue,
-    jiraFieldType: context.jiraFieldType || 'select',
+    question: (context.question || '').slice(0, 300),
+    ...(context.transitionTo
+      ? { transitionTo: context.transitionTo }
+      : {
+        jiraFieldId: context.jiraFieldId,
+        jiraFieldName: context.jiraFieldName || context.jiraFieldId,
+        jiraFieldValue: context.jiraFieldValue,
+        jiraFieldType: context.jiraFieldType || 'select',
+      }),
     slackUserId,
   });
 
@@ -62,8 +68,8 @@ async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, o
     slackUserId,
     issueKey: context.issueKey,
     question: context.question,
-    fieldName: context.jiraFieldName || context.jiraFieldId,
-    fieldValue: context.jiraFieldValue,
+    fieldName: context.transitionTo ? 'status' : (context.jiraFieldName || context.jiraFieldId),
+    fieldValue: context.transitionTo || context.jiraFieldValue,
   });
 
   return { channelId: dm.channel.id, messageTs: result.ts };
