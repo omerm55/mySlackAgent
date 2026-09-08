@@ -93,9 +93,24 @@ class JiraPoller {
     return results;
   }
 
+  /** Per-run cache of user notification preferences (immediate vs digest). */
+  async _digestFrequency(slackUserId, cache) {
+    if (cache.has(slackUserId)) return cache.get(slackUserId);
+    let freq = 'immediate';
+    try {
+      const pref = await this.db.getUserPreference?.(slackUserId);
+      if (pref?.digest_frequency) freq = pref.digest_frequency;
+    } catch (err) {
+      this.logger.warn(`[jiraPoller] Could not read preference for ${slackUserId}: ${err.message}`);
+    }
+    cache.set(slackUserId, freq);
+    return freq;
+  }
+
   async _evaluateTrigger(trigger) {
     const tag = `[jiraPoller/${trigger.name}]`;
-    const stats = { trigger, matched: 0, fresh: 0, sent: 0, skipped: [], sentTo: [] };
+    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, skipped: [], sentTo: [], queuedFor: [] };
+    const prefCache = new Map();
 
     const issues = await this.jira.searchIssues(trigger.jql, ['summary', 'status', 'reporter', 'assignee']);
     stats.matched = issues.length;
@@ -148,14 +163,9 @@ class JiraPoller {
       }
 
       const question = renderTemplate(trigger.question, issue);
-      // Not connected yet? Put a Connect button right in the question DM.
-      const authUrl = this.oauth && !this.oauth.hasToken(slackUserId)
-        ? this.oauth.generateAuthUrl(slackUserId)
-        : null;
-      const context = {
+      const payload = {
         issueKey: issue.key,
         question,
-        ...(authUrl ? { authUrl } : {}),
         ...(trigger.action_type === 'transition'
           ? { transitionTo: trigger.transition_to }
           : {
@@ -166,9 +176,30 @@ class JiraPoller {
           }),
       };
 
+      // Respect the user's notification preference: queue for a digest, or send now.
+      const frequency = await this._digestFrequency(slackUserId, prefCache);
+      if (frequency !== 'immediate') {
+        try {
+          await this.db.recordPrompt(trigger.id, issue.key, slackUserId, { payload, delivered: false });
+          stats.queued += 1;
+          stats.queuedFor.push(`${issue.key} → <@${slackUserId}> (${frequency})`);
+          this.logger.info(`${tag} Queued ${issue.key} for ${slackUserId}'s ${frequency} digest`);
+        } catch (err) {
+          this.logger.error(`${tag} Failed to queue ${issue.key} for ${slackUserId}: ${err.message}`);
+          stats.skipped.push(`${issue.key}: queue failed (${err.message})`);
+        }
+        continue;
+      }
+
+      // Not connected yet? Put a Connect button right in the question DM.
+      const authUrl = this.oauth && !this.oauth.hasToken(slackUserId)
+        ? this.oauth.generateAuthUrl(slackUserId)
+        : null;
+      const context = { ...payload, ...(authUrl ? { authUrl } : {}) };
+
       try {
         await sendDmQuestion(this.slack, slackUserId, context, null, this.ops);
-        await this.db.recordPrompt(trigger.id, issue.key, slackUserId);
+        await this.db.recordPrompt(trigger.id, issue.key, slackUserId, { payload });
         sent += 1;
         stats.sentTo.push(`${issue.key} → <@${slackUserId}>`);
         this.logger.info(`${tag} DM sent to ${slackUserId} for ${issue.key}`);

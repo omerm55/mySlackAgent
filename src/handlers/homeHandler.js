@@ -1,6 +1,7 @@
 'use strict';
 
 const { canManage } = require('../utils/admins');
+const { FREQUENCIES } = require('../services/digestScheduler');
 
 /**
  * Overflow menu (✏️ Edit / 🗑 Delete) for a trigger row.
@@ -50,6 +51,22 @@ async function buildHomeBlocks(userId, services, logger) {
     .slice(-5)
     .reverse();
 
+  // Notification preference + how many prompts are waiting in the next digest
+  let frequency = 'immediate';
+  let pendingCount = 0;
+  if (services.db) {
+    try {
+      const pref = await services.db.getUserPreference(userId);
+      if (pref?.digest_frequency && FREQUENCIES[pref.digest_frequency]) frequency = pref.digest_frequency;
+      if (frequency !== 'immediate') pendingCount = (await services.db.getPendingPrompts(userId)).length;
+    } catch (err) {
+      logger?.warn(`[home] Could not load preferences: ${err.message}`);
+    }
+  }
+  const freqOptions = Object.entries(FREQUENCIES).map(([value, { label }]) => ({
+    text: { type: 'plain_text', text: label, emoji: true }, value,
+  }));
+
   return [
     // ── Header ───────────────────────────────────────────────
     { type: 'header', text: { type: 'plain_text', text: '🔗 Slack-Jira Bot', emoji: true } },
@@ -80,6 +97,26 @@ async function buildHomeBlocks(userId, services, logger) {
           action_id: 'home_connect_jira',
         },
       } : {}),
+    },
+    { type: 'divider' },
+
+    // ── Notifications ────────────────────────────────────────
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `🔔  *Notifications*\nHow often should I DM you with questions?${
+          frequency !== 'immediate' && pendingCount > 0
+            ? `\n_${pendingCount} question${pendingCount === 1 ? '' : 's'} waiting for your next digest._`
+            : ''
+        }`,
+      },
+      accessory: {
+        type: 'static_select',
+        action_id: 'home_set_digest',
+        options: freqOptions,
+        initial_option: freqOptions.find((o) => o.value === frequency),
+      },
     },
     { type: 'divider' },
 

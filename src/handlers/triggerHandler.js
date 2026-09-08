@@ -347,8 +347,9 @@ function registerJiraTriggerHandler(app, services) {
         if (stats.error) {
           lines.push(`❌ ${stats.error}`);
         } else {
-          lines.push(`${stats.matched} issue(s) match · ${stats.fresh} not yet asked · ${stats.sent} DM(s) sent`);
+          lines.push(`${stats.matched} issue(s) match · ${stats.fresh} not yet asked · ${stats.sent} DM(s) sent${stats.queued ? ` · ${stats.queued} queued for digests` : ''}`);
           if (stats.sentTo.length) lines.push(...stats.sentTo.map((s) => `  • ${s}`));
+          if (stats.queuedFor?.length) lines.push(...stats.queuedFor.map((s) => `  🔔 ${s}`));
           if (stats.skipped.length) lines.push(...stats.skipped.slice(0, 10).map((s) => `  ⏭ ${s}`));
           if (stats.matched > 0 && stats.fresh === 0) lines.push('_Everyone matching has already been asked. Use 🔁 Re-ask open matches to ask again._');
         }
@@ -366,7 +367,7 @@ function registerJiraTriggerHandler(app, services) {
         logger.info(`[jiraTrigger] Re-ask "${existing.name}" (${id}) by ${userId} — cleared ${cleared} prompt(s)`);
         const [stats] = services.jiraPoller ? await services.jiraPoller.runOnce({ force: true, onlyId: id }) : [];
         const summary = stats && !stats.error
-          ? `${stats.matched} issue(s) match · ${stats.sent} DM(s) sent${stats.skipped.length ? ` · ${stats.skipped.length} skipped` : ''}`
+          ? `${stats.matched} issue(s) match · ${stats.sent} DM(s) sent${stats.queued ? ` · ${stats.queued} queued for digests` : ''}${stats.skipped.length ? ` · ${stats.skipped.length} skipped` : ''}`
           : (stats?.error ? `❌ ${stats.error}` : 'poller not available');
         await notifyOps(services, client, userId, `🔁 Re-asked *${existing.name}*: cleared ${cleared} previous prompt(s).\n${summary}${stats?.sentTo?.length ? `\n${stats.sentTo.map((s) => `  • ${s}`).join('\n')}` : ''}`);
       } catch (err) {

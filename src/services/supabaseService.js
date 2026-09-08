@@ -165,14 +165,67 @@ class SupabaseService {
     return Array.isArray(res.data) ? res.data.length : 0;
   }
 
-  async recordPrompt(triggerId, issueKey, slackUserId) {
+  /**
+   * Record that an issue was handled for a trigger.
+   * Delivered immediately (default) → delivered_at = now.
+   * Queued for a digest → pass { payload } and delivered = false; the digest
+   * scheduler sends it later and marks it delivered.
+   */
+  async recordPrompt(triggerId, issueKey, slackUserId, { payload = null, delivered = true } = {}) {
     await this.client.post('/jira_prompts', {
       trigger_id: triggerId,
       issue_key: issueKey,
       slack_user_id: slackUserId,
+      payload,
+      delivered_at: delivered ? new Date().toISOString() : null,
     }, {
       params: { on_conflict: 'trigger_id,issue_key' },
       headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' },
+    });
+  }
+
+  /** All queued (undelivered) prompts, oldest first. */
+  async getPendingPrompts(slackUserId = null) {
+    const params = { delivered_at: 'is.null', select: '*', order: 'prompted_at.asc' };
+    if (slackUserId) params.slack_user_id = `eq.${slackUserId}`;
+    const res = await this.client.get('/jira_prompts', { params });
+    return res.data ?? [];
+  }
+
+  async markPromptsDelivered(ids) {
+    if (!ids.length) return;
+    await this.client.patch('/jira_prompts', { delivered_at: new Date().toISOString() }, {
+      params: { id: `in.(${ids.join(',')})` },
+      headers: { Prefer: 'return=minimal' },
+    });
+  }
+
+  // ── user_preferences (notification digest) ────────────────────────────
+
+  /** @returns {Promise<{ slack_user_id, digest_frequency, tz, last_digest_at }|null>} */
+  async getUserPreference(slackUserId) {
+    const res = await this.client.get('/user_preferences', {
+      params: { slack_user_id: `eq.${slackUserId}`, select: '*', limit: 1 },
+    });
+    return res.data?.[0] ?? null;
+  }
+
+  /** Everyone who opted into a digest (anything other than immediate). */
+  async getDigestUsers() {
+    const res = await this.client.get('/user_preferences', {
+      params: { digest_frequency: 'neq.immediate', select: '*' },
+    });
+    return res.data ?? [];
+  }
+
+  async upsertUserPreference(slackUserId, fields) {
+    await this.client.post('/user_preferences', {
+      slack_user_id: slackUserId,
+      ...fields,
+      updated_at: new Date().toISOString(),
+    }, {
+      params: { on_conflict: 'slack_user_id' },
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
     });
   }
 }

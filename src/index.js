@@ -9,6 +9,8 @@ const { registerReplyHandler } = require('./handlers/replyHandler');
 const { registerReactionHandler } = require('./handlers/reactionHandler');
 const { registerTriggerHandler, registerJiraTriggerHandler } = require('./handlers/triggerHandler');
 const JiraPoller = require('./services/jiraPoller');
+const { DigestScheduler } = require('./services/digestScheduler');
+const { registerPreferencesHandler } = require('./handlers/preferencesHandler');
 const { loadIntegrations } = require('./loadIntegrations');
 const { loadSettings } = require('./loadSettings');
 const DedupCache = require('./utils/dedupCache');
@@ -106,6 +108,7 @@ const llmService = LlmService.fromEnv();
 let alerting;
 let opsNotifier;
 let jiraPoller;
+let digestScheduler;
 
 const services = {
   dedupCache, rateLimiter, auditLog, userCache, oauthService, pendingQuestions, llmService,
@@ -114,6 +117,7 @@ const services = {
   get alerting() { return alerting; },
   get opsNotifier() { return opsNotifier; },
   get jiraPoller() { return jiraPoller; },
+  get digestScheduler() { return digestScheduler; },
 };
 
 // Single generic handlers — each queries integrationCache at event time
@@ -123,6 +127,7 @@ registerDmHandler(app, jiraService, services);
 registerHomeHandler(app, jiraService, services);
 registerTriggerHandler(app, services);
 registerJiraTriggerHandler(app, services);
+registerPreferencesHandler(app, services);
 
 (async () => {
   await app.start();
@@ -159,6 +164,12 @@ registerJiraTriggerHandler(app, services);
       intervalMs: intervalSec * 1000,
     });
     jiraPoller.start();
+
+    // Deliver queued prompts to users who chose an hourly / daily digest
+    digestScheduler = new DigestScheduler({
+      db: supabaseService, slackClient: app.client, opsNotifier, oauthService, logger,
+    });
+    digestScheduler.start();
   }
 
   if (settings.dailySummary.enabled) {
