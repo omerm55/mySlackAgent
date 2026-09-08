@@ -11,7 +11,7 @@
  * @param {import('../services/pendingQuestions')} _pendingQuestions  kept for API compat, unused
  * @returns {Promise<{ channelId: string, messageTs: string }>}
  */
-async function sendDmQuestion(client, slackUserId, context, _pendingQuestions) {
+async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, opsNotifier) {
   const dm = await client.conversations.open({ users: slackUserId });
 
   const ctx = JSON.stringify({
@@ -56,6 +56,14 @@ async function sendDmQuestion(client, slackUserId, context, _pendingQuestions) {
         ],
       },
     ],
+  });
+
+  await opsNotifier?.dmQuestionSent({
+    slackUserId,
+    issueKey: context.issueKey,
+    question: context.question,
+    fieldName: context.jiraFieldName || context.jiraFieldId,
+    fieldValue: context.jiraFieldValue,
   });
 
   return { channelId: dm.channel.id, messageTs: result.ts };

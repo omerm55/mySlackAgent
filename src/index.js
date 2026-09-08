@@ -21,6 +21,7 @@ const { startCallbackServer } = require('./server/callbackServer');
 const { registerDmHandler } = require('./handlers/dmHandler');
 const { sendDmQuestion } = require('./utils/dmQuestion');
 const { logger, boltLogger } = require('./utils/logger');
+const OpsNotifier = require('./utils/opsNotifier');
 
 const REQUIRED_VARS = [
   'SLACK_BOT_TOKEN',
@@ -75,11 +76,15 @@ const pendingQuestions = new PendingQuestions();
 
 const llmService = LlmService.fromEnv();
 
-// Alerting is initialised after app.start() so app.client is available.
-// We declare it here and assign below.
+// Alerting and opsNotifier are initialised after app.start() so app.client is available.
 let alerting;
+let opsNotifier;
 
-const services = { dedupCache, rateLimiter, auditLog, userCache, oauthService, pendingQuestions, llmService, get alerting() { return alerting; } };
+const services = {
+  dedupCache, rateLimiter, auditLog, userCache, oauthService, pendingQuestions, llmService,
+  get alerting() { return alerting; },
+  get opsNotifier() { return opsNotifier; },
+};
 
 for (const integration of integrations) {
   const config = {
@@ -112,6 +117,7 @@ registerDmHandler(app, jiraService, services);
     errorThreshold: settings.alerting.errorThreshold,
     errorWindowMs: settings.alerting.errorWindowMinutes * 60 * 1000,
   });
+  opsNotifier = new OpsNotifier(app.client, settings.opsChannelId);
 
   if (oauthService) {
     const oauthPort = parseInt(process.env.OAUTH_PORT || '3000', 10);
@@ -119,6 +125,7 @@ registerDmHandler(app, jiraService, services);
       slackClient: app.client,
       pendingQuestions,
       sendDmQuestion,
+      opsNotifier,
     });
     logger.info({ redirectUri: process.env.OAUTH_REDIRECT_URI }, '[oauth] Impersonation enabled');
   }

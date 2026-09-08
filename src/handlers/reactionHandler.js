@@ -132,6 +132,11 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
             success,
             error: errorMsg,
           });
+          await services.opsNotifier?.jiraTriggered({
+            trigger: '👍 reaction', actorName, slackUserId: event.user,
+            issueKey: key, fieldName: jiraFieldName, fieldValue: jiraFieldValue,
+            success, error: errorMsg,
+          });
         })
       );
     } catch (err) {

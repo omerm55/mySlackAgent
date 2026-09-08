@@ -22,7 +22,7 @@ function startCallbackServer(oauthService, oauthPort, logger, extras = {}) {
   // Render (and most PaaS) set PORT; fall back to the configured OAUTH_PORT for local dev.
   const port = process.env.PORT ? parseInt(process.env.PORT, 10) : oauthPort;
 
-  const { slackClient, pendingQuestions, sendDmQuestion } = extras;
+  const { slackClient, pendingQuestions, sendDmQuestion, opsNotifier } = extras;
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
@@ -54,7 +54,7 @@ function startCallbackServer(oauthService, oauthPort, logger, extras = {}) {
       try {
         const result = await sendDmQuestion(slackClient, user, {
           issueKey: issue, question, jiraFieldId: fieldId, jiraFieldName: fieldName, jiraFieldValue: value, jiraFieldType: fieldType,
-        }, pendingQuestions);
+        }, pendingQuestions, opsNotifier);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, channelId: result.channelId, messageTs: result.messageTs }));
       } catch (err) {

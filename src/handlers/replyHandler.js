@@ -129,6 +129,11 @@ function registerReplyHandler(app, jiraService, attributionService, config, serv
             success,
             error: errorMsg,
           });
+          await services.opsNotifier?.jiraTriggered({
+            trigger: 'thread reply', actorName, slackUserId: message.user,
+            issueKey: key, fieldName: jiraFieldName, fieldValue: jiraFieldValue,
+            success, error: errorMsg,
+          });
         })
       );
     } catch (err) {

@@ -65,12 +65,14 @@ function registerDmHandler(app, jiraService, services) {
         await replaceButtons(client, channelId, messageTs, originalText,
           `✅ Done — *${issueKey}* updated: *${jiraFieldName}* = *${jiraFieldValue}*`);
       }
+      await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName: jiraFieldName, fieldValue: jiraFieldValue });
     } catch (err) {
       logger.error(`[dm] Failed to update ${issueKey}: ${err.message}`);
       if (channelId && messageTs) {
         await replaceButtons(client, channelId, messageTs, originalText,
           `❌ Failed to update *${issueKey}*: ${err.message}`);
       }
+      await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName: jiraFieldName, fieldValue: jiraFieldValue, error: err.message });
     }
   });
 
@@ -94,6 +96,7 @@ function registerDmHandler(app, jiraService, services) {
       await replaceButtons(client, channelId, messageTs, originalText,
         `OK, no changes made to *${issueKey}*.`);
     }
+    await services.opsNotifier?.dmButtonClicked({ action: 'no', slackUserId: context.slackUserId, issueKey });
   });
 
   // ── Reply → open modal ────────────────────────────────────────────────────
@@ -188,6 +191,7 @@ function registerDmHandler(app, jiraService, services) {
         await replaceButtons(client, dmChannelId, messageTs, originalText,
           `❌ AI failed to interpret your response: ${err.message}`);
       }
+      await services.opsNotifier?.dmLlmDecision({ slackUserId, issueKey, userText, decision: {}, error: err.message });
       return;
     }
 
@@ -221,6 +225,7 @@ function registerDmHandler(app, jiraService, services) {
         await replaceButtons(client, dmChannelId, messageTs, originalText,
           didSomething ? `✅ ${confirmation}` : confirmation);
       }
+      await services.opsNotifier?.dmLlmDecision({ slackUserId, issueKey, userText, decision });
     } catch (err) {
       logger.error(`[dm] LLM-driven action failed for ${issueKey}: ${err.message}`);
       if (dmChannelId && messageTs) {
