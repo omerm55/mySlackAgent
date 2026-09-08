@@ -54,7 +54,7 @@ function registerTriggerHandler(app, services) {
 
     const integration = {
       name,
-      slack_channel_id: channelId,
+      channel_id: channelId,
       triggers,
       jira_field_id: jiraFieldId,
       jira_field_name: jiraFieldName,

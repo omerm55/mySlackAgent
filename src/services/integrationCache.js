@@ -6,7 +6,7 @@ function normalizeRow(row) {
   return {
     id: row.id,
     name: row.name,
-    slackChannelId: row.slack_channel_id,
+    slackChannelId: row.channel_id,
     triggers: Array.isArray(row.triggers) ? row.triggers : JSON.parse(row.triggers || '[]'),
     jiraFieldId: row.jira_field_id,
     jiraFieldName: row.jira_field_name || row.jira_field_id,
