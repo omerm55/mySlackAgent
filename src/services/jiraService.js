@@ -6,6 +6,21 @@ const axios = require('axios');
 // to ensure we never pass user-supplied strings directly to the URL path.
 const ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]+-\d+$/;
 
+/**
+ * Turn an axios error from Jira into a readable string that includes
+ * Jira's own error messages (errorMessages[] and errors{}), not just the status.
+ */
+function jiraErrorText(err) {
+  if (!err.response) return err.message;
+  const { status, data } = err.response;
+  const parts = [];
+  if (Array.isArray(data?.errorMessages)) parts.push(...data.errorMessages);
+  if (data?.errors && typeof data.errors === 'object') {
+    parts.push(...Object.entries(data.errors).map(([k, v]) => `${k}: ${v}`));
+  }
+  return parts.length > 0 ? `HTTP ${status}: ${parts.join('; ')}` : `HTTP ${status}`;
+}
+
 class JiraService {
   constructor({ baseUrl, email, apiToken }) {
     this.client = axios.create({
@@ -80,8 +95,7 @@ class JiraService {
       await this.client.put(path, { fields: { [fieldId]: fieldPayload } });
     } catch (err) {
       const fullUrl = `${this.client.defaults.baseURL}${path}`;
-      const status = err.response ? `HTTP ${err.response.status}` : err.message;
-      throw new Error(`${status} — PUT ${fullUrl}`);
+      throw new Error(`${jiraErrorText(err)} — PUT ${fullUrl}`);
     }
   }
 
@@ -194,13 +208,21 @@ class JiraService {
    */
   async getTransitions(issueKey) {
     this._assertValidKey(issueKey);
-    const response = await this.client.get(`/rest/api/3/issue/${issueKey}/transitions`);
+    // expand fields so we can see which ones the transition screen requires
+    const response = await this.client.get(`/rest/api/3/issue/${issueKey}/transitions`, {
+      params: { expand: 'transitions.fields' },
+    });
     return response.data.transitions ?? [];
   }
 
   /**
    * Transition an issue to a target status. Matches on the transition's
    * destination status name or the transition name, case-insensitively.
+   *
+   * If the transition screen has required fields, the ones we can safely
+   * auto-fill (currently: resolution) are populated; any others produce a
+   * clear error naming them.
+   *
    * @param {string} issueKey
    * @param {string} targetStatus  e.g. 'Done'
    */
@@ -215,13 +237,33 @@ class JiraService {
       const available = transitions.map((t) => t.to?.name || t.name).join(', ') || 'none';
       throw new Error(`No transition to "${targetStatus}" from current status (available: ${available})`);
     }
+
+    const fields = {};
+    const unfillable = [];
+    for (const [fieldId, meta] of Object.entries(match.fields || {})) {
+      if (!meta.required || meta.hasDefaultValue) continue;
+      if (fieldId === 'resolution') {
+        const allowed = meta.allowedValues || [];
+        const pick = allowed.find((r) => /^(done|fixed|resolved)$/i.test(r.name)) || allowed[0];
+        if (pick) fields.resolution = { id: pick.id };
+        else unfillable.push(meta.name || fieldId);
+      } else {
+        unfillable.push(meta.name || fieldId);
+      }
+    }
+    if (unfillable.length > 0) {
+      throw new Error(
+        `Transition to "${targetStatus}" requires field(s) I can't fill automatically: ${unfillable.join(', ')}. Please move it in Jira.`,
+      );
+    }
+
     try {
       await this.client.post(`/rest/api/3/issue/${issueKey}/transitions`, {
         transition: { id: match.id },
+        ...(Object.keys(fields).length > 0 ? { fields } : {}),
       });
     } catch (err) {
-      const status = err.response ? `HTTP ${err.response.status}` : err.message;
-      throw new Error(`${status} — transition ${issueKey} → ${targetStatus}`);
+      throw new Error(`${jiraErrorText(err)} — transition ${issueKey} → ${targetStatus}`);
     }
   }
 
