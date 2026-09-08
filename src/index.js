@@ -19,6 +19,7 @@ const LlmService = require('./services/llmService');
 const PendingQuestions = require('./services/pendingQuestions');
 const { startCallbackServer } = require('./server/callbackServer');
 const { registerDmHandler } = require('./handlers/dmHandler');
+const { registerHomeHandler } = require('./handlers/homeHandler');
 const { sendDmQuestion } = require('./utils/dmQuestion');
 const { logger, boltLogger } = require('./utils/logger');
 const OpsNotifier = require('./utils/opsNotifier');
@@ -107,6 +108,7 @@ for (const integration of integrations) {
 }
 
 registerDmHandler(app, jiraService, services);
+registerHomeHandler(app, jiraService, services);
 
 (async () => {
   await app.start();
