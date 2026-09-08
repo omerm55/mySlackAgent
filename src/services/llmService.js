@@ -81,7 +81,7 @@ class LlmService {
         `${baseUrl}/chat/completions`,
         {
           model,
-          max_tokens: 512,
+          max_completion_tokens: 512,
           temperature: 0.1,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
