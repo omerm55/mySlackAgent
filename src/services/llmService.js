@@ -30,6 +30,20 @@ Respond ONLY with valid JSON (no markdown fences):
 
 Omit keys that don't apply. Always include confirmationMessage.`;
 
+const FIX_VERSION_PROMPT = `You are a Jira release-planning assistant.
+An epic must be given a Fix Version before it can be closed. You are given the epic, its child issues
+(with their statuses and fix versions), a tally of the children's versions, and the list of candidate
+versions that exist in the project.
+
+Choose the single most appropriate Fix Version for the epic:
+- The epic ships when its LAST child ships, so if children span several versions prefer the latest of them.
+- Prefer versions that appear on the children over versions that don't.
+- Only pick from the candidates list; use the candidate's "id".
+- If the children carry no versions at all, pick the earliest unreleased candidate.
+
+Respond ONLY with valid JSON (no markdown fences):
+{ "versionId": "<candidate id>", "reason": "<one short sentence a PM would find useful>" }`;
+
 class LlmService {
   /**
    * @param {'anthropic'|'gemini'} provider
@@ -62,17 +76,37 @@ class LlmService {
       `User's response: "${userText}"\n\n` +
       `What action should be taken?`;
 
+    return this._callJson(SYSTEM_PROMPT, userMessage);
+  }
+
+  /**
+   * Pick a Fix Version for an epic from its children.
+   * @returns {Promise<{ versionId: string, reason: string }>}
+   */
+  async suggestFixVersion({ epicKey, epicSummary, children, tally, candidates }) {
+    const userMessage =
+      `Epic: ${epicKey} — ${epicSummary}\n\n` +
+      `Children (${children.length}):\n` +
+      children.map((c) => `- ${c.key} [${c.status}] fixVersions=${c.fixVersions.length ? c.fixVersions.join(', ') : 'none'} — ${c.summary}`).join('\n') +
+      `\n\nTally of children's versions: ${tally.length ? tally.map((t) => `${t.name}×${t.count}`).join(', ') : 'none'}\n\n` +
+      `Candidate versions:\n` +
+      candidates.map((v) => `- id=${v.id} name="${v.name}" ${v.released ? 'released' : 'unreleased'}${v.releaseDate ? ` (${v.releaseDate})` : ''}`).join('\n') +
+      `\n\nWhich candidate should be the epic's Fix Version?`;
+    return this._callJson(FIX_VERSION_PROMPT, userMessage);
+  }
+
+  async _callJson(systemPrompt, userMessage) {
     const raw = this.provider === 'openai'
-      ? await this._callOpenAI(userMessage)
+      ? await this._callOpenAI(systemPrompt, userMessage)
       : this.provider === 'gemini'
-        ? await this._callGemini(userMessage)
-        : await this._callAnthropic(userMessage);
+        ? await this._callGemini(systemPrompt, userMessage)
+        : await this._callAnthropic(systemPrompt, userMessage);
 
     const cleaned = raw.trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
     return JSON.parse(cleaned);
   }
 
-  async _callOpenAI(userMessage) {
+  async _callOpenAI(systemPrompt, userMessage) {
     const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
     const model = process.env.OPENAI_DEPLOYMENT || process.env.OPENAI_MODEL || 'gpt-4o';
     const isAzure = Boolean(process.env.OPENAI_BASE_URL);
@@ -91,7 +125,7 @@ class LlmService {
           max_completion_tokens: 512,
           temperature: 0.1,
           messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'system', content: systemPrompt },
             { role: 'user', content: userMessage },
           ],
         },
@@ -106,12 +140,12 @@ class LlmService {
     }
   }
 
-  async _callGemini(userMessage) {
+  async _callGemini(systemPrompt, userMessage) {
     try {
       const resp = await axios.post(
         `https://generativelanguage.googleapis.com/v1/models/gemini-3.5-flash-lite:generateContent?key=${this.apiKey}`,
         {
-          system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          system_instruction: { parts: [{ text: systemPrompt }] },
           contents: [{ role: 'user', parts: [{ text: userMessage }] }],
           generationConfig: { maxOutputTokens: 512, temperature: 0.1 },
         },
@@ -126,13 +160,13 @@ class LlmService {
     }
   }
 
-  async _callAnthropic(userMessage) {
+  async _callAnthropic(systemPrompt, userMessage) {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 512,
-        system: SYSTEM_PROMPT,
+        system: systemPrompt,
         messages: [{ role: 'user', content: userMessage }],
       },
       {
