@@ -2,7 +2,7 @@
 
 const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 
-const THUMBS_UP_EMOJIS = new Set(['+1', 'thumbsup', 'thumbs_up']);
+const THUMBS_UP_EMOJIS = new Set(['+1', 'thumbsup', 'thumbs_up', 'white_check_mark']);
 const isThumbsUp = (r) => THUMBS_UP_EMOJIS.has(r) || THUMBS_UP_EMOJIS.has(r.split('::')[0]);
 
 /**
