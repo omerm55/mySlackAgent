@@ -27,6 +27,7 @@ const { registerHomeHandler } = require('./handlers/homeHandler');
 const { sendDmQuestion } = require('./utils/dmQuestion');
 const { logger, boltLogger } = require('./utils/logger');
 const OpsNotifier = require('./utils/opsNotifier');
+const { startKeepAlive } = require('./utils/keepAlive');
 
 const REQUIRED_VARS = [
   'SLACK_BOT_TOKEN',
@@ -145,6 +146,9 @@ registerJiraTriggerHandler(app, services);
     });
     logger.info({ redirectUri: process.env.OAUTH_REDIRECT_URI }, '[oauth] Impersonation enabled');
   }
+
+  // Keep the (free-tier) Render instance from spinning down between Slack events.
+  startKeepAlive({ logger });
 
   // Jira triggers: poll JQL conditions and DM the relevant person
   if (supabaseService) {
