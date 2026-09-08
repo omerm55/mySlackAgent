@@ -82,19 +82,6 @@ function startCallbackServer(oauthService, oauthPort, logger, extras = {}) {
 
     try {
       await oauthService.handleCallback(code, slackUserId);
-      // Refresh the user's App Home so the connected status updates immediately
-      if (slackClient) {
-        slackClient.views.publish({
-          user_id: slackUserId,
-          view: {
-            type: 'home',
-            blocks: [
-              { type: 'header', text: { type: 'plain_text', text: '🔗 Slack-Jira Bot', emoji: true } },
-              { type: 'section', text: { type: 'mrkdwn', text: '✅  *Jira account connected!*\nYour changes will now appear as you in Jira. You can close this browser tab and return to Slack.' } },
-            ],
-          },
-        }).catch(() => {});
-      }
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(page(
         '✅ Jira connected!',
