@@ -68,6 +68,21 @@ function errDetail(err) {
   return err.response?.data ? JSON.stringify(err.response.data) : err.message;
 }
 
+/**
+ * Trigger management is an admin activity: report it in the ops channel,
+ * tagged with who did it. The bot's DMs stay reserved for conversations
+ * with the user (questions, action results, OAuth). Falls back to a DM only
+ * when no ops channel is configured.
+ */
+async function notifyOps(services, client, userId, text) {
+  const ops = services.opsNotifier;
+  if (ops?.channelId) {
+    await ops.post(`<@${userId}> · ${text}`);
+    return;
+  }
+  await client.chat.postMessage({ channel: userId, text }).catch(() => {});
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Channel triggers (reaction / reply → set a Jira field)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,7 +147,7 @@ function registerTriggerHandler(app, services) {
     const all = await integrationCache.getAll();
     const existing = all.find((i) => i.id === id);
     if (!existing || !canManage(existing.createdBy, userId)) {
-      await client.chat.postMessage({ channel: userId, text: '🚫 You can only edit or delete triggers you created.' }).catch(() => {});
+      await notifyOps(services, client, userId, '🚫 You can only edit or delete triggers you created.');
       return;
     }
 
@@ -151,10 +166,10 @@ function registerTriggerHandler(app, services) {
         integrationCache.invalidate();
         logger.info(`[trigger] Deleted integration "${existing.name}" (${id}) by ${userId}`);
         await publishHome(client, userId, services, logger);
-        await client.chat.postMessage({ channel: userId, text: `🗑 Trigger *${existing.name}* deleted.` });
+        await notifyOps(services, client, userId, `🗑 Trigger *${existing.name}* deleted.`);
       } catch (err) {
         logger.error(`[trigger] Failed to delete ${id}: ${errDetail(err)}`);
-        await client.chat.postMessage({ channel: userId, text: `❌ Failed to delete trigger: ${errDetail(err)}` });
+        await notifyOps(services, client, userId, `❌ Failed to delete trigger: ${errDetail(err)}`);
       }
     }
   });
@@ -190,7 +205,7 @@ function registerTriggerHandler(app, services) {
     let existing = null;
     if (editId) existing = (await integrationCache.getAll()).find((i) => i.id === editId) || null;
     if (editId && (!existing || !canManage(existing.createdBy, userId))) {
-      await client.chat.postMessage({ channel: userId, text: '🚫 You can only edit triggers you created.' }).catch(() => {});
+      await notifyOps(services, client, userId, '🚫 You can only edit triggers you created.');
       return;
     }
     const scope = admin
@@ -234,13 +249,10 @@ function registerTriggerHandler(app, services) {
       await publishHome(client, userId, services, logger);
 
       const when = triggers.map((t) => (t === 'reaction' ? '👍 reactions' : '💬 thread replies')).join(' and ');
-      await client.chat.postMessage({
-        channel: userId,
-        text: `✅ Trigger *${name}* ${editId ? 'updated' : 'created'}! It fires on ${when} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${joinNote}`,
-      });
+      await notifyOps(services, client, userId, `✅ Trigger *${name}* ${editId ? 'updated' : 'created'}! It fires on ${when} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${joinNote}`);
     } catch (err) {
       logger.error(`[trigger] Failed to save integration: ${errDetail(err)}`);
-      await client.chat.postMessage({ channel: userId, text: `❌ Failed to save trigger: ${errDetail(err)}` });
+      await notifyOps(services, client, userId, `❌ Failed to save trigger: ${errDetail(err)}`);
     }
   });
 }
@@ -307,7 +319,7 @@ function registerJiraTriggerHandler(app, services) {
     const { op, id } = parseMenu(body);
     const existing = await findJiraTrigger(id);
     if (!existing || !canManage(existing.created_by, userId)) {
-      await client.chat.postMessage({ channel: userId, text: '🚫 You can only edit or delete Jira triggers you created.' }).catch(() => {});
+      await notifyOps(services, client, userId, '🚫 You can only edit or delete Jira triggers you created.');
       return;
     }
 
@@ -322,13 +334,13 @@ function registerJiraTriggerHandler(app, services) {
 
     if (op === 'run') {
       if (!services.jiraPoller) {
-        await client.chat.postMessage({ channel: userId, text: '⚠️ The Jira poller is not running (Supabase not configured).' });
+        await notifyOps(services, client, userId, '⚠️ The Jira poller is not running (Supabase not configured).');
         return;
       }
       try {
         const [stats] = await services.jiraPoller.runOnce({ force: true, onlyId: id });
         if (!stats) {
-          await client.chat.postMessage({ channel: userId, text: `⏳ *${existing.name}* is already being evaluated — try again in a moment.` });
+          await notifyOps(services, client, userId, `⏳ *${existing.name}* is already being evaluated — try again in a moment.`);
           return;
         }
         const lines = [`▶️ Ran *${existing.name}* — \`${existing.jql}\``];
@@ -340,10 +352,10 @@ function registerJiraTriggerHandler(app, services) {
           if (stats.skipped.length) lines.push(...stats.skipped.slice(0, 10).map((s) => `  ⏭ ${s}`));
           if (stats.matched > 0 && stats.fresh === 0) lines.push('_Everyone matching has already been asked. Use 🔁 Re-ask open matches to ask again._');
         }
-        await client.chat.postMessage({ channel: userId, text: lines.join('\n') });
+        await notifyOps(services, client, userId, lines.join('\n'));
       } catch (err) {
         logger.error(`[jiraTrigger] Run now failed for ${id}: ${errDetail(err)}`);
-        await client.chat.postMessage({ channel: userId, text: `❌ Run failed: ${errDetail(err)}` });
+        await notifyOps(services, client, userId, `❌ Run failed: ${errDetail(err)}`);
       }
       return;
     }
@@ -356,13 +368,10 @@ function registerJiraTriggerHandler(app, services) {
         const summary = stats && !stats.error
           ? `${stats.matched} issue(s) match · ${stats.sent} DM(s) sent${stats.skipped.length ? ` · ${stats.skipped.length} skipped` : ''}`
           : (stats?.error ? `❌ ${stats.error}` : 'poller not available');
-        await client.chat.postMessage({
-          channel: userId,
-          text: `🔁 Re-asked *${existing.name}*: cleared ${cleared} previous prompt(s).\n${summary}${stats?.sentTo?.length ? `\n${stats.sentTo.map((s) => `  • ${s}`).join('\n')}` : ''}`,
-        });
+        await notifyOps(services, client, userId, `🔁 Re-asked *${existing.name}*: cleared ${cleared} previous prompt(s).\n${summary}${stats?.sentTo?.length ? `\n${stats.sentTo.map((s) => `  • ${s}`).join('\n')}` : ''}`);
       } catch (err) {
         logger.error(`[jiraTrigger] Re-ask failed for ${id}: ${errDetail(err)}`);
-        await client.chat.postMessage({ channel: userId, text: `❌ Re-ask failed: ${errDetail(err)}` });
+        await notifyOps(services, client, userId, `❌ Re-ask failed: ${errDetail(err)}`);
       }
       return;
     }
@@ -372,10 +381,10 @@ function registerJiraTriggerHandler(app, services) {
         await services.db.deactivateJiraTrigger(id);
         logger.info(`[jiraTrigger] Deleted "${existing.name}" (${id}) by ${userId}`);
         await publishHome(client, userId, services, logger);
-        await client.chat.postMessage({ channel: userId, text: `🗑 Jira trigger *${existing.name}* deleted.` });
+        await notifyOps(services, client, userId, `🗑 Jira trigger *${existing.name}* deleted.`);
       } catch (err) {
         logger.error(`[jiraTrigger] Failed to delete ${id}: ${errDetail(err)}`);
-        await client.chat.postMessage({ channel: userId, text: `❌ Failed to delete Jira trigger: ${errDetail(err)}` });
+        await notifyOps(services, client, userId, `❌ Failed to delete Jira trigger: ${errDetail(err)}`);
       }
     }
   });
@@ -419,7 +428,7 @@ function registerJiraTriggerHandler(app, services) {
     let existing = null;
     if (editId) existing = await findJiraTrigger(editId);
     if (editId && (!existing || !canManage(existing.created_by, userId))) {
-      await client.chat.postMessage({ channel: userId, text: '🚫 You can only edit Jira triggers you created.' }).catch(() => {});
+      await notifyOps(services, client, userId, '🚫 You can only edit Jira triggers you created.');
       return;
     }
     const scope = admin
@@ -454,15 +463,12 @@ function registerJiraTriggerHandler(app, services) {
       const actionText = actionType === 'transition'
         ? `move the issue to *${transitionTo}*`
         : `set *${fieldName || fieldId}* = *${fieldValue}*`;
-      await client.chat.postMessage({
-        channel: userId,
-        text: `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${notify}* of any new match. On *Yes* I'll ${actionText}.`,
-      });
+      await notifyOps(services, client, userId, `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${notify}* of any new match. On *Yes* I'll ${actionText}.`);
       // Evaluate this trigger right away regardless of its cadence
       services.jiraPoller?.runOnce({ force: true, onlyId: savedId }).catch(() => {});
     } catch (err) {
       logger.error(`[jiraTrigger] Failed to save: ${errDetail(err)}`);
-      await client.chat.postMessage({ channel: userId, text: `❌ Failed to save Jira trigger: ${errDetail(err)}` });
+      await notifyOps(services, client, userId, `❌ Failed to save Jira trigger: ${errDetail(err)}`);
     }
   });
 }
