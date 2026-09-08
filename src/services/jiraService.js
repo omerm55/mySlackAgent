@@ -182,23 +182,33 @@ class JiraService {
   }
 
   /**
-   * Run a JQL search. Returns the raw issue objects (key + requested fields).
+   * Run a JQL search and return ALL matching issues (key + requested fields),
+   * following Jira's nextPageToken pagination up to `maxResults`.
    * @param {string} jql
    * @param {string[]} [fields]
-   * @param {number} [maxResults]
+   * @param {number} [maxResults]  hard cap across pages (default 1000)
    * @returns {Promise<Array<{ key: string, fields: object }>>}
    */
-  async searchIssues(jql, fields = ['summary', 'status', 'reporter', 'assignee'], maxResults = 50) {
+  async searchIssues(jql, fields = ['summary', 'status', 'reporter', 'assignee'], maxResults = 1000) {
+    const issues = [];
+    let nextPageToken;
     try {
-      const response = await this.client.post('/rest/api/3/search/jql', {
-        jql, fields, maxResults,
-      });
-      return response.data.issues ?? [];
+      do {
+        const body = { jql, fields, maxResults: Math.min(100, maxResults - issues.length) };
+        if (nextPageToken) body.nextPageToken = nextPageToken;
+        const response = await this.client.post('/rest/api/3/search/jql', body);
+        issues.push(...(response.data.issues ?? []));
+        nextPageToken = response.data.nextPageToken;
+      } while (nextPageToken && issues.length < maxResults);
     } catch (err) {
       const status = err.response ? `HTTP ${err.response.status}` : err.message;
       const detail = err.response?.data?.errorMessages?.join('; ') || '';
       throw new Error(`${status} — JQL search failed${detail ? `: ${detail}` : ''}`);
     }
+    if (nextPageToken && issues.length >= maxResults) {
+      issues.truncated = true; // caller may warn that more results exist
+    }
+    return issues;
   }
 
   /**
@@ -287,7 +297,10 @@ class JiraService {
       if (!meta.required || meta.hasDefaultValue) continue;
       if (fieldId === 'resolution') {
         const allowed = meta.allowedValues || [];
-        const pick = allowed.find((r) => /^(done|fixed|resolved)$/i.test(r.name)) || allowed[0];
+        const byPreference = ['done', 'fixed', 'resolved']
+          .map((want) => allowed.find((r) => (r.name || '').toLowerCase() === want))
+          .find(Boolean);
+        const pick = byPreference || allowed[0];
         if (pick) fields.resolution = { id: pick.id };
         else unfillable.push(meta.name || fieldId);
       } else {

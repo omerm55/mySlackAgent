@@ -97,6 +97,10 @@ class JiraPoller {
 
     const issues = await this.jira.searchIssues(trigger.jql, ['summary', 'status', 'reporter', 'assignee']);
     stats.matched = issues.length;
+    if (issues.truncated) {
+      this.logger.warn(`${tag} JQL matches more than ${issues.length} issues — only the first ${issues.length} were evaluated this run`);
+      stats.skipped.push(`JQL matches more than ${issues.length} issues; narrow it down`);
+    }
     if (issues.length === 0) return stats;
 
     const prompted = await this.db.getPromptedIssueKeys(trigger.id);
