@@ -36,6 +36,7 @@ function registerReactionHandler(app, jiraService, attributionService, config, s
     try {
       if (!THUMBS_UP_EMOJIS.has(event.reaction)) return;
       if (event.item.type !== 'message') return;
+      logger.info(`${tag} 👍 received from ${event.user} in channel ${event.item.channel} (watching: ${watchChannelId})`);
       if (event.item.channel !== watchChannelId) return;
 
       // Authorization: check allowlist if one is configured
