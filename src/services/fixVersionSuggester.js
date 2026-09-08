@@ -102,15 +102,18 @@ const windowLabel = (e) => {
  */
 async function suggestFixVersion({ jira, llm, db, issueKey, logger, now = new Date() }) {
   const projectKey = issueKey.split('-')[0];
+  const t0 = Date.now();
+  const timed = (label, p) => p.then((v) => { logger?.info?.(`[fixVersion] ${issueKey} ${label}: ${Date.now() - t0}ms`); return v; });
+
   const [epic, children, versions, calendar] = await Promise.all([
-    jira.getIssue(issueKey).catch(() => null),
-    getEpicChildren(jira, issueKey),
-    jira.getProjectVersions(projectKey),
-    db?.getReleaseCalendar ? db.getReleaseCalendar().catch(() => []) : Promise.resolve([]),
+    timed('issue', jira.getIssue(issueKey).catch(() => null)),
+    timed('children', getEpicChildren(jira, issueKey)),
+    timed('versions', jira.getProjectVersions(projectKey)),
+    timed('calendar', db?.getReleaseCalendar ? db.getReleaseCalendar().catch(() => []) : Promise.resolve([])),
   ]);
   const statusName = epic?.fields?.status?.name || '';
   const acceptedAt = statusName && typeof jira.getStatusEnteredAt === 'function'
-    ? await jira.getStatusEnteredAt(issueKey, statusName).catch(() => null)
+    ? await timed('changelog', jira.getStatusEnteredAt(issueKey, statusName).catch(() => null))
     : null;
 
   const candidates = candidateVersions(versions);
@@ -169,7 +172,7 @@ async function suggestFixVersion({ jira, llm, db, issueKey, logger, now = new Da
   // 2. Mixed evidence → LLM
   if (llm && candidates.length > 0 && (children.length > 0 || timelineFit || current)) {
     try {
-      const res = await llm.suggestFixVersion({
+      const res = await timed('llm', llm.suggestFixVersion({
         epicKey: issueKey,
         epicSummary: epic?.fields?.summary || '',
         statusName,
@@ -188,7 +191,7 @@ async function suggestFixVersion({ jira, llm, db, issueKey, logger, now = new Da
         })),
         tally: ranked.map((t) => ({ name: t.name, count: t.count })),
         candidates: candidates.map((c) => ({ id: c.id, name: c.name, released: Boolean(c.released), releaseDate: c.releaseDate || null })),
-      });
+      }));
       result.usedLlm = true;
       if (res?.versionId && byId.has(String(res.versionId))) {
         result.pick = byId.get(String(res.versionId));

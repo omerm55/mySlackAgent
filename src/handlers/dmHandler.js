@@ -2,6 +2,17 @@
 
 const { issueLink } = require('../utils/jiraLink');
 const { suggestFixVersion } = require('../services/fixVersionSuggester');
+const { logger: baseLogger } = require('../utils/logger');
+
+const SUGGESTION_BUDGET_MS = 25_000;
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 /**
  * Handles interactive button responses to bot-initiated DM questions.
@@ -38,16 +49,23 @@ function registerDmHandler(app, jiraService, services) {
   }
 
   async function replaceButtons(client, channelId, messageTs, originalText, newText, extraBlocks = []) {
-    await client.chat.update({
-      channel: channelId,
-      ts: messageTs,
-      text: newText,
-      blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: originalText } },
-        { type: 'section', text: { type: 'mrkdwn', text: newText } },
-        ...extraBlocks,
-      ],
-    }).catch(() => {});
+    try {
+      await client.chat.update({
+        channel: channelId,
+        ts: messageTs,
+        text: newText,
+        blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: originalText } },
+          { type: 'section', text: { type: 'mrkdwn', text: newText } },
+          ...extraBlocks,
+        ],
+      });
+    } catch (err) {
+      // Don't swallow silently — a failed update leaves the user staring at a stale message.
+      const detail = err.data?.error || err.message;
+      const meta = err.data?.response_metadata?.messages?.join(' | ');
+      baseLogger.error(`[dm] chat.update failed (${detail})${meta ? ` — ${meta}` : ''}`);
+    }
   }
 
   const needsFixVersion = (err) => /fix\s*version/i.test(err?.message || '');
@@ -65,16 +83,44 @@ function registerDmHandler(app, jiraService, services) {
     await replaceButtons(client, channelId, messageTs, originalText,
       `${intro}\n_Checking its child issues and the release calendar for a suggestion…_`);
 
+    const baseCtx = { ...context, dmChannelId: channelId, messageTs, originalText: (originalText || '').slice(0, 600) };
+    const pickerButton = (suggestedId = null, label = '🏷 Choose a version') => ({
+      type: 'button',
+      text: { type: 'plain_text', text: label, emoji: true },
+      action_id: 'jira_set_fixversion',
+      value: JSON.stringify({ ...baseCtx, suggestedId }),
+    });
+
     let suggestion = null;
+    let suggestionNote = '';
+    const started = Date.now();
     try {
-      suggestion = await suggestFixVersion({ jira: jiraService, llm: services.llmService, db: services.db, issueKey, logger });
+      suggestion = await withTimeout(
+        suggestFixVersion({ jira: jiraService, llm: services.llmService, db: services.db, issueKey, logger }),
+        SUGGESTION_BUDGET_MS,
+        'Fix Version suggestion',
+      );
+      logger.info(`[dm] Fix Version suggestion for ${issueKey} took ${Date.now() - started}ms (pick: ${suggestion?.pick?.name || 'none'}, llm: ${suggestion?.usedLlm})`);
     } catch (err) {
-      logger.warn(`[dm] Fix Version suggestion failed for ${issueKey}: ${err.message}`);
+      logger.warn(`[dm] Fix Version suggestion failed for ${issueKey} after ${Date.now() - started}ms: ${err.message}`);
+      suggestionNote = /timed out/.test(err.message)
+        ? '\n_The suggestion took too long — pick a version manually._'
+        : '\n_I couldn\'t compute a suggestion — pick a version manually._';
     }
 
-    const baseCtx = { ...context, dmChannelId: channelId, messageTs, originalText: (originalText || '').slice(0, 600) };
+    try {
+      await renderFixVersionOffer(client, channelId, messageTs, originalText, intro, suggestion, suggestionNote, baseCtx, pickerButton);
+    } catch (err) {
+      // Never leave the "Checking…" message up: fall back to the bare picker.
+      logger.error(`[dm] Rendering Fix Version offer failed for ${issueKey}: ${err.message}`);
+      await replaceButtons(client, channelId, messageTs, originalText, intro,
+        [{ type: 'actions', elements: [pickerButton()] }]);
+    }
+  }
+
+  async function renderFixVersionOffer(client, channelId, messageTs, originalText, intro, suggestion, suggestionNote, baseCtx, pickerButton) {
     const buttons = [];
-    let text = intro;
+    let text = intro + suggestionNote;
 
     if (suggestion?.pick) {
       const { pick, reason, alternative, children, usedLlm, acceptedAt, statusName } = suggestion;
@@ -103,16 +149,11 @@ function registerDmHandler(app, jiraService, services) {
       }
     } else if (suggestion && suggestion.children.length === 0 && !suggestion.acceptedAt) {
       text += '\n_I couldn\'t find child issues or a release calendar to base a suggestion on._';
-    } else {
+    } else if (suggestion) {
       text += '\n_I couldn\'t narrow it down to one version._';
     }
 
-    buttons.push({
-      type: 'button',
-      text: { type: 'plain_text', text: suggestion?.pick ? '🏷 Choose another…' : '🏷 Choose a version', emoji: true },
-      action_id: 'jira_set_fixversion',
-      value: JSON.stringify({ ...baseCtx, suggestedId: suggestion?.pick?.id ?? null }),
-    });
+    buttons.push(pickerButton(suggestion?.pick?.id ?? null, suggestion?.pick ? '🏷 Choose another…' : '🏷 Choose a version'));
 
     await replaceButtons(client, channelId, messageTs, originalText, text, [{ type: 'actions', elements: buttons }]);
   }
@@ -202,7 +243,8 @@ function registerDmHandler(app, jiraService, services) {
       logger.error(`[dm] Failed to update ${issueKey}: ${err.message}`);
       if (needsFixVersion(err) && channelId && messageTs) {
         // Jira wants a Fix Version before this transition — suggest one from the children and offer a retry.
-        await offerFixVersion(client, context, channelId, messageTs, originalText, logger);
+        await offerFixVersion(client, context, channelId, messageTs, originalText, logger)
+          .catch((e) => logger.error(`[dm] offerFixVersion failed for ${issueKey}: ${e.message}`));
       } else {
         if (channelId && messageTs) {
           await replaceButtons(client, channelId, messageTs, originalText,
@@ -473,7 +515,8 @@ function registerDmHandler(app, jiraService, services) {
       logger.error(`[dm] LLM-driven action failed for ${issueKey}: ${err.message}`);
       if (needsFixVersion(err) && dmChannelId && messageTs) {
         const target = decision.transitionTo || transitionTo;
-        await offerFixVersion(client, { ...context, transitionTo: target }, dmChannelId, messageTs, originalText, logger);
+        await offerFixVersion(client, { ...context, transitionTo: target }, dmChannelId, messageTs, originalText, logger)
+          .catch((e) => logger.error(`[dm] offerFixVersion failed for ${issueKey}: ${e.message}`));
       } else {
         if (dmChannelId && messageTs) {
           await replaceButtons(client, dmChannelId, messageTs, originalText,
