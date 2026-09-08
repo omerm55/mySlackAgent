@@ -66,10 +66,18 @@ class LlmService {
   }
 
   async _callOpenAI(userMessage) {
-    const model = process.env.OPENAI_MODEL || 'gpt-4o';
+    const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+    const model = process.env.OPENAI_DEPLOYMENT || process.env.OPENAI_MODEL || 'gpt-4o';
+    const isAzure = Boolean(process.env.OPENAI_BASE_URL);
+    const headers = {
+      'content-type': 'application/json',
+      ...(isAzure
+        ? { 'api-key': this.apiKey }
+        : { Authorization: `Bearer ${this.apiKey}` }),
+    };
     try {
       const resp = await axios.post(
-        'https://api.openai.com/v1/chat/completions',
+        `${baseUrl}/chat/completions`,
         {
           model,
           max_tokens: 512,
@@ -79,13 +87,7 @@ class LlmService {
             { role: 'user', content: userMessage },
           ],
         },
-        {
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            'content-type': 'application/json',
-          },
-          timeout: 15_000,
-        }
+        { headers, timeout: 15_000 }
       );
       return resp.data.choices[0].message.content;
     } catch (err) {
