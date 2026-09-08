@@ -18,10 +18,18 @@ function registerDmHandler(app, jiraService, services) {
 
   // ── helpers ──────────────────────────────────────────────────────────────
 
-  async function resolveJira(slackUserId) {
+  async function resolveJira(slackUserId, client) {
     const { oauthService } = services;
-    if (oauthService && slackUserId && oauthService.hasToken(slackUserId)) {
+    if (!oauthService || !slackUserId) return jiraService;
+    if (oauthService.hasToken(slackUserId)) {
       try { return await oauthService.getJiraService(slackUserId); } catch { /* fall through */ }
+    } else if (client) {
+      // First time — DM the user an auth link (fire and forget)
+      const authUrl = oauthService.generateAuthUrl(slackUserId);
+      client.chat.postMessage({
+        channel: slackUserId,
+        text: `👋 To make your Jira changes appear as *you* (not the bot), <${authUrl}|connect your Jira account>. This change was made by the bot account.`,
+      }).catch(() => {});
     }
     return jiraService;
   }
@@ -60,7 +68,7 @@ function registerDmHandler(app, jiraService, services) {
     try {
       const { oauthService } = services;
       const usingOAuth = oauthService?.hasToken(slackUserId) ?? false;
-      const effectiveJira = await resolveJira(slackUserId);
+      const effectiveJira = await resolveJira(slackUserId, client);
       await effectiveJira.updateIssueField(issueKey, jiraFieldId, jiraFieldValue, jiraFieldType || 'select');
       logger.info(`[dm] Updated ${issueKey} ${jiraFieldId}=${jiraFieldValue} ✓`);
       if (channelId && messageTs) {
@@ -197,7 +205,7 @@ function registerDmHandler(app, jiraService, services) {
       return;
     }
 
-    const effectiveJira = await resolveJira(slackUserId);
+    const effectiveJira = await resolveJira(slackUserId, client);
 
     try {
       if (decision.action === 'update_field') {
