@@ -37,10 +37,11 @@ class LlmService {
   }
 
   /**
-   * Factory: pick provider from env vars. Returns null if neither key is set.
-   * GEMINI_API_KEY takes precedence over ANTHROPIC_API_KEY.
+   * Factory: pick provider from env vars. Returns null if no key is set.
+   * Priority: OPENAI_API_KEY > GEMINI_API_KEY > ANTHROPIC_API_KEY
    */
   static fromEnv() {
+    if (process.env.OPENAI_API_KEY) return new LlmService('openai', process.env.OPENAI_API_KEY);
     if (process.env.GEMINI_API_KEY) return new LlmService('gemini', process.env.GEMINI_API_KEY);
     if (process.env.ANTHROPIC_API_KEY) return new LlmService('anthropic', process.env.ANTHROPIC_API_KEY);
     return null;
@@ -54,12 +55,45 @@ class LlmService {
       `User's response: "${userText}"\n\n` +
       `What action should be taken?`;
 
-    const raw = this.provider === 'gemini'
-      ? await this._callGemini(userMessage)
-      : await this._callAnthropic(userMessage);
+    const raw = this.provider === 'openai'
+      ? await this._callOpenAI(userMessage)
+      : this.provider === 'gemini'
+        ? await this._callGemini(userMessage)
+        : await this._callAnthropic(userMessage);
 
     const cleaned = raw.trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
     return JSON.parse(cleaned);
+  }
+
+  async _callOpenAI(userMessage) {
+    const model = process.env.OPENAI_MODEL || 'gpt-4o';
+    try {
+      const resp = await axios.post(
+        'https://api.openai.com/v1/chat/completions',
+        {
+          model,
+          max_tokens: 512,
+          temperature: 0.1,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: userMessage },
+          ],
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            'content-type': 'application/json',
+          },
+          timeout: 15_000,
+        }
+      );
+      return resp.data.choices[0].message.content;
+    } catch (err) {
+      if (err.response) {
+        throw new Error(`OpenAI ${err.response.status}: ${JSON.stringify(err.response.data)}`);
+      }
+      throw err;
+    }
   }
 
   async _callGemini(userMessage) {
