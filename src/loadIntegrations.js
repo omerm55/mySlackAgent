@@ -20,11 +20,8 @@ function loadIntegrations(filePath) {
   if (!fs.existsSync(configPath)) {
     const jsonStr = process.env.INTEGRATIONS_JSON;
     if (!jsonStr) {
-      console.error(
-        `Integrations config not found at: ${configPath}\n` +
-        `Copy config/integrations.example.json to config/integrations.json, or set INTEGRATIONS_JSON env var.`
-      );
-      process.exit(1);
+      // No static config — integrations come from Supabase (created via App Home).
+      return [];
     }
     try {
       raw = JSON.parse(jsonStr);
@@ -41,8 +38,8 @@ function loadIntegrations(filePath) {
     }
   }
 
-  if (!Array.isArray(raw) || raw.length === 0) {
-    console.error('integrations.json must be a non-empty array.');
+  if (!Array.isArray(raw)) {
+    console.error('integrations config must be a JSON array.');
     process.exit(1);
   }
 
