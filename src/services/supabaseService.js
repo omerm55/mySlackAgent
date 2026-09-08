@@ -88,11 +88,15 @@ class SupabaseService {
     return res.data?.[0];
   }
 
-  async deactivateIntegration(id) {
-    await this.client.patch('/integrations', { active: false }, {
+  async updateIntegration(id, fields) {
+    await this.client.patch('/integrations', fields, {
       params: { id: `eq.${id}` },
       headers: { Prefer: 'return=minimal' },
     });
+  }
+
+  async deactivateIntegration(id) {
+    await this.updateIntegration(id, { active: false });
   }
 
   // ── jira_triggers (JQL-polled, DM-driven) ─────────────────────────────
@@ -111,11 +115,15 @@ class SupabaseService {
     return res.data?.[0];
   }
 
-  async deactivateJiraTrigger(id) {
-    await this.client.patch('/jira_triggers', { active: false }, {
+  async updateJiraTrigger(id, fields) {
+    await this.client.patch('/jira_triggers', fields, {
       params: { id: `eq.${id}` },
       headers: { Prefer: 'return=minimal' },
     });
+  }
+
+  async deactivateJiraTrigger(id) {
+    await this.updateJiraTrigger(id, { active: false });
   }
 
   // ── jira_prompts (one DM per trigger × issue) ─────────────────────────

@@ -1,53 +1,156 @@
 'use strict';
 
-const ADMIN_USER_IDS = new Set(
-  (process.env.ADMIN_SLACK_USER_IDS || '').split(',').map((s) => s.trim()).filter(Boolean),
-);
+const { isAdmin, canManage } = require('../utils/admins');
+const { publishHome } = require('./homeHandler');
 
-/**
- * Registers the "Create Trigger" button action and modal submission handler.
- *
- * App Home "➕ Create Trigger" button → action home_create_trigger
- *   → opens create_trigger_modal
- *   → on submit: save to Supabase, invalidate integrationCache, refresh Home
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Block Kit helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+const plain = (text) => ({ type: 'plain_text', text, emoji: true });
+
+function input(blockId, label, element, extra = {}) {
+  return { type: 'input', block_id: blockId, label: plain(label), element: { action_id: 'value', ...element }, ...extra };
+}
+
+function textInput(placeholder, { multiline = false, initial } = {}) {
+  const el = { type: 'plain_text_input', multiline, placeholder: plain(placeholder) };
+  if (typeof initial === 'string' && initial.length > 0) el.initial_value = initial;
+  return el;
+}
+
+function radios(options, initial) {
+  const opts = options.map(([value, label]) => ({ text: plain(label), value }));
+  const el = { type: 'radio_buttons', options: opts };
+  const init = opts.find((o) => o.value === initial);
+  if (init) el.initial_option = init;
+  return el;
+}
+
+function checkboxes(options, initialValues = []) {
+  const opts = options.map(([value, label]) => ({ text: plain(label), value }));
+  const el = { type: 'checkboxes', options: opts };
+  const init = opts.filter((o) => initialValues.includes(o.value));
+  if (init.length > 0) el.initial_options = init;
+  return el;
+}
+
+function parseMenu(body) {
+  const value = body.actions?.[0]?.selected_option?.value || '';
+  const [op, id] = value.split(':');
+  return { op, id };
+}
+
+function errDetail(err) {
+  return err.response?.data ? JSON.stringify(err.response.data) : err.message;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Channel triggers (reaction / reply → set a Jira field)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildChannelTriggerModal(admin, existing = null) {
+  const blocks = [
+    input('name_block', 'Trigger name', textInput('e.g. PM Reviewed — Product Bugs', { initial: existing?.name })),
+    input('channel_block', 'Slack channel to watch', {
+      type: 'conversations_select',
+      placeholder: plain('Select a channel (type to search)'),
+      filter: { include: ['public', 'private'], exclude_bot_users: true },
+      ...(existing?.slackChannelId ? { initial_conversation: existing.slackChannelId } : {}),
+    }, { optional: true }),
+    input('channel_id_block', '…or paste a channel ID', textInput('e.g. C0123ABCDEF'), {
+      optional: true,
+      hint: plain('Use this if the channel does not appear in the picker. Channel details → copy the ID at the bottom.'),
+    }),
+    input('triggers_block', 'Trigger on', checkboxes(
+      [['reaction', '👍 Reaction (thumbs up / ✅)'], ['reply', '💬 Thread reply']],
+      existing?.triggers ?? [],
+    )),
+    input('field_id_block', 'Jira field ID', textInput('e.g. customfield_11296', { initial: existing?.jiraFieldId }), {
+      hint: plain('Find this in Jira project settings → Fields, or ask your Jira admin.'),
+    }),
+    input('field_name_block', 'Field display name (optional)', textInput('e.g. PM Reviewed', { initial: existing?.jiraFieldName }), { optional: true }),
+    input('field_value_block', 'Value to set', textInput('e.g. Yes', { initial: existing?.jiraFieldValue })),
+  ];
+  if (admin) {
+    blocks.push(input('scope_block', 'Who does this trigger apply to?', radios(
+      [['global', 'Everyone in the channel'], ['personal', 'Only me']],
+      existing?.scope ?? 'global',
+    )));
+  }
+  return {
+    type: 'modal',
+    callback_id: 'create_trigger_modal',
+    private_metadata: JSON.stringify({ id: existing?.id ?? null }),
+    title: plain(existing ? 'Edit Trigger' : 'Create Trigger'),
+    submit: plain('Save'),
+    close: plain('Cancel'),
+    blocks,
+  };
+}
+
 function registerTriggerHandler(app, services) {
   const { integrationCache } = services;
 
-  // Open the modal when the button is clicked
   app.action('home_create_trigger', async ({ ack, body, client, logger }) => {
     await ack();
-    const userId = body.user.id;
-    const isAdmin = ADMIN_USER_IDS.has(userId);
-
     try {
-      await client.views.open({
-        trigger_id: body.trigger_id,
-        view: buildCreateModal(isAdmin),
-      });
+      await client.views.open({ trigger_id: body.trigger_id, view: buildChannelTriggerModal(isAdmin(body.user.id)) });
     } catch (err) {
       logger.error(`[trigger] Failed to open modal: ${err.message}`);
     }
   });
 
-  // Handle modal submission
+  // ✏️ Edit / 🗑 Delete from the Home tab overflow menu
+  app.action('trigger_menu', async ({ ack, body, client, logger }) => {
+    await ack();
+    const userId = body.user.id;
+    const { op, id } = parseMenu(body);
+    const all = await integrationCache.getAll();
+    const existing = all.find((i) => i.id === id);
+    if (!existing || !canManage(existing.createdBy, userId)) {
+      await client.chat.postMessage({ channel: userId, text: '🚫 You can only edit or delete triggers you created.' }).catch(() => {});
+      return;
+    }
+
+    if (op === 'edit') {
+      try {
+        await client.views.open({ trigger_id: body.trigger_id, view: buildChannelTriggerModal(isAdmin(userId), existing) });
+      } catch (err) {
+        logger.error(`[trigger] Failed to open edit modal: ${err.message}`);
+      }
+      return;
+    }
+
+    if (op === 'delete') {
+      try {
+        await services.db.deactivateIntegration(id);
+        integrationCache.invalidate();
+        logger.info(`[trigger] Deleted integration "${existing.name}" (${id}) by ${userId}`);
+        await publishHome(client, userId, services, logger);
+        await client.chat.postMessage({ channel: userId, text: `🗑 Trigger *${existing.name}* deleted.` });
+      } catch (err) {
+        logger.error(`[trigger] Failed to delete ${id}: ${errDetail(err)}`);
+        await client.chat.postMessage({ channel: userId, text: `❌ Failed to delete trigger: ${errDetail(err)}` });
+      }
+    }
+  });
+
   app.view('create_trigger_modal', async ({ ack, body, view, client, logger }) => {
     const userId = body.user.id;
-    const isAdmin = ADMIN_USER_IDS.has(userId);
+    const admin = isAdmin(userId);
     const v = view.state.values;
+    let editId = null;
+    try { editId = JSON.parse(view.private_metadata || '{}').id || null; } catch { /* create */ }
 
-    const name = v.name_block.trigger_name.value?.trim();
-    const manualChannelId = v.channel_id_block?.trigger_channel_id?.value?.trim();
-    const channelId = manualChannelId || v.channel_block?.trigger_channel?.selected_conversation;
-    const triggers = v.triggers_block.trigger_events.selected_options?.map((o) => o.value) ?? [];
-    const jiraFieldId = v.field_id_block.jira_field_id.value?.trim();
-    const jiraFieldName = v.field_name_block.jira_field_name.value?.trim() || jiraFieldId;
-    const jiraFieldValue = v.field_value_block.jira_field_value.value?.trim();
-    const scope = isAdmin
-      ? (v.scope_block?.trigger_scope?.selected_option?.value ?? 'personal')
-      : 'personal';
+    const name = v.name_block.value.value?.trim();
+    const manualChannelId = v.channel_id_block?.value?.value?.trim();
+    const channelId = manualChannelId || v.channel_block?.value?.selected_conversation;
+    const triggers = v.triggers_block.value.selected_options?.map((o) => o.value) ?? [];
+    const jiraFieldId = v.field_id_block.value.value?.trim();
+    const jiraFieldName = v.field_name_block.value.value?.trim() || jiraFieldId;
+    const jiraFieldValue = v.field_value_block.value.value?.trim();
 
-    // Inline validation — shown under the offending field in the modal
     const errors = {};
     if (!channelId) errors.channel_block = 'Pick a channel or paste a channel ID below.';
     if (manualChannelId && !/^[CG][A-Z0-9]{8,}$/.test(manualChannelId)) {
@@ -60,7 +163,18 @@ function registerTriggerHandler(app, services) {
     }
     await ack();
 
-    const integration = {
+    // Scope: admins choose; non-admins keep the existing scope on edit, personal on create
+    let existing = null;
+    if (editId) existing = (await integrationCache.getAll()).find((i) => i.id === editId) || null;
+    if (editId && (!existing || !canManage(existing.createdBy, userId))) {
+      await client.chat.postMessage({ channel: userId, text: '🚫 You can only edit triggers you created.' }).catch(() => {});
+      return;
+    }
+    const scope = admin
+      ? (v.scope_block?.value?.selected_option?.value ?? existing?.scope ?? 'global')
+      : (existing?.scope ?? 'personal');
+
+    const fields = {
       name,
       channel_id: channelId,
       triggers,
@@ -69,68 +183,136 @@ function registerTriggerHandler(app, services) {
       jira_field_value: jiraFieldValue,
       jira_field_type: 'select',
       scope,
-      created_by: userId,
-      active: true,
     };
 
     try {
-      if (services.db) {
-        await services.db.upsertIntegration(integration);
+      if (!services.db) throw new Error('Supabase is not configured');
+      if (editId) {
+        await services.db.updateIntegration(editId, fields);
+        logger.info(`[trigger] Updated integration "${name}" (${editId}) by ${userId}`);
+      } else {
+        await services.db.upsertIntegration({ ...fields, created_by: userId, active: true });
+        logger.info(`[trigger] Created integration "${name}" by ${userId} (scope: ${scope})`);
       }
       integrationCache.invalidate();
-      logger.info(`[trigger] Created integration "${name}" by ${userId} (scope: ${scope})`);
 
-      // Make sure the bot is in the channel, otherwise it receives no events there.
-      // conversations.join only works for public channels; private ones need an /invite.
+      // Make sure the bot is in the channel; private channels need a manual /invite.
       let joinNote = '';
       try {
         await client.conversations.join({ channel: channelId });
       } catch (joinErr) {
-        logger.warn(`[trigger] Could not auto-join ${channelId}: ${joinErr.data?.error || joinErr.message}`);
-        joinNote = `\n\n⚠️ I couldn't join <#${channelId}> automatically (it's probably private). Please run \`/invite @Slack-Jira Bot\` in that channel, otherwise I won't see reactions there.`;
+        const code = joinErr.data?.error || joinErr.message;
+        if (code !== 'already_in_channel') {
+          logger.warn(`[trigger] Could not auto-join ${channelId}: ${code}`);
+          joinNote = `\n\n⚠️ I couldn't join <#${channelId}> automatically (it's probably private). Please run \`/invite @Slack-Jira Bot\` there, otherwise I won't see reactions.`;
+        }
       }
 
-      // Refresh App Home so the new integration appears
-      await client.views.publish({
-        user_id: userId,
-        view: { type: 'home', blocks: await buildRefreshBlocks() },
-      }).catch(() => {});
+      await publishHome(client, userId, services, logger);
 
-      // DM the user a confirmation
+      const when = triggers.map((t) => (t === 'reaction' ? '👍 reactions' : '💬 thread replies')).join(' and ');
       await client.chat.postMessage({
         channel: userId,
-        text: `✅ Trigger *${name}* created! It will fire on ${triggers.map((t) => t === 'reaction' ? '👍 reactions' : '💬 thread replies').join(' and ')} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${joinNote}`,
+        text: `✅ Trigger *${name}* ${editId ? 'updated' : 'created'}! It fires on ${when} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${joinNote}`,
       });
     } catch (err) {
-      const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-      logger.error(`[trigger] Failed to save integration: ${detail}`);
-      await client.chat.postMessage({
-        channel: userId,
-        text: `❌ Failed to create trigger: ${detail}`,
-      });
+      logger.error(`[trigger] Failed to save integration: ${errDetail(err)}`);
+      await client.chat.postMessage({ channel: userId, text: `❌ Failed to save trigger: ${errDetail(err)}` });
     }
   });
 }
 
-/**
- * Registers the "Create Jira Trigger" button + modal.
- * A Jira trigger polls a JQL and DMs the reporter/assignee a Yes/No/Reply question.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Jira triggers (JQL poll → DM the reporter/assignee → transition or set field)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildJiraTriggerModal(admin, existing = null) {
+  const blocks = [
+    input('jt_name', 'Trigger name', textInput('e.g. Epic ready for PM acceptance', { initial: existing?.name })),
+    input('jt_jql', 'JQL condition', textInput('issuetype = Epic AND status = Acceptance', { multiline: true, initial: existing?.jql }), {
+      hint: plain('Checked every few minutes. Each matching issue is asked about once.'),
+    }),
+    input('jt_question', 'Question to ask', textInput('All children of {key} ({summary}) are done. Approve and move to Done?', { multiline: true, initial: existing?.question }), {
+      hint: plain('Placeholders: {key} {summary} {status} {reporter} {assignee}'),
+    }),
+    input('jt_notify', 'Who to DM', radios([['reporter', 'Reporter'], ['assignee', 'Assignee']], existing?.notify ?? 'reporter')),
+    input('jt_action', 'On "Yes", do this', radios([['transition', 'Move to a status'], ['field', 'Set a field']], existing?.action_type ?? 'transition')),
+    input('jt_transition', 'Target status (for "Move to a status")', textInput('e.g. Done', { initial: existing?.transition_to }), { optional: true }),
+    input('jt_field_id', 'Jira field ID (for "Set a field")', textInput('e.g. customfield_11296', { initial: existing?.jira_field_id }), { optional: true }),
+    input('jt_field_name', 'Field display name (optional)', textInput('e.g. PM Reviewed', { initial: existing?.jira_field_name }), { optional: true }),
+    input('jt_field_value', 'Value to set (for "Set a field")', textInput('e.g. Yes', { initial: existing?.jira_field_value }), { optional: true }),
+  ];
+  if (admin) {
+    blocks.push(input('jt_scope', 'Who does this apply to?', radios(
+      [['global', 'Anyone matched by the JQL'], ['personal', 'Only me (DM me only)']],
+      existing?.scope ?? 'global',
+    )));
+  }
+  return {
+    type: 'modal',
+    callback_id: 'create_jira_trigger_modal',
+    private_metadata: JSON.stringify({ id: existing?.id ?? null }),
+    title: plain(existing ? 'Edit Jira Trigger' : 'Create Jira Trigger'),
+    submit: plain('Save'),
+    close: plain('Cancel'),
+    blocks,
+  };
+}
+
 function registerJiraTriggerHandler(app, services) {
+  async function findJiraTrigger(id) {
+    if (!services.db) return null;
+    const all = await services.db.getActiveJiraTriggers();
+    return all.find((t) => t.id === id) || null;
+  }
+
   app.action('home_create_jira_trigger', async ({ ack, body, client, logger }) => {
     await ack();
-    const isAdmin = ADMIN_USER_IDS.has(body.user.id);
     try {
-      await client.views.open({ trigger_id: body.trigger_id, view: buildJiraTriggerModal(isAdmin) });
+      await client.views.open({ trigger_id: body.trigger_id, view: buildJiraTriggerModal(isAdmin(body.user.id)) });
     } catch (err) {
       logger.error(`[jiraTrigger] Failed to open modal: ${err.message}`);
     }
   });
 
+  app.action('jira_trigger_menu', async ({ ack, body, client, logger }) => {
+    await ack();
+    const userId = body.user.id;
+    const { op, id } = parseMenu(body);
+    const existing = await findJiraTrigger(id);
+    if (!existing || !canManage(existing.created_by, userId)) {
+      await client.chat.postMessage({ channel: userId, text: '🚫 You can only edit or delete Jira triggers you created.' }).catch(() => {});
+      return;
+    }
+
+    if (op === 'edit') {
+      try {
+        await client.views.open({ trigger_id: body.trigger_id, view: buildJiraTriggerModal(isAdmin(userId), existing) });
+      } catch (err) {
+        logger.error(`[jiraTrigger] Failed to open edit modal: ${err.message}`);
+      }
+      return;
+    }
+
+    if (op === 'delete') {
+      try {
+        await services.db.deactivateJiraTrigger(id);
+        logger.info(`[jiraTrigger] Deleted "${existing.name}" (${id}) by ${userId}`);
+        await publishHome(client, userId, services, logger);
+        await client.chat.postMessage({ channel: userId, text: `🗑 Jira trigger *${existing.name}* deleted.` });
+      } catch (err) {
+        logger.error(`[jiraTrigger] Failed to delete ${id}: ${errDetail(err)}`);
+        await client.chat.postMessage({ channel: userId, text: `❌ Failed to delete Jira trigger: ${errDetail(err)}` });
+      }
+    }
+  });
+
   app.view('create_jira_trigger_modal', async ({ ack, body, view, client, logger }) => {
     const userId = body.user.id;
-    const isAdmin = ADMIN_USER_IDS.has(userId);
+    const admin = isAdmin(userId);
     const v = view.state.values;
+    let editId = null;
+    try { editId = JSON.parse(view.private_metadata || '{}').id || null; } catch { /* create */ }
 
     const name = v.jt_name.value.value?.trim();
     const jql = v.jt_jql.value.value?.trim();
@@ -141,15 +323,12 @@ function registerJiraTriggerHandler(app, services) {
     const fieldId = v.jt_field_id?.value?.value?.trim();
     const fieldName = v.jt_field_name?.value?.value?.trim();
     const fieldValue = v.jt_field_value?.value?.value?.trim();
-    const scope = isAdmin ? (v.jt_scope?.value?.selected_option?.value ?? 'global') : 'personal';
 
     const errors = {};
     if (actionType === 'transition' && !transitionTo) errors.jt_transition = 'Enter the target status, e.g. Done.';
     if (actionType === 'field' && !fieldId) errors.jt_field_id = 'Enter the Jira field ID.';
     if (actionType === 'field' && !fieldValue) errors.jt_field_value = 'Enter the value to set.';
     if (!/\{key\}/.test(question || '')) errors.jt_question = 'Include {key} so the user knows which issue this is about.';
-
-    // Validate the JQL against Jira before saving
     if (jql && Object.keys(errors).length === 0) {
       try {
         await services.jiraService.searchIssues(jql, ['summary'], 1);
@@ -163,7 +342,17 @@ function registerJiraTriggerHandler(app, services) {
     }
     await ack();
 
-    const trigger = {
+    let existing = null;
+    if (editId) existing = await findJiraTrigger(editId);
+    if (editId && (!existing || !canManage(existing.created_by, userId))) {
+      await client.chat.postMessage({ channel: userId, text: '🚫 You can only edit Jira triggers you created.' }).catch(() => {});
+      return;
+    }
+    const scope = admin
+      ? (v.jt_scope?.value?.selected_option?.value ?? existing?.scope ?? 'global')
+      : (existing?.scope ?? 'personal');
+
+    const fields = {
       name, jql, question, notify, scope,
       action_type: actionType,
       transition_to: actionType === 'transition' ? transitionTo : null,
@@ -171,170 +360,33 @@ function registerJiraTriggerHandler(app, services) {
       jira_field_name: actionType === 'field' ? (fieldName || fieldId) : null,
       jira_field_value: actionType === 'field' ? fieldValue : null,
       jira_field_type: 'select',
-      created_by: userId,
-      active: true,
     };
 
     try {
       if (!services.db) throw new Error('Supabase is not configured');
-      await services.db.insertJiraTrigger(trigger);
-      logger.info(`[jiraTrigger] Created "${name}" by ${userId} (scope: ${scope})`);
+      if (editId) {
+        await services.db.updateJiraTrigger(editId, fields);
+        logger.info(`[jiraTrigger] Updated "${name}" (${editId}) by ${userId}`);
+      } else {
+        await services.db.insertJiraTrigger({ ...fields, created_by: userId, active: true });
+        logger.info(`[jiraTrigger] Created "${name}" by ${userId} (scope: ${scope})`);
+      }
+
+      await publishHome(client, userId, services, logger);
+
       const actionText = actionType === 'transition'
         ? `move the issue to *${transitionTo}*`
         : `set *${fieldName || fieldId}* = *${fieldValue}*`;
       await client.chat.postMessage({
         channel: userId,
-        text: `✅ Jira trigger *${name}* created. Every few minutes I'll check \`${jql}\` and DM the *${notify}* of any new match. On *Yes* I'll ${actionText}.`,
+        text: `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. Every few minutes I'll check \`${jql}\` and DM the *${notify}* of any new match. On *Yes* I'll ${actionText}.`,
       });
-      // Kick off an immediate poll so the demo doesn't wait for the interval
       services.jiraPoller?.runOnce().catch(() => {});
     } catch (err) {
-      const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-      logger.error(`[jiraTrigger] Failed to save: ${detail}`);
-      await client.chat.postMessage({ channel: userId, text: `❌ Failed to create Jira trigger: ${detail}` });
+      logger.error(`[jiraTrigger] Failed to save: ${errDetail(err)}`);
+      await client.chat.postMessage({ channel: userId, text: `❌ Failed to save Jira trigger: ${errDetail(err)}` });
     }
   });
-}
-
-function buildJiraTriggerModal(isAdmin) {
-  const input = (blockId, label, element, extra = {}) => ({
-    type: 'input', block_id: blockId, label: { type: 'plain_text', text: label },
-    element: { action_id: 'value', ...element }, ...extra,
-  });
-  const text = (placeholder, multiline = false) => ({
-    type: 'plain_text_input', multiline, placeholder: { type: 'plain_text', text: placeholder },
-  });
-  const radios = (options, initial) => ({
-    type: 'radio_buttons',
-    options: options.map(([value, label]) => ({ text: { type: 'plain_text', text: label }, value })),
-    initial_option: { text: { type: 'plain_text', text: options.find(([v]) => v === initial)[1] }, value: initial },
-  });
-
-  const blocks = [
-    input('jt_name', 'Trigger name', text('e.g. Epic ready for PM acceptance')),
-    input('jt_jql', 'JQL condition', text('issuetype = Epic AND status = Acceptance', true), {
-      hint: { type: 'plain_text', text: 'Checked every few minutes. Each matching issue is asked about once.' },
-    }),
-    input('jt_question', 'Question to ask', text('All children of {key} ({summary}) are done. Approve and move to Done?', true), {
-      hint: { type: 'plain_text', text: 'Placeholders: {key} {summary} {status} {reporter} {assignee}' },
-    }),
-    input('jt_notify', 'Who to DM', radios([['reporter', 'Reporter'], ['assignee', 'Assignee']], 'reporter')),
-    input('jt_action', 'On "Yes", do this', radios([['transition', 'Move to a status'], ['field', 'Set a field']], 'transition')),
-    input('jt_transition', 'Target status (for "Move to a status")', text('e.g. Done'), { optional: true }),
-    input('jt_field_id', 'Jira field ID (for "Set a field")', text('e.g. customfield_11296'), { optional: true }),
-    input('jt_field_name', 'Field display name (optional)', text('e.g. PM Reviewed'), { optional: true }),
-    input('jt_field_value', 'Value to set (for "Set a field")', text('e.g. Yes'), { optional: true }),
-  ];
-  if (isAdmin) {
-    blocks.push(input('jt_scope', 'Who does this apply to?', radios([['global', 'Anyone matched by the JQL'], ['personal', 'Only me (DM me only)']], 'global')));
-  }
-
-  return {
-    type: 'modal',
-    callback_id: 'create_jira_trigger_modal',
-    title: { type: 'plain_text', text: 'Create Jira Trigger' },
-    submit: { type: 'plain_text', text: 'Save' },
-    close: { type: 'plain_text', text: 'Cancel' },
-    blocks,
-  };
-}
-
-function buildCreateModal(isAdmin) {
-  const blocks = [
-    {
-      type: 'input',
-      block_id: 'name_block',
-      label: { type: 'plain_text', text: 'Trigger name' },
-      element: { type: 'plain_text_input', action_id: 'trigger_name', placeholder: { type: 'plain_text', text: 'e.g. PM Reviewed — Product Bugs' } },
-    },
-    {
-      type: 'input',
-      block_id: 'channel_block',
-      label: { type: 'plain_text', text: 'Slack channel to watch' },
-      optional: true,
-      element: {
-        type: 'conversations_select',
-        action_id: 'trigger_channel',
-        placeholder: { type: 'plain_text', text: 'Select a channel (type to search)' },
-        filter: { include: ['public', 'private'], exclude_bot_users: true },
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'channel_id_block',
-      label: { type: 'plain_text', text: '…or paste a channel ID' },
-      optional: true,
-      element: { type: 'plain_text_input', action_id: 'trigger_channel_id', placeholder: { type: 'plain_text', text: 'e.g. C0123ABCDEF' } },
-      hint: { type: 'plain_text', text: 'Use this if the channel does not appear in the picker. Right-click the channel → View channel details → copy the ID at the bottom.' },
-    },
-    {
-      type: 'input',
-      block_id: 'triggers_block',
-      label: { type: 'plain_text', text: 'Trigger on' },
-      element: {
-        type: 'checkboxes',
-        action_id: 'trigger_events',
-        options: [
-          { text: { type: 'plain_text', text: '👍 Reaction (thumbs up / ✅)' }, value: 'reaction' },
-          { text: { type: 'plain_text', text: '💬 Thread reply' }, value: 'reply' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'field_id_block',
-      label: { type: 'plain_text', text: 'Jira field ID' },
-      element: { type: 'plain_text_input', action_id: 'jira_field_id', placeholder: { type: 'plain_text', text: 'e.g. customfield_11296' } },
-      hint: { type: 'plain_text', text: 'Find this in Jira project settings → Fields, or ask your Jira admin.' },
-    },
-    {
-      type: 'input',
-      block_id: 'field_name_block',
-      label: { type: 'plain_text', text: 'Field display name (optional)' },
-      optional: true,
-      element: { type: 'plain_text_input', action_id: 'jira_field_name', placeholder: { type: 'plain_text', text: 'e.g. PM Reviewed' } },
-    },
-    {
-      type: 'input',
-      block_id: 'field_value_block',
-      label: { type: 'plain_text', text: 'Value to set' },
-      element: { type: 'plain_text_input', action_id: 'jira_field_value', placeholder: { type: 'plain_text', text: 'e.g. Yes' } },
-    },
-  ];
-
-  if (isAdmin) {
-    blocks.push({
-      type: 'input',
-      block_id: 'scope_block',
-      label: { type: 'plain_text', text: 'Who does this trigger apply to?' },
-      element: {
-        type: 'radio_buttons',
-        action_id: 'trigger_scope',
-        options: [
-          { text: { type: 'plain_text', text: 'Everyone in the channel' }, value: 'global' },
-          { text: { type: 'plain_text', text: 'Only me' }, value: 'personal' },
-        ],
-        initial_option: { text: { type: 'plain_text', text: 'Everyone in the channel' }, value: 'global' },
-      },
-    });
-  }
-
-  return {
-    type: 'modal',
-    callback_id: 'create_trigger_modal',
-    title: { type: 'plain_text', text: 'Create Trigger' },
-    submit: { type: 'plain_text', text: 'Save' },
-    close: { type: 'plain_text', text: 'Cancel' },
-    blocks,
-  };
-}
-
-// Minimal placeholder while the real home rebuilds via app_home_opened
-async function buildRefreshBlocks() {
-  return [
-    { type: 'header', text: { type: 'plain_text', text: '🔗 Slack-Jira Bot', emoji: true } },
-    { type: 'section', text: { type: 'mrkdwn', text: '✅ Trigger saved! Click *Home* to refresh and see your new trigger.' } },
-  ];
 }
 
 module.exports = { registerTriggerHandler, registerJiraTriggerHandler };
