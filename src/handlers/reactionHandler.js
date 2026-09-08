@@ -17,7 +17,11 @@ function registerReactionHandler(app, jiraService, attributionService, services)
       const matching = all.filter(
         (i) => i.triggers.includes('reaction') && i.slackChannelId === event.item.channel,
       );
-      if (matching.length === 0) return;
+      if (matching.length === 0) {
+        const known = [...new Set(all.map((i) => i.slackChannelId))].join(', ') || 'none';
+        logger.info(`[reaction] 👍 from ${event.user} in ${event.item.channel} — no integration matches (known channels: ${known})`);
+        return;
+      }
 
       logger.info(`[reaction] 👍 from ${event.user} in ${event.item.channel} — ${matching.length} integration(s) match`);
 

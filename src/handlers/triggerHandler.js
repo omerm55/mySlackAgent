@@ -38,7 +38,7 @@ function registerTriggerHandler(app, services) {
     const v = view.state.values;
 
     const name = v.name_block.trigger_name.value?.trim();
-    const channelId = v.channel_block.trigger_channel.selected_channel;
+    const channelId = v.channel_block.trigger_channel.selected_conversation;
     const triggers = v.triggers_block.trigger_events.selected_options?.map((o) => o.value) ?? [];
     const jiraFieldId = v.field_id_block.jira_field_id.value?.trim();
     const jiraFieldName = v.field_name_block.jira_field_name.value?.trim() || jiraFieldId;
@@ -72,6 +72,16 @@ function registerTriggerHandler(app, services) {
       integrationCache.invalidate();
       logger.info(`[trigger] Created integration "${name}" by ${userId} (scope: ${scope})`);
 
+      // Make sure the bot is in the channel, otherwise it receives no events there.
+      // conversations.join only works for public channels; private ones need an /invite.
+      let joinNote = '';
+      try {
+        await client.conversations.join({ channel: channelId });
+      } catch (joinErr) {
+        logger.warn(`[trigger] Could not auto-join ${channelId}: ${joinErr.data?.error || joinErr.message}`);
+        joinNote = `\n\n⚠️ I couldn't join <#${channelId}> automatically (it's probably private). Please run \`/invite @Slack-Jira Bot\` in that channel, otherwise I won't see reactions there.`;
+      }
+
       // Refresh App Home so the new integration appears
       await client.views.publish({
         user_id: userId,
@@ -81,7 +91,7 @@ function registerTriggerHandler(app, services) {
       // DM the user a confirmation
       await client.chat.postMessage({
         channel: userId,
-        text: `✅ Trigger *${name}* created! It will fire on ${triggers.map((t) => t === 'reaction' ? '👍 reactions' : '💬 thread replies').join(' and ')} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.`,
+        text: `✅ Trigger *${name}* created! It will fire on ${triggers.map((t) => t === 'reaction' ? '👍 reactions' : '💬 thread replies').join(' and ')} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${joinNote}`,
       });
     } catch (err) {
       const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
@@ -106,7 +116,12 @@ function buildCreateModal(isAdmin) {
       type: 'input',
       block_id: 'channel_block',
       label: { type: 'plain_text', text: 'Slack channel to watch' },
-      element: { type: 'channels_select', action_id: 'trigger_channel', placeholder: { type: 'plain_text', text: 'Select a channel' } },
+      element: {
+        type: 'conversations_select',
+        action_id: 'trigger_channel',
+        placeholder: { type: 'plain_text', text: 'Select a channel' },
+        filter: { include: ['public', 'private'], exclude_bot_users: true },
+      },
     },
     {
       type: 'input',
