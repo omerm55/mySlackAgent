@@ -174,19 +174,25 @@ function isDue(trigger, nowMs) {
   return nowMs - new Date(trigger.last_polled_at).getTime() >= intervalMs - 5_000; // 5s slack for tick jitter
 }
 
+// "{key}" immediately followed by "{summary}" with light glue between them:
+// "{key} ({summary})", "{key}: {summary}", "{key} - {summary}", "{key} — {summary}", "{key} {summary}"
+const KEY_AND_SUMMARY_RE = /\{key\}(\s*(?:[:\-–—|]\s*)?\(?)\{summary\}(\)?)/g;
+
 /**
  * Replace placeholders in a question template.
- *   {key} ({summary})  → one link labelled "KEY (summary)"
- *   {link}             → same as above
+ *   {key} ({summary}) / {key}: {summary} / … → ONE link labelled "KEY (summary)" etc.
+ *   {link}             → link labelled "KEY (summary)"
  *   {key}              → link labelled "KEY"
  *   {summary} {status} {reporter} {assignee} → plain text
+ * Summaries containing "|" are made link-safe automatically.
  */
 function renderTemplate(template, issue) {
   const f = issue.fields || {};
   const summary = f.summary || '';
   const combined = issueLinkLabelled(issue.key, summary ? `${issue.key} (${summary})` : issue.key);
   return (template || 'Approve {link}?')
-    .replace(/\{key\}\s*\(\{summary\}\)/g, combined)
+    .replace(KEY_AND_SUMMARY_RE, (_m, glue, close) =>
+      issueLinkLabelled(issue.key, `${issue.key}${glue}${summary}${close}`))
     .replace(/\{link\}/g, combined)
     .replace(/\{key\}/g, issueLink(issue.key))
     .replace(/\{summary\}/g, summary)

@@ -12,23 +12,42 @@ describe('renderTemplate', () => {
   beforeEach(() => { process.env.JIRA_BASE_URL = 'https://x.atlassian.net'; });
   afterEach(() => { delete process.env.JIRA_BASE_URL; });
 
-  test('{key} ({summary}) becomes a single link labelled "KEY (summary)"', () => {
+  // The summary's "|" must not split the Slack link — it is swapped for a look-alike (∣).
+  const LABEL = 'SNS-128269 (Clean Slate ∣ Deploy only relevant components)';
+
+  test('{key} ({summary}) becomes a single link labelled "KEY (summary)" with a link-safe pipe', () => {
     const out = renderTemplate('All children of {key} ({summary}) are done. Approve?', issue);
-    expect(out).toBe('All children of <https://x.atlassian.net/browse/SNS-128269|SNS-128269 (Clean Slate | Deploy only relevant components)> are done. Approve?');
+    expect(out).toBe(`All children of <https://x.atlassian.net/browse/SNS-128269|${LABEL}> are done. Approve?`);
+    // exactly one "|" in the whole link → Slack keeps the full label
+    expect(out.match(/\|/g)).toHaveLength(1);
   });
 
-  test('{link} is the same combined link; bare {key} links the key only', () => {
-    expect(renderTemplate('{link}', issue)).toBe('<https://x.atlassian.net/browse/SNS-128269|SNS-128269 (Clean Slate | Deploy only relevant components)>');
+  test.each([
+    ['{key}: {summary}', 'SNS-128269: Clean Slate ∣ Deploy only relevant components'],
+    ['{key} - {summary}', 'SNS-128269 - Clean Slate ∣ Deploy only relevant components'],
+    ['{key} — {summary}', 'SNS-128269 — Clean Slate ∣ Deploy only relevant components'],
+    ['{key} {summary}', 'SNS-128269 Clean Slate ∣ Deploy only relevant components'],
+  ])('other key+summary glues (%s) also become one link', (tpl, label) => {
+    expect(renderTemplate(tpl, issue)).toBe(`<https://x.atlassian.net/browse/SNS-128269|${label}>`);
+  });
+
+  test('{link} is the combined link; bare {key} links the key only', () => {
+    expect(renderTemplate('{link}', issue)).toBe(`<https://x.atlassian.net/browse/SNS-128269|${LABEL}>`);
     expect(renderTemplate('Approve {key}?', issue)).toBe('Approve <https://x.atlassian.net/browse/SNS-128269|SNS-128269>?');
+  });
+
+  test('summary with <, > and & is escaped inside the link label', () => {
+    const weird = { key: 'SNS-1', fields: { summary: 'a <b> & c' } };
+    expect(renderTemplate('{link}', weird)).toBe('<https://x.atlassian.net/browse/SNS-1|SNS-1 (a &lt;b&gt; &amp; c)>');
   });
 
   test('other placeholders render as plain text', () => {
     expect(renderTemplate('{status} by {reporter} ({assignee})', issue)).toBe('Acceptance by Omer (unassigned)');
   });
 
-  test('without JIRA_BASE_URL, falls back to plain text', () => {
+  test('without JIRA_BASE_URL, falls back to plain text (pipe still swapped for consistency)', () => {
     delete process.env.JIRA_BASE_URL;
-    expect(renderTemplate('{key} ({summary})', issue)).toBe('SNS-128269 (Clean Slate | Deploy only relevant components)');
+    expect(renderTemplate('{key} ({summary})', issue)).toBe('SNS-128269 (Clean Slate ∣ Deploy only relevant components)');
   });
 });
 
