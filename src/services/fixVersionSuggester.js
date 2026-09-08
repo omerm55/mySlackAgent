@@ -1,6 +1,9 @@
 'use strict';
 
+const { withTimeoutOr } = require('../utils/withTimeout');
+
 const RECENT_RELEASED_DAYS = 180;
+const DEFAULT_STAGE_TIMEOUT_MS = 5_000;
 
 /**
  * Children of an epic. Modern Jira Cloud uses `parent`; older company-managed
@@ -94,27 +97,45 @@ const windowLabel = (e) => {
  *      or CURRENT_RELEASE_VERSION env).
  * When evidence is mixed the LLM adjudicates; otherwise deterministic order.
  *
+ * Every stage is capped at `stageTimeoutMs` (default 5s). A stage that times
+ * out or fails is skipped (recorded in `degraded`) and the suggestion proceeds
+ * with what it has. `onProgress(label)` is called as each stage starts so the
+ * caller can keep the user informed.
+ *
  * @returns {Promise<{
  *   pick: object|null, reason: string,
  *   alternative: { pick: object, reason: string }|null,
  *   acceptedAt: Date|null, statusName: string,
- *   candidates: Array, children: Array, usedLlm: boolean }>}
+ *   candidates: Array, children: Array, usedLlm: boolean, degraded: string[] }>}
  */
-async function suggestFixVersion({ jira, llm, db, issueKey, logger, now = new Date() }) {
+async function suggestFixVersion({
+  jira, llm, db, issueKey, logger, now = new Date(),
+  stageTimeoutMs = DEFAULT_STAGE_TIMEOUT_MS, onProgress = null,
+}) {
   const projectKey = issueKey.split('-')[0];
   const t0 = Date.now();
-  const timed = (label, p) => p.then((v) => { logger?.info?.(`[fixVersion] ${issueKey} ${label}: ${Date.now() - t0}ms`); return v; });
+  const degraded = [];
+  const progress = async (label) => { try { await onProgress?.(label); } catch { /* cosmetic */ } };
+  const stage = (label, promise, fallback) => withTimeoutOr(
+    promise.then((v) => { logger?.info?.(`[fixVersion] ${issueKey} ${label}: ${Date.now() - t0}ms`); return v; }),
+    stageTimeoutMs, label, fallback,
+    (reason) => { logger?.warn?.(`[fixVersion] ${issueKey} ${reason}`); degraded.push(reason); },
+  );
 
+  await progress('Checking child issues and project versions…');
   const [epic, children, versions, calendar] = await Promise.all([
-    timed('issue', jira.getIssue(issueKey).catch(() => null)),
-    timed('children', getEpicChildren(jira, issueKey)),
-    timed('versions', jira.getProjectVersions(projectKey)),
-    timed('calendar', db?.getReleaseCalendar ? db.getReleaseCalendar().catch(() => []) : Promise.resolve([])),
+    stage('issue', jira.getIssue(issueKey), null),
+    stage('children', getEpicChildren(jira, issueKey), []),
+    stage('versions', jira.getProjectVersions(projectKey), []),
+    stage('calendar', db?.getReleaseCalendar ? db.getReleaseCalendar() : Promise.resolve([]), []),
   ]);
+
   const statusName = epic?.fields?.status?.name || '';
-  const acceptedAt = statusName && typeof jira.getStatusEnteredAt === 'function'
-    ? await timed('changelog', jira.getStatusEnteredAt(issueKey, statusName).catch(() => null))
-    : null;
+  let acceptedAt = null;
+  if (statusName && typeof jira.getStatusEnteredAt === 'function') {
+    await progress(`Reading when the epic entered ${statusName}…`);
+    acceptedAt = await stage('changelog', jira.getStatusEnteredAt(issueKey, statusName), null);
+  }
 
   const candidates = candidateVersions(versions);
   const byId = new Map(candidates.map((c) => [String(c.id), c]));
@@ -151,7 +172,7 @@ async function suggestFixVersion({ jira, llm, db, issueKey, logger, now = new Da
 
   const result = {
     pick: null, reason: '', alternative: null,
-    acceptedAt, statusName, candidates, children, usedLlm: false,
+    acceptedAt, statusName, candidates, children, usedLlm: false, degraded,
   };
   const setAlternative = (primaryId) => {
     const alts = [
@@ -169,10 +190,11 @@ async function suggestFixVersion({ jira, llm, db, issueKey, logger, now = new Da
     return result;
   }
 
-  // 2. Mixed evidence → LLM
+  // 2. Mixed evidence → LLM (capped like every other stage)
   if (llm && candidates.length > 0 && (children.length > 0 || timelineFit || current)) {
+    await progress('Asking AI to weigh the evidence…');
     try {
-      const res = await timed('llm', llm.suggestFixVersion({
+      const res = await stage('llm', llm.suggestFixVersion({
         epicKey: issueKey,
         epicSummary: epic?.fields?.summary || '',
         statusName,
@@ -191,17 +213,19 @@ async function suggestFixVersion({ jira, llm, db, issueKey, logger, now = new Da
         })),
         tally: ranked.map((t) => ({ name: t.name, count: t.count })),
         candidates: candidates.map((c) => ({ id: c.id, name: c.name, released: Boolean(c.released), releaseDate: c.releaseDate || null })),
-      }));
-      result.usedLlm = true;
-      if (res?.versionId && byId.has(String(res.versionId))) {
-        result.pick = byId.get(String(res.versionId));
-        result.reason = res.reason || 'chosen from the children and the release timeline';
-        setAlternative(result.pick.id);
-        return result;
+      }), null);
+      if (res) {
+        result.usedLlm = true;
+        if (res.versionId && byId.has(String(res.versionId))) {
+          result.pick = byId.get(String(res.versionId));
+          result.reason = res.reason || 'chosen from the children and the release timeline';
+          setAlternative(result.pick.id);
+          return result;
+        }
+        logger?.warn?.(`[fixVersion] LLM returned no usable versionId for ${issueKey}: ${JSON.stringify(res)}`);
       }
-      logger?.warn(`[fixVersion] LLM returned no usable versionId for ${issueKey}: ${JSON.stringify(res)}`);
     } catch (err) {
-      logger?.warn(`[fixVersion] LLM suggestion failed for ${issueKey}: ${err.message}`);
+      logger?.warn?.(`[fixVersion] LLM suggestion failed for ${issueKey}: ${err.message}`);
     }
   }
 

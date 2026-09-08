@@ -3,16 +3,12 @@
 const { issueLink } = require('../utils/jiraLink');
 const { suggestFixVersion } = require('../services/fixVersionSuggester');
 const { logger: baseLogger } = require('../utils/logger');
+const { withTimeout } = require('../utils/withTimeout');
 
-const SUGGESTION_BUDGET_MS = 25_000;
-
-function withTimeout(promise, ms, label) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
+// Each suggestion stage is capped at 5s inside the suggester; this is the
+// belt-and-braces ceiling for the whole thing (4 sequential stage groups).
+const SUGGESTION_STAGE_MS = 5_000;
+const SUGGESTION_BUDGET_MS = SUGGESTION_STAGE_MS * 4 + 2_000;
 
 /**
  * Handles interactive button responses to bot-initiated DM questions.
@@ -80,8 +76,9 @@ function registerDmHandler(app, jiraService, services) {
     const { issueKey, transitionTo } = context;
     const target = transitionTo || 'the next status';
     const intro = `ℹ️ One more thing before I can move *${issueLink(issueKey)}* to *${target}*: Jira needs a *Fix Version*.`;
-    await replaceButtons(client, channelId, messageTs, originalText,
-      `${intro}\n_Checking its child issues and the release calendar for a suggestion…_`);
+    // Progress updates: the suggester calls this as each stage starts (≤5s apart)
+    const onProgress = (label) => replaceButtons(client, channelId, messageTs, originalText, `${intro}\n_${label}_`);
+    await onProgress('Looking for a suggestion…');
 
     const baseCtx = { ...context, dmChannelId: channelId, messageTs, originalText: (originalText || '').slice(0, 600) };
     const pickerButton = (suggestedId = null, label = '🏷 Choose a version') => ({
@@ -96,11 +93,14 @@ function registerDmHandler(app, jiraService, services) {
     const started = Date.now();
     try {
       suggestion = await withTimeout(
-        suggestFixVersion({ jira: jiraService, llm: services.llmService, db: services.db, issueKey, logger }),
+        suggestFixVersion({
+          jira: jiraService, llm: services.llmService, db: services.db, issueKey, logger,
+          stageTimeoutMs: SUGGESTION_STAGE_MS, onProgress,
+        }),
         SUGGESTION_BUDGET_MS,
         'Fix Version suggestion',
       );
-      logger.info(`[dm] Fix Version suggestion for ${issueKey} took ${Date.now() - started}ms (pick: ${suggestion?.pick?.name || 'none'}, llm: ${suggestion?.usedLlm})`);
+      logger.info(`[dm] Fix Version suggestion for ${issueKey} took ${Date.now() - started}ms (pick: ${suggestion?.pick?.name || 'none'}, llm: ${suggestion?.usedLlm}, degraded: ${suggestion?.degraded?.length || 0})`);
     } catch (err) {
       logger.warn(`[dm] Fix Version suggestion failed for ${issueKey} after ${Date.now() - started}ms: ${err.message}`);
       suggestionNote = /timed out/.test(err.message)
@@ -151,6 +151,10 @@ function registerDmHandler(app, jiraService, services) {
       text += '\n_I couldn\'t find child issues or a release calendar to base a suggestion on._';
     } else if (suggestion) {
       text += '\n_I couldn\'t narrow it down to one version._';
+    }
+    if (suggestion?.degraded?.length) {
+      const what = suggestion.degraded.map((d) => d.split(':')[0]).join(', ');
+      text += `\n_Some checks were skipped (${what}), so this may be partial._`;
     }
 
     buttons.push(pickerButton(suggestion?.pick?.id ?? null, suggestion?.pick ? '🏷 Choose another…' : '🏷 Choose a version'));

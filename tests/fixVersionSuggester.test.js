@@ -155,3 +155,44 @@ describe('suggestFixVersion', () => {
     expect(res.pick.id).toBe('32');
   });
 });
+
+describe('suggestFixVersion — stage timeouts and progress', () => {
+  const never = () => new Promise(() => {});
+
+  test('a hanging stage is skipped after stageTimeoutMs and the rest proceeds', async () => {
+    const jira = makeJira({ children: [], acceptedAt: new Date('2026-08-12') });
+    jira.getStatusEnteredAt = jest.fn(never); // changelog hangs
+    const llm = { suggestFixVersion: jest.fn(never) }; // LLM hangs too
+    const t0 = Date.now();
+    const res = await suggestFixVersion({ jira, llm, db: makeDb(), issueKey: 'SNS-1', now: NOW, stageTimeoutMs: 50 });
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(res.degraded).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^changelog: changelog timed out/),
+      expect.stringMatching(/^llm: llm timed out/),
+    ]));
+    // No acceptance date → no timeline fit; falls back to current release
+    expect(res.pick.name).toBe('2026.4.0');
+    expect(res.usedLlm).toBe(false);
+  });
+
+  test('reports progress as stages start', async () => {
+    const seen = [];
+    const jira = makeJira({ children: [child('A', [V.r32]), child('B', [V.r40])], acceptedAt: new Date('2026-08-12') });
+    const llm = { suggestFixVersion: jest.fn().mockResolvedValue({ versionId: '40', reason: 'ok' }) };
+    await suggestFixVersion({ jira, llm, db: makeDb(), issueKey: 'SNS-1', now: NOW, onProgress: (l) => seen.push(l) });
+    expect(seen).toEqual([
+      'Checking child issues and project versions…',
+      'Reading when the epic entered Acceptance…',
+      'Asking AI to weigh the evidence…',
+    ]);
+  });
+
+  test('a failing stage is recorded and skipped, not fatal', async () => {
+    const jira = makeJira({ children: [child('A', [V.r40])], acceptedAt: null });
+    jira.getProjectVersions = jest.fn().mockRejectedValue(new Error('Jira 502'));
+    const res = await suggestFixVersion({ jira, llm: null, db: makeDb(), issueKey: 'SNS-1', now: NOW });
+    expect(res.degraded).toEqual([expect.stringMatching(/^versions: Jira 502/)]);
+    expect(res.candidates).toEqual([]);
+    expect(res.pick).toBeNull();
+  });
+});
