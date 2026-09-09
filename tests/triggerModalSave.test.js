@@ -1,0 +1,90 @@
+'use strict';
+
+// A failed Supabase write must keep the modal open with the reason (ack with errors),
+// never close it and look like a silent revert.
+process.env.ADMIN_SLACK_USER_IDS = 'UADMIN';
+const { registerJiraTriggerHandler, registerTriggerHandler } = require('../src/handlers/triggerHandler');
+
+function fakeApp() {
+  const handlers = {};
+  return { app: { action: (id, fn) => { handlers[String(id)] = fn; }, view: (id, fn) => { handlers[String(id)] = fn; } }, handlers };
+}
+const opt = (value) => ({ selected_option: { value } });
+const txt = (value) => ({ value });
+
+describe('Jira trigger modal save', () => {
+  const values = {
+    jt_name: { value: txt('R&D risk review') },
+    jt_jql: { value: txt('project = PR AND cf[15525] is not EMPTY') },
+    jt_question: { value: txt('') },
+    jt_notify: { value: opt('user_field') },
+    jt_notify_field: { value: txt('customfield_11962') },
+    jt_ask_type: { value: opt('risk_review') },
+    jt_interval: { value: opt('60') },
+    jt_action: { value: opt('transition') },
+    jt_pilot_users: { value: { selected_users: ['UYEHUDA'] } },
+    jt_scope: { value: opt('global') },
+  };
+  function setup(dbOverrides) {
+    const { app, handlers } = fakeApp();
+    const db = { getActiveJiraTriggers: jest.fn().mockResolvedValue([]), insertJiraTrigger: jest.fn().mockResolvedValue({ id: 't1' }), updateJiraTrigger: jest.fn().mockResolvedValue(undefined), ...dbOverrides };
+    const ops = { channelId: 'COPS', post: jest.fn().mockResolvedValue(undefined) };
+    const services = { db, jiraService: { searchIssues: jest.fn().mockResolvedValue([]) }, opsNotifier: ops, integrationCache: { getAll: jest.fn().mockResolvedValue([]) } };
+    registerJiraTriggerHandler(app, services);
+    const client = { views: { publish: jest.fn().mockResolvedValue({}), open: jest.fn() }, chat: { postMessage: jest.fn().mockResolvedValue({}) } };
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    return { handlers, db, ops, client, logger };
+  }
+
+  test('DB rejects (e.g. missing column) → modal stays open with the reason, ops informed, nothing else runs', async () => {
+    const dbErr = Object.assign(new Error('Request failed with status code 400'), { response: { data: { message: 'column "pilot_slack_user_ids" does not exist' } } });
+    const { handlers, ops, client, logger } = setup({ insertJiraTrigger: jest.fn().mockRejectedValue(dbErr) });
+    const ack = jest.fn();
+    await handlers.create_jira_trigger_modal({ ack, body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values } }, client, logger });
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(ack).toHaveBeenCalledWith({ response_action: 'errors', errors: { jt_name: expect.stringMatching(/Could not save: .*pilot_slack_user_ids.*does not exist/) } });
+    expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/❌ Failed to save Jira trigger \*R&D risk review\*/));
+    expect(client.views.publish).not.toHaveBeenCalled();
+  });
+
+  test('DB accepts → plain ack, Home refreshed, ops told, pilot list saved', async () => {
+    const { handlers, db, ops, client, logger } = setup();
+    const ack = jest.fn();
+    await handlers.create_jira_trigger_modal({ ack, body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values } }, client, logger });
+    expect(ack).toHaveBeenCalledWith();
+    expect(db.insertJiraTrigger).toHaveBeenCalledWith(expect.objectContaining({ ask_type: 'risk_review', pilot_slack_user_ids: ['UYEHUDA'], scope: 'global', notify_field_id: 'customfield_11962' }));
+    expect(client.views.publish).toHaveBeenCalled();
+    expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/✅ Jira trigger .*Pilot: only <@UYEHUDA>/));
+  });
+
+  test('editing someone else\'s trigger → inline error, no write', async () => {
+    const { handlers, db, client, logger } = setup({ getActiveJiraTriggers: jest.fn().mockResolvedValue([{ id: 't9', created_by: 'USOMEONE' }]) });
+    const ack = jest.fn();
+    await handlers.create_jira_trigger_modal({ ack, body: { user: { id: 'UREGULAR' } }, view: { private_metadata: JSON.stringify({ id: 't9' }), state: { values } }, client, logger });
+    expect(ack).toHaveBeenCalledWith({ response_action: 'errors', errors: { jt_name: expect.stringMatching(/only edit/) } });
+    expect(db.updateJiraTrigger).not.toHaveBeenCalled();
+  });
+});
+
+describe('Channel trigger modal save', () => {
+  const values = {
+    name_block: { value: txt('Doc review') },
+    channel_block: { value: { selected_conversation: 'C123ABCDEF' } },
+    channel_id_block: { value: txt('') },
+    triggers_block: { value: { selected_options: [{ value: 'reaction' }] } },
+    field_id_block: { value: txt('customfield_1') },
+    field_name_block: { value: txt('PM reviewed') },
+    field_value_block: { value: txt('Yes') },
+  };
+  test('DB rejects → modal stays open with the reason', async () => {
+    const { app, handlers } = fakeApp();
+    const db = { upsertIntegration: jest.fn().mockRejectedValue(new Error('boom')) };
+    const ops = { channelId: 'COPS', post: jest.fn().mockResolvedValue(undefined) };
+    registerTriggerHandler(app, { db, opsNotifier: ops, integrationCache: { getAll: jest.fn().mockResolvedValue([]), invalidate: jest.fn() } });
+    const ack = jest.fn();
+    const client = { views: { publish: jest.fn() }, conversations: { join: jest.fn() }, chat: { postMessage: jest.fn() } };
+    await handlers.create_trigger_modal({ ack, body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values } }, client, logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } });
+    expect(ack).toHaveBeenCalledWith({ response_action: 'errors', errors: { name_block: 'Could not save: boom' } });
+    expect(client.conversations.join).not.toHaveBeenCalled();
+  });
+});

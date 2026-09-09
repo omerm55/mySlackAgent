@@ -199,13 +199,12 @@ function registerTriggerHandler(app, services) {
       await ack({ response_action: 'errors', errors });
       return;
     }
-    await ack();
 
     // Scope: admins choose; non-admins keep the existing scope on edit, personal on create
     let existing = null;
     if (editId) existing = (await integrationCache.getAll()).find((i) => i.id === editId) || null;
     if (editId && (!existing || !canManage(existing.createdBy, userId))) {
-      await notifyOps(services, client, userId, '🚫 You can only edit triggers you created.');
+      await ack({ response_action: 'errors', errors: { name_block: 'You can only edit triggers you created.' } });
       return;
     }
     const scope = admin
@@ -223,6 +222,8 @@ function registerTriggerHandler(app, services) {
       scope,
     };
 
+    // Save BEFORE acknowledging, so a failed write keeps the modal open with the reason
+    // instead of closing and looking like a silent revert.
     try {
       if (!services.db) throw new Error('Supabase is not configured');
       if (editId) {
@@ -232,6 +233,15 @@ function registerTriggerHandler(app, services) {
         await services.db.upsertIntegration({ ...fields, created_by: userId, active: true });
         logger.info(`[trigger] Created integration "${name}" by ${userId} (scope: ${scope})`);
       }
+    } catch (err) {
+      logger.error(`[trigger] Failed to save integration: ${errDetail(err)}`);
+      await ack({ response_action: 'errors', errors: { name_block: `Could not save: ${errDetail(err)}`.slice(0, 250) } });
+      await notifyOps(services, client, userId, `❌ Failed to save trigger *${name}*: ${errDetail(err)}`);
+      return;
+    }
+    await ack();
+
+    try {
       integrationCache.invalidate();
 
       // Make sure the bot is in the channel; private channels need a manual /invite.
@@ -251,8 +261,8 @@ function registerTriggerHandler(app, services) {
       const when = triggers.map((t) => (t === 'reaction' ? '👍 reactions' : '💬 thread replies')).join(' and ');
       await notifyOps(services, client, userId, `✅ Trigger *${name}* ${editId ? 'updated' : 'created'}! It fires on ${when} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${joinNote}`);
     } catch (err) {
-      logger.error(`[trigger] Failed to save integration: ${errDetail(err)}`);
-      await notifyOps(services, client, userId, `❌ Failed to save trigger: ${errDetail(err)}`);
+      // Saved fine; only the follow-ups (join / Home refresh / ops) hiccuped
+      logger.warn(`[trigger] Post-save step failed for "${name}": ${errDetail(err)}`);
     }
   });
 }
@@ -458,12 +468,11 @@ function registerJiraTriggerHandler(app, services) {
       await ack({ response_action: 'errors', errors });
       return;
     }
-    await ack();
 
     let existing = null;
     if (editId) existing = await findJiraTrigger(editId);
     if (editId && (!existing || !canManage(existing.created_by, userId))) {
-      await notifyOps(services, client, userId, '🚫 You can only edit Jira triggers you created.');
+      await ack({ response_action: 'errors', errors: { jt_name: 'You can only edit Jira triggers you created.' } });
       return;
     }
     const scope = admin
@@ -487,9 +496,10 @@ function registerJiraTriggerHandler(app, services) {
       jira_field_type: 'select',
     };
 
+    // Save BEFORE acknowledging: a failed write keeps the modal open with the reason.
+    let savedId = editId;
     try {
       if (!services.db) throw new Error('Supabase is not configured');
-      let savedId = editId;
       if (editId) {
         await services.db.updateJiraTrigger(editId, fields);
         logger.info(`[jiraTrigger] Updated "${name}" (${editId}) by ${userId}`);
@@ -498,7 +508,15 @@ function registerJiraTriggerHandler(app, services) {
         savedId = row?.id ?? null;
         logger.info(`[jiraTrigger] Created "${name}" by ${userId} (scope: ${scope}, every ${pollIntervalMin}m)`);
       }
+    } catch (err) {
+      logger.error(`[jiraTrigger] Failed to save: ${errDetail(err)}`);
+      await ack({ response_action: 'errors', errors: { jt_name: `Could not save: ${errDetail(err)}`.slice(0, 250) } });
+      await notifyOps(services, client, userId, `❌ Failed to save Jira trigger *${name}*: ${errDetail(err)}`);
+      return;
+    }
+    await ack();
 
+    try {
       await publishHome(client, userId, services, logger);
 
       const who = notify === 'user_field' ? `user in \`${notifyFieldId}\`` : notify;
@@ -513,8 +531,8 @@ function registerJiraTriggerHandler(app, services) {
       // Evaluate this trigger right away regardless of its cadence
       services.jiraPoller?.runOnce({ force: true, onlyId: savedId }).catch(() => {});
     } catch (err) {
-      logger.error(`[jiraTrigger] Failed to save: ${errDetail(err)}`);
-      await notifyOps(services, client, userId, `❌ Failed to save Jira trigger: ${errDetail(err)}`);
+      // Saved fine; only the follow-ups (Home refresh / ops / immediate run) hiccuped
+      logger.warn(`[jiraTrigger] Post-save step failed for "${name}": ${errDetail(err)}`);
     }
   });
 }
