@@ -138,6 +138,30 @@ class SupabaseService {
 
   // ── jira_prompts (one DM per trigger × issue) ─────────────────────────
 
+  /** All prompt rows for a trigger (issue_key, payload, …) — used for watch-field re-asks. */
+  async getPromptsForTrigger(triggerId) {
+    const res = await this.client.get('/jira_prompts', {
+      params: { trigger_id: `eq.${triggerId}`, select: 'id,issue_key,slack_user_id,payload,prompted_at,delivered_at,answered_at' },
+    });
+    return res.data ?? [];
+  }
+
+  async updatePromptPayload(id, payload) {
+    await this.client.patch('/jira_prompts', { payload }, {
+      params: { id: `eq.${id}` },
+      headers: { Prefer: 'return=minimal' },
+    });
+  }
+
+  /** Mark every prompt for this issue (optionally for this user) as answered. */
+  async markPromptAnswered(issueKey, slackUserId = null) {
+    const params = { issue_key: `eq.${issueKey}` };
+    if (slackUserId) params.slack_user_id = `eq.${slackUserId}`;
+    await this.client.patch('/jira_prompts', { answered_at: new Date().toISOString() }, {
+      params, headers: { Prefer: 'return=minimal' },
+    });
+  }
+
   /** @returns {Promise<Set<string>>} issue keys already prompted for this trigger */
   async getPromptedIssueKeys(triggerId) {
     const res = await this.client.get('/jira_prompts', {

@@ -161,9 +161,12 @@ async function buildHomeBlocks(userId, services, logger) {
       },
     },
     ...(jiraTriggers.length > 0 ? jiraTriggers.map((t) => {
-      const action = t.action_type === 'transition'
-        ? `move to *${t.transition_to}*`
-        : `set *${t.jira_field_name || t.jira_field_id}* = *${t.jira_field_value}*`;
+      const who = t.notify === 'user_field' ? `user in \`${t.notify_field_id}\`` : t.notify;
+      const action = t.ask_type === 'risk_review'
+        ? `🩺 risk review (status / Notes / target)${t.watch_field ? `, re-asks when \`${t.watch_field}\` changes` : ''}`
+        : (t.action_type === 'transition'
+          ? `on Yes: move to *${t.transition_to}*`
+          : `on Yes: set *${t.jira_field_name || t.jira_field_id}* = *${t.jira_field_value}*`);
       const scopeLabel = t.scope === 'personal' ? ' _(personal)_' : '';
       const every = (() => {
         const m = Number(t.poll_interval_min) || 2;
@@ -175,7 +178,7 @@ async function buildHomeBlocks(userId, services, logger) {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*${t.name}*${scopeLabel} · ⏱ ${every}\n\`${t.jql}\`\n_DMs the ${t.notify} → on Yes: ${action}_`,
+          text: `*${t.name}*${scopeLabel} · ⏱ ${every}\n\`${t.jql}\`\n_DMs the ${who} → ${action}_`,
         },
       };
       if (canManage(t.created_by, userId)) {

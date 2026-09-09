@@ -14,6 +14,13 @@ const { issueLink, mentionsIssue } = require('./jiraLink');
  * @returns {Promise<{ channelId: string, messageTs: string }>}
  */
 async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, opsNotifier) {
+  // Other ask types render their own message; same delivery contract.
+  if (context.askType === 'risk_review') {
+    // lazy require to avoid a circular import (riskReviewMessage → jiraLink only)
+    const { sendRiskReview } = require('./riskReviewMessage');
+    return sendRiskReview(client, slackUserId, context, opsNotifier);
+  }
+
   const dm = await client.conversations.open({ users: slackUserId });
 
   // Button values are capped at 2000 chars — keep the question short in ctx.

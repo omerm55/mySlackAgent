@@ -49,6 +49,15 @@ Only pick from the candidates list and answer with the candidate's "id".
 Respond ONLY with valid JSON (no markdown fences):
 { "versionId": "<candidate id>", "reason": "<one short sentence a PM would find useful, mention the evidence used>" }`;
 
+const TIDY_NOTE_PROMPT = `You tidy a short status update written by the owner of an R&D Initiative so it reads well in the
+Initiative's Notes field. Rules:
+- Keep the author's meaning, facts, names and dates exactly. Never add, infer or soften anything.
+- Keep first person if they used it. One or two plain sentences, no bullet points, no markdown.
+- Fix grammar and remove filler. If the text is already clean, return it unchanged.
+
+Respond ONLY with valid JSON (no markdown fences):
+{ "note": "<the tidied update>" }`;
+
 class LlmService {
   /**
    * @param {'anthropic'|'gemini'} provider
@@ -102,6 +111,20 @@ class LlmService {
       candidates.map((v) => `- id=${v.id} name="${v.name}" ${v.released ? 'released' : 'unreleased'}${v.releaseDate ? ` (${v.releaseDate})` : ''}`).join('\n') +
       `\n\nWhich candidate should be the epic's Fix Version?`;
     return this._callJson(FIX_VERSION_PROMPT, userMessage);
+  }
+
+  /**
+   * Turn a Dev owner's free-text status into a tidy one-or-two-sentence Notes entry.
+   * Never invents facts; on any failure callers fall back to the raw text.
+   * @returns {Promise<{ note: string }>}
+   */
+  async tidyNote({ issueKey, summary, notification, userText }) {
+    const userMessage =
+      `Initiative: ${issueKey} — ${summary || ''}\n` +
+      `Why it was flagged: ${notification || 'n/a'}\n` +
+      `Owner's update (verbatim): "${userText}"\n\n` +
+      `Rewrite the owner's update as a Notes entry.`;
+    return this._callJson(TIDY_NOTE_PROMPT, userMessage);
   }
 
   async _callJson(systemPrompt, userMessage) {

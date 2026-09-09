@@ -1,0 +1,189 @@
+'use strict';
+
+const { issueLink, issueLinkLabelled, mentionsIssue } = require('./jiraLink');
+
+/**
+ * "Risk review" ask type — closes the loop the rd-initiative-notifier skill leaves open.
+ *
+ * The notifier writes a one-line diagnosis onto every flagged PR Initiative in the
+ * `Latest notification` field (cf 15525), e.g.
+ *   "Sep 8 — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress"
+ * We DM the Dev owner with that text and let them act as themselves:
+ *   set a risk status · update Notes · move / clear the Project target · mark handled.
+ */
+
+// PR (Product Roadmap, Jira Product Discovery) field ids — see pr-sns-knowledge
+const FIELDS = {
+  NOTIFICATION: process.env.PR_LATEST_NOTIFICATION_FIELD || 'customfield_15525', // Latest notification (text ≤255)
+  NOTES:        process.env.PR_NOTES_FIELD || 'customfield_12958',               // Notes (multi-line text)
+  TARGET:       process.env.PR_TARGET_FIELD || 'customfield_11818',              // Project target (Polaris interval JSON string)
+  DEV_OWNER:    process.env.PR_DEV_OWNER_FIELD || 'customfield_11962',           // PR Dev Owner/FC Sponsor (user array)
+};
+
+const RISK_STATUSES = ['Low Risk', 'High Risk', 'Off Track'];
+const AT_RISK = new Set(RISK_STATUSES);
+const ON_TRACK = 'On Track';
+
+/** Polaris interval fields arrive as a JSON string {"start":"YYYY-MM-DD","end":"YYYY-MM-DD"} (or an object). */
+function parseInterval(value) {
+  if (!value) return null;
+  try {
+    const obj = typeof value === 'string' ? JSON.parse(value) : value;
+    if (!obj || typeof obj !== 'object') return null;
+    return { start: obj.start || null, end: obj.end || null };
+  } catch {
+    return null;
+  }
+}
+
+/** Build the risk part of a Jira-trigger payload from a searched issue. */
+function riskContextFor(issue) {
+  const f = issue.fields || {};
+  const target = parseInterval(f[FIELDS.TARGET]);
+  return {
+    notification: String(f[FIELDS.NOTIFICATION] || '').trim().slice(0, 255),
+    status: f.status?.name || '',
+    summary: String(f.summary || '').slice(0, 120),
+    targetStart: target?.start || null,
+    targetEnd: target?.end || null,
+  };
+}
+
+/** Which status buttons to offer, per the notifier's "already at risk" and "On hold" rules. */
+function statusChoices(currentStatus) {
+  if (!currentStatus) return RISK_STATUSES;
+  if (currentStatus === 'On hold') return [];
+  if (AT_RISK.has(currentStatus)) return [ON_TRACK];
+  return RISK_STATUSES;
+}
+
+const STATUS_BUTTON = {
+  'Low Risk':  { id: 'risk_set_status_low',     label: '🟡 Low Risk' },
+  'High Risk': { id: 'risk_set_status_high',    label: '🔴 High Risk' },
+  'Off Track': { id: 'risk_set_status_off',     label: '⛔ Off Track' },
+  [ON_TRACK]:  { id: 'risk_set_status_ontrack', label: '🟢 Back On Track' },
+};
+
+/** Compact context carried in every button (Slack caps button values at 2000 chars). */
+function buttonCtx(context, slackUserId, extra = {}) {
+  const r = context.risk || {};
+  return JSON.stringify({
+    askType: 'risk_review',
+    issueKey: context.issueKey,
+    slackUserId,
+    question: (context.question || '').slice(0, 300),
+    risk: {
+      notification: (r.notification || '').slice(0, 255),
+      status: r.status || '',
+      summary: (r.summary || '').slice(0, 120),
+      targetStart: r.targetStart || null,
+      targetEnd: r.targetEnd || null,
+    },
+    ...extra,
+  });
+}
+
+/** Header + diagnosis + status/target line (no buttons). */
+function headerBlocks(context) {
+  const r = context.risk || {};
+  const label = r.summary ? `${context.issueKey} (${r.summary})` : context.issueKey;
+  const headline = context.question && mentionsIssue(context.question, context.issueKey)
+    ? context.question
+    : `⚠️ *${issueLinkLabelled(context.issueKey, label)}* was flagged by the weekly R&D Initiative Notifier.`;
+  const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: headline } }];
+  if (r.notification) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `> ${r.notification}` } });
+  }
+  blocks.push({
+    type: 'context',
+    elements: [{
+      type: 'mrkdwn',
+      text: `Status: *${r.status || 'unknown'}*  ·  Target: *${r.targetEnd || 'none'}*`,
+    }],
+  });
+  return blocks;
+}
+
+/** The action buttons: status choices (0–3) in one block, then Notes / target / handled. */
+function actionBlocks(context, slackUserId, { includeStatus = true, includeTarget = true, includeHandled = true } = {}) {
+  const ctx = (extra) => buttonCtx(context, slackUserId, extra);
+  const blocks = [];
+  const statuses = includeStatus ? statusChoices(context.risk?.status) : [];
+  if (statuses.length) {
+    blocks.push({
+      type: 'actions',
+      elements: statuses.map((s) => ({
+        type: 'button',
+        text: { type: 'plain_text', text: STATUS_BUTTON[s].label, emoji: true },
+        action_id: STATUS_BUTTON[s].id,
+        value: ctx({ status: s }),
+        ...(s === 'High Risk' || s === 'Off Track' ? { style: 'danger' } : {}),
+      })),
+    });
+  }
+  const rest = [
+    { type: 'button', text: { type: 'plain_text', text: '📝 Update Notes', emoji: true }, action_id: 'risk_update_notes', value: ctx(), style: 'primary' },
+  ];
+  if (includeTarget) rest.push({ type: 'button', text: { type: 'plain_text', text: '📅 Move / clear target', emoji: true }, action_id: 'risk_move_target', value: ctx() });
+  if (includeHandled) rest.push({ type: 'button', text: { type: 'plain_text', text: '✅ Handled', emoji: true }, action_id: 'risk_handled', value: ctx() });
+  blocks.push({ type: 'actions', elements: rest });
+  return blocks;
+}
+
+function buildRiskReviewBlocks(context, slackUserId) {
+  return [
+    ...headerBlocks(context),
+    { type: 'section', text: { type: 'mrkdwn', text: 'What would you like to do?' } },
+    ...actionBlocks(context, slackUserId),
+  ];
+}
+
+/** Connect-Jira nudge, identical to the yes/no question's. */
+function connectBlocks(authUrl) {
+  if (!authUrl) return [];
+  return [
+    { type: 'context', elements: [{ type: 'mrkdwn', text: '🔐 *Not connected to Jira yet.* Connect once (~10 seconds) so these changes appear under your name. Until then they are made by the bot account.' }] },
+    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '🔗 Connect Jira', emoji: true }, url: authUrl, action_id: 'dm_connect_jira' }] },
+  ];
+}
+
+/** Send the risk-review DM. Same contract as sendDmQuestion. */
+async function sendRiskReview(client, slackUserId, context, opsNotifier) {
+  const dm = await client.conversations.open({ users: slackUserId });
+  const text = `⚠️ ${context.issueKey} was flagged by the R&D Initiative Notifier${context.risk?.notification ? `: ${context.risk.notification}` : ''}`;
+  const result = await client.chat.postMessage({
+    channel: dm.channel.id,
+    text,
+    blocks: [...buildRiskReviewBlocks(context, slackUserId), ...connectBlocks(context.authUrl)],
+  });
+  await opsNotifier?.dmQuestionSent?.({
+    slackUserId,
+    issueKey: context.issueKey,
+    question: context.risk?.notification || 'risk review',
+    fieldName: 'risk review',
+    fieldValue: context.risk?.status || '',
+  });
+  return { channelId: dm.channel.id, messageTs: result.ts };
+}
+
+/** After a status change: keep only the Notes button (the notifier's ask is "flag at risk AND refresh Notes"). */
+function afterStatusBlocks(context, slackUserId) {
+  return actionBlocks(context, slackUserId, { includeStatus: false, includeTarget: false, includeHandled: false });
+}
+
+/** Notes entry line prepended to the Notes field. */
+function notesEntry(note, authorName, date = new Date()) {
+  const d = date.toISOString().slice(0, 10);
+  return `${d}${authorName ? ` (${authorName})` : ''}: ${note.trim()}`;
+}
+
+function prependNotes(existing, entry) {
+  const rest = String(existing || '').trim();
+  return rest ? `${entry}\n\n${rest}` : entry;
+}
+
+module.exports = {
+  FIELDS, RISK_STATUSES, AT_RISK, ON_TRACK, STATUS_BUTTON,
+  parseInterval, riskContextFor, statusChoices, buildRiskReviewBlocks, actionBlocks, afterStatusBlocks,
+  sendRiskReview, notesEntry, prependNotes, issueLink,
+};

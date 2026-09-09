@@ -2,6 +2,36 @@
 
 const { sendDmQuestion } = require('../utils/dmQuestion');
 const { issueLink, issueLinkLabelled } = require('../utils/jiraLink');
+const { FIELDS: RISK_FIELDS, riskContextFor } = require('../utils/riskReviewMessage');
+
+const normalizeWatched = (v) => (v === null || v === undefined ? '' : String(typeof v === 'object' ? JSON.stringify(v) : v).trim());
+
+/**
+ * Who to DM for an issue, per the trigger's `notify`:
+ *   reporter | assignee | user_field (notify_field_id → first user → fallback assignee → reporter)
+ * @returns {{ person: object|null, source: string }}
+ */
+function resolvePerson(issue, trigger) {
+  const f = issue.fields || {};
+  const first = (v) => (Array.isArray(v) ? v[0] : v) || null;
+  if (trigger.notify === 'user_field' && trigger.notify_field_id) {
+    const p = first(f[trigger.notify_field_id]);
+    if (p?.emailAddress) return { person: p, source: trigger.notify_field_id };
+    if (f.assignee?.emailAddress) return { person: f.assignee, source: 'assignee (fallback)' };
+    return { person: f.reporter || null, source: 'reporter (fallback)' };
+  }
+  if (trigger.notify === 'assignee') return { person: f.assignee || null, source: 'assignee' };
+  return { person: f.reporter || null, source: 'reporter' };
+}
+
+/** Fields to request from Jira for a trigger. */
+function fieldsFor(trigger) {
+  const fields = new Set(['summary', 'status', 'reporter', 'assignee']);
+  if (trigger.notify === 'user_field' && trigger.notify_field_id) fields.add(trigger.notify_field_id);
+  if (trigger.watch_field) fields.add(trigger.watch_field);
+  if (trigger.ask_type === 'risk_review') { fields.add(RISK_FIELDS.NOTIFICATION); fields.add(RISK_FIELDS.TARGET); }
+  return [...fields];
+}
 
 // How many people one trigger may DM per run (env JIRA_MAX_PROMPTS_PER_RUN, default 10).
 const MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN = Math.max(1, parseInt(process.env.JIRA_MAX_PROMPTS_PER_RUN || '10', 10) || 10);
@@ -112,7 +142,7 @@ class JiraPoller {
     const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, skipped: [], sentTo: [], queuedFor: [] };
     const prefCache = new Map();
 
-    const issues = await this.jira.searchIssues(trigger.jql, ['summary', 'status', 'reporter', 'assignee']);
+    const issues = await this.jira.searchIssues(trigger.jql, fieldsFor(trigger));
     stats.matched = issues.length;
     if (issues.truncated) {
       this.logger.warn(`${tag} JQL matches more than ${issues.length} issues — only the first ${issues.length} were evaluated this run`);
@@ -120,8 +150,35 @@ class JiraPoller {
     }
     if (issues.length === 0) return stats;
 
-    const prompted = await this.db.getPromptedIssueKeys(trigger.id);
-    const fresh = issues.filter((i) => !prompted.has(i.key));
+    // Which issues were already asked about? With a watch_field, an issue whose watched value
+    // changed since we asked is asked again (e.g. the notifier rewrote "Latest notification").
+    let fresh;
+    if (trigger.watch_field) {
+      const rows = await this.db.getPromptsForTrigger(trigger.id);
+      const byKey = new Map(rows.map((r) => [r.issue_key, r]));
+      fresh = [];
+      let reasked = 0;
+      for (const issue of issues) {
+        const row = byKey.get(issue.key);
+        const current = normalizeWatched(issue.fields?.[trigger.watch_field]);
+        if (!row) { fresh.push(issue); continue; }
+        const stored = row.payload?.watchedValue;
+        if (stored === undefined) {
+          // Row predates watch_field: remember the current value, don't re-ask now
+          await this.db.updatePromptPayload(row.id, { ...(row.payload || {}), watchedValue: current }).catch(() => {});
+          continue;
+        }
+        if (normalizeWatched(stored) !== current) {
+          await this.db.deletePromptsForIssue(issue.key, row.slack_user_id || null);
+          fresh.push(issue);
+          reasked += 1;
+        }
+      }
+      if (reasked) stats.skipped.push(`${reasked} re-asked because ${trigger.watch_field} changed`);
+    } else {
+      const prompted = await this.db.getPromptedIssueKeys(trigger.id);
+      fresh = issues.filter((i) => !prompted.has(i.key));
+    }
     stats.fresh = fresh.length;
     if (fresh.length === 0) return stats;
 
@@ -135,22 +192,24 @@ class JiraPoller {
         break;
       }
 
-      const person = trigger.notify === 'assignee' ? issue.fields.assignee : issue.fields.reporter;
+      const { person, source } = resolvePerson(issue, trigger);
       const email = person?.emailAddress;
-      const displayName = person?.displayName || trigger.notify;
+      const displayName = person?.displayName || source;
+      const watchedValue = trigger.watch_field ? normalizeWatched(issue.fields?.[trigger.watch_field]) : undefined;
+      const skipPayload = watchedValue === undefined ? null : { watchedValue };
 
       if (!email) {
-        this.logger.warn(`${tag} ${issue.key}: no email on ${trigger.notify} (${displayName}) — skipping`);
-        await this.db.recordPrompt(trigger.id, issue.key, null); // don't retry every run
-        await this.ops?.jiraTriggerSkipped?.({ trigger: trigger.name, issueKey: issue.key, reason: `no email for ${trigger.notify} ${displayName}` });
-        stats.skipped.push(`${issue.key}: no email for ${trigger.notify} ${displayName}`);
+        this.logger.warn(`${tag} ${issue.key}: no email on ${source} (${displayName}) — skipping`);
+        await this.db.recordPrompt(trigger.id, issue.key, null, { payload: skipPayload }); // don't retry every run
+        await this.ops?.jiraTriggerSkipped?.({ trigger: trigger.name, issueKey: issue.key, reason: `no email for ${source} ${displayName}` });
+        stats.skipped.push(`${issue.key}: no email for ${source} ${displayName}`);
         continue;
       }
 
       const slackUserId = await this._resolveSlackUser(email);
       if (!slackUserId) {
         this.logger.warn(`${tag} ${issue.key}: no Slack user for ${email} — skipping`);
-        await this.db.recordPrompt(trigger.id, issue.key, null);
+        await this.db.recordPrompt(trigger.id, issue.key, null, { payload: skipPayload });
         await this.ops?.jiraTriggerSkipped?.({ trigger: trigger.name, issueKey: issue.key, reason: `no Slack user for ${email}` });
         stats.skipped.push(`${issue.key}: no Slack user for ${email}`);
         continue;
@@ -163,18 +222,26 @@ class JiraPoller {
       }
 
       const question = renderTemplate(trigger.question, issue);
-      const payload = {
-        issueKey: issue.key,
-        question,
-        ...(trigger.action_type === 'transition'
-          ? { transitionTo: trigger.transition_to }
-          : {
-            jiraFieldId: trigger.jira_field_id,
-            jiraFieldName: trigger.jira_field_name || trigger.jira_field_id,
-            jiraFieldValue: trigger.jira_field_value,
-            jiraFieldType: trigger.jira_field_type || 'select',
-          }),
-      };
+      const payload = trigger.ask_type === 'risk_review'
+        ? {
+          askType: 'risk_review',
+          issueKey: issue.key,
+          question,
+          risk: riskContextFor(issue),
+        }
+        : {
+          issueKey: issue.key,
+          question,
+          ...(trigger.action_type === 'transition'
+            ? { transitionTo: trigger.transition_to }
+            : {
+              jiraFieldId: trigger.jira_field_id,
+              jiraFieldName: trigger.jira_field_name || trigger.jira_field_id,
+              jiraFieldValue: trigger.jira_field_value,
+              jiraFieldType: trigger.jira_field_type || 'select',
+            }),
+        };
+      if (watchedValue !== undefined) payload.watchedValue = watchedValue;
 
       // Respect the user's notification preference: queue for a digest, or send now.
       const frequency = await this._digestFrequency(slackUserId, prefCache);
@@ -265,3 +332,5 @@ function renderTemplate(template, issue) {
 
 module.exports = JiraPoller;
 module.exports.renderTemplate = renderTemplate;
+module.exports.resolvePerson = resolvePerson;
+module.exports.fieldsFor = fieldsFor;

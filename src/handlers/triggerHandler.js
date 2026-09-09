@@ -273,8 +273,19 @@ function buildJiraTriggerModal(admin, existing = null) {
     input('jt_question', 'Question to ask', textInput('All children of {key} ({summary}) are done. Approve and move to Done?', { multiline: true, initial: existing?.question }), {
       hint: plain('Placeholders: {key} {summary} {status} {reporter} {assignee}'),
     }),
-    input('jt_notify', 'Who to DM', radios([['reporter', 'Reporter'], ['assignee', 'Assignee']], existing?.notify ?? 'reporter')),
-    input('jt_action', 'On "Yes", do this', radios([['transition', 'Move to a status'], ['field', 'Set a field']], existing?.action_type ?? 'transition')),
+    input('jt_ask_type', 'What kind of ask?', radios([
+      ['yes_no', 'Yes / No question → move to a status or set a field'],
+      ['risk_review', 'Risk review — R&D Initiative Notifier flag → Dev owner acts (status / Notes / target)'],
+    ], existing?.ask_type ?? 'yes_no')),
+    input('jt_notify', 'Who to DM', radios([
+      ['reporter', 'Reporter'], ['assignee', 'Assignee'], ['user_field', 'A user field (enter its id below)'],
+    ], existing?.notify ?? 'reporter')),
+    input('jt_notify_field', 'User field id (for "A user field")', textInput('e.g. customfield_11962 (PR Dev Owner/FC Sponsor)', { initial: existing?.notify_field_id }), { optional: true }),
+    input('jt_watch_field', 'Re-ask when this field changes (optional)', textInput('e.g. customfield_15525 (Latest notification)', { initial: existing?.watch_field }), {
+      optional: true,
+      hint: plain('Normally each issue is asked about once. With a watch field, a new value re-asks — e.g. every weekly notifier run.'),
+    }),
+    input('jt_action', 'On "Yes", do this (Yes / No asks only)', radios([['transition', 'Move to a status'], ['field', 'Set a field']], existing?.action_type ?? 'transition')),
     input('jt_transition', 'Target status (for "Move to a status")', textInput('e.g. Done', { initial: existing?.transition_to }), { optional: true }),
     input('jt_field_id', 'Jira field ID (for "Set a field")', textInput('e.g. customfield_11296', { initial: existing?.jira_field_id }), { optional: true }),
     input('jt_field_name', 'Field display name (optional)', textInput('e.g. PM Reviewed', { initial: existing?.jira_field_name }), { optional: true }),
@@ -401,6 +412,9 @@ function registerJiraTriggerHandler(app, services) {
     const jql = v.jt_jql.value.value?.trim();
     const question = v.jt_question.value.value?.trim();
     const notify = v.jt_notify.value.selected_option?.value || 'reporter';
+    const askType = v.jt_ask_type?.value?.selected_option?.value || 'yes_no';
+    const notifyFieldId = v.jt_notify_field?.value?.value?.trim() || null;
+    const watchField = v.jt_watch_field?.value?.value?.trim() || null;
     const pollIntervalMin = parseInt(v.jt_interval?.value?.selected_option?.value || '2', 10) || 2;
     const actionType = v.jt_action.value.selected_option?.value || 'transition';
     const transitionTo = v.jt_transition?.value?.value?.trim();
@@ -409,10 +423,15 @@ function registerJiraTriggerHandler(app, services) {
     const fieldValue = v.jt_field_value?.value?.value?.trim();
 
     const errors = {};
-    if (actionType === 'transition' && !transitionTo) errors.jt_transition = 'Enter the target status, e.g. Done.';
-    if (actionType === 'field' && !fieldId) errors.jt_field_id = 'Enter the Jira field ID.';
-    if (actionType === 'field' && !fieldValue) errors.jt_field_value = 'Enter the value to set.';
-    if (!/\{key\}/.test(question || '')) errors.jt_question = 'Include {key} so the user knows which issue this is about.';
+    const CF = /^customfield_\d+$/;
+    if (notify === 'user_field' && !CF.test(notifyFieldId || '')) errors.jt_notify_field = 'Enter the user field id, e.g. customfield_11962.';
+    if (watchField && !CF.test(watchField)) errors.jt_watch_field = 'Field ids look like customfield_15525.';
+    if (askType === 'yes_no') {
+      if (actionType === 'transition' && !transitionTo) errors.jt_transition = 'Enter the target status, e.g. Done.';
+      if (actionType === 'field' && !fieldId) errors.jt_field_id = 'Enter the Jira field ID.';
+      if (actionType === 'field' && !fieldValue) errors.jt_field_value = 'Enter the value to set.';
+      if (!/\{key\}|\{link\}/.test(question || '')) errors.jt_question = 'Include {key} or {link} so the user knows which issue this is about.';
+    }
     if (jql && Object.keys(errors).length === 0) {
       try {
         await services.jiraService.searchIssues(jql, ['summary'], 1);
@@ -437,13 +456,17 @@ function registerJiraTriggerHandler(app, services) {
       : (existing?.scope ?? 'personal');
 
     const fields = {
-      name, jql, question, notify, scope,
+      name, jql, notify, scope,
+      question: question || (askType === 'risk_review' ? '{link} was flagged by the weekly R&D Initiative Notifier.' : ''),
+      ask_type: askType,
+      notify_field_id: notify === 'user_field' ? notifyFieldId : null,
+      watch_field: watchField,
       poll_interval_min: pollIntervalMin,
       action_type: actionType,
-      transition_to: actionType === 'transition' ? transitionTo : null,
-      jira_field_id: actionType === 'field' ? fieldId : null,
-      jira_field_name: actionType === 'field' ? (fieldName || fieldId) : null,
-      jira_field_value: actionType === 'field' ? fieldValue : null,
+      transition_to: askType === 'yes_no' && actionType === 'transition' ? transitionTo : null,
+      jira_field_id: askType === 'yes_no' && actionType === 'field' ? fieldId : null,
+      jira_field_name: askType === 'yes_no' && actionType === 'field' ? (fieldName || fieldId) : null,
+      jira_field_value: askType === 'yes_no' && actionType === 'field' ? fieldValue : null,
       jira_field_type: 'select',
     };
 
@@ -461,10 +484,12 @@ function registerJiraTriggerHandler(app, services) {
 
       await publishHome(client, userId, services, logger);
 
-      const actionText = actionType === 'transition'
-        ? `move the issue to *${transitionTo}*`
-        : `set *${fieldName || fieldId}* = *${fieldValue}*`;
-      await notifyOps(services, client, userId, `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${notify}* of any new match. On *Yes* I'll ${actionText}.`);
+      const who = notify === 'user_field' ? `user in \`${notifyFieldId}\`` : notify;
+      const outcome = askType === 'risk_review'
+        ? 'They can set a risk status, update Notes, move or clear the target, or mark it handled.'
+        : `On *Yes* I'll ${actionType === 'transition' ? `move the issue to *${transitionTo}*` : `set *${fieldName || fieldId}* = *${fieldValue}*`}.`;
+      const watch = watchField ? ` Re-asks whenever \`${watchField}\` changes.` : '';
+      await notifyOps(services, client, userId, `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${who}* of any new match. ${outcome}${watch}`);
       // Evaluate this trigger right away regardless of its cadence
       services.jiraPoller?.runOnce({ force: true, onlyId: savedId }).catch(() => {});
     } catch (err) {

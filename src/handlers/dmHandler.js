@@ -2,6 +2,7 @@
 
 const { issueLink } = require('../utils/jiraLink');
 const { suggestFixVersion } = require('../services/fixVersionSuggester');
+const riskReview = require('../utils/riskReviewMessage');
 const { logger: baseLogger } = require('../utils/logger');
 const { withTimeout } = require('../utils/withTimeout');
 
@@ -269,6 +270,198 @@ function registerDmHandler(app, jiraService, services) {
       }
       await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue, error: err.message });
     }
+  });
+
+  // ── Risk review (R&D Initiative Notifier → Dev owner) ─────────────────────
+  //
+  // Buttons: risk_set_status_* · risk_update_notes · risk_move_target · risk_handled
+  // Modals:  risk_notes_modal · risk_target_modal
+  // Every write goes through resolveJira (as the user via OAuth; bot fallback + nudge).
+
+  function parseCtx(body, logger, what) {
+    try { return JSON.parse(body.actions[0].value); } catch {
+      logger.error(`[risk] Could not parse ${what} context`);
+      return null;
+    }
+  }
+
+  async function riskFail(client, ctx, where, err, logger, action) {
+    const { issueKey, slackUserId, dmChannelId, messageTs, originalText = '' } = ctx;
+    logger.error(`[risk] ${action} failed for ${issueKey}: ${err.message}`);
+    if (dmChannelId && messageTs) {
+      await replaceButtons(client, dmChannelId, messageTs, originalText,
+        `❌ ${where} on *${issueLink(issueKey)}*: ${err.message}\n_I'll ask again on the next check if it's still flagged._`);
+    }
+    await services.db?.deletePromptsForIssue(issueKey, slackUserId).catch(() => {});
+    await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action, error: err.message });
+  }
+
+  // Status buttons share one handler; the target status rides in the button value.
+  app.action(/^risk_set_status_/, async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'risk status'); if (!ctx) return;
+    const channelId = body.channel?.id; const messageTs = body.message?.ts; const originalText = body.message?.text || '';
+    const { issueKey, slackUserId, status } = ctx;
+    if (channelId && messageTs) await replaceButtons(client, channelId, messageTs, originalText, `_Moving to ${status}…_`);
+    try {
+      const usingOAuth = services.oauthService?.hasToken(slackUserId) ?? false;
+      const jira = await resolveJira(slackUserId, client);
+      await jira.transitionIssue(issueKey, status);
+      logger.info(`[risk] ${issueKey} → ${status} by ${slackUserId} ✓`);
+      const after = { ...ctx, risk: { ...ctx.risk, status } };
+      if (channelId && messageTs) {
+        await replaceButtons(client, channelId, messageTs, originalText,
+          `✅ *${issueLink(issueKey)}* moved to *${status}*.\n_Want to add a line to Notes on what you're doing about it?_`,
+          riskReview.afterStatusBlocks(after, slackUserId));
+      }
+      await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
+      await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'set status', detail: status, usingOAuth });
+    } catch (err) {
+      await riskFail(client, { ...ctx, dmChannelId: channelId, messageTs, originalText }, `Couldn't move to ${status}`, err, logger, 'set status');
+    }
+  });
+
+  app.action('risk_update_notes', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'notes'); if (!ctx) return;
+    const metadata = JSON.stringify({ ...ctx, dmChannelId: body.channel?.id, messageTs: body.message?.ts, originalText: (body.message?.text || '').slice(0, 600) });
+    try {
+      await client.views.open({
+        trigger_id: body.trigger_id,
+        view: {
+          type: 'modal', callback_id: 'risk_notes_modal', private_metadata: metadata,
+          title: { type: 'plain_text', text: 'Update Notes' },
+          submit: { type: 'plain_text', text: 'Save to Notes' },
+          close: { type: 'plain_text', text: 'Cancel' },
+          blocks: [
+            { type: 'section', text: { type: 'mrkdwn', text: `*${issueLink(ctx.issueKey)}*${ctx.risk?.summary ? ` — ${ctx.risk.summary}` : ''}${ctx.risk?.notification ? `\n> ${ctx.risk.notification}` : ''}` } },
+            {
+              type: 'input', block_id: 'note_block',
+              label: { type: 'plain_text', text: 'What are you doing about it?' },
+              element: { type: 'plain_text_input', action_id: 'note', multiline: true,
+                placeholder: { type: 'plain_text', text: 'e.g. Waiting on the infra team for the new cluster; ETA next Tuesday, then two weeks of testing.' } },
+              hint: { type: 'plain_text', text: 'Added as a dated line at the top of the Initiative\'s Notes. Existing notes are kept.' },
+            },
+          ],
+        },
+      });
+    } catch (err) {
+      logger.error(`[risk] Failed to open notes modal: ${err.message}`);
+    }
+  });
+
+  app.view('risk_notes_modal', async ({ ack, body, view, client, logger }) => {
+    await ack();
+    let ctx; try { ctx = JSON.parse(view.private_metadata); } catch { logger.error('[risk] bad notes metadata'); return; }
+    const { issueKey, slackUserId, dmChannelId, messageTs, originalText = '' } = ctx;
+    const raw = view.state.values.note_block?.note?.value?.trim() || '';
+    if (!raw) return;
+    if (dmChannelId && messageTs) await replaceButtons(client, dmChannelId, messageTs, originalText, '_Saving to Notes…_');
+    try {
+      let note = raw;
+      if (services.llmService) {
+        try {
+          const res = await services.llmService.tidyNote({ issueKey, summary: ctx.risk?.summary, notification: ctx.risk?.notification, userText: raw });
+          if (res?.note && typeof res.note === 'string') note = res.note.trim();
+        } catch (err) { logger.warn(`[risk] tidyNote failed, using raw text: ${err.message}`); }
+      }
+      const author = await services.userCache?.getName?.(client, slackUserId).catch(() => null);
+      const usingOAuth = services.oauthService?.hasToken(slackUserId) ?? false;
+      const jira = await resolveJira(slackUserId, client);
+      const issue = await jira.getIssue(issueKey);
+      const existing = issue?.fields?.[riskReview.FIELDS.NOTES] || '';
+      const entry = riskReview.notesEntry(note, author);
+      await jira.updateIssueField(issueKey, riskReview.FIELDS.NOTES, riskReview.prependNotes(existing, entry), 'text');
+      logger.info(`[risk] Notes updated on ${issueKey} by ${slackUserId} ✓`);
+      if (dmChannelId && messageTs) {
+        await replaceButtons(client, dmChannelId, messageTs, originalText, `✅ Added to *${issueLink(issueKey)}* Notes:\n> ${entry}`);
+      }
+      await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
+      await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'updated Notes', detail: `"${note.slice(0, 140)}"`, usingOAuth });
+    } catch (err) {
+      await riskFail(client, ctx, "Couldn't update Notes", err, logger, 'update Notes');
+    }
+  });
+
+  app.action('risk_move_target', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'target'); if (!ctx) return;
+    const metadata = JSON.stringify({ ...ctx, dmChannelId: body.channel?.id, messageTs: body.message?.ts, originalText: (body.message?.text || '').slice(0, 600) });
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      await client.views.open({
+        trigger_id: body.trigger_id,
+        view: {
+          type: 'modal', callback_id: 'risk_target_modal', private_metadata: metadata,
+          title: { type: 'plain_text', text: 'Project target' },
+          submit: { type: 'plain_text', text: 'Save' },
+          close: { type: 'plain_text', text: 'Cancel' },
+          blocks: [
+            { type: 'section', text: { type: 'mrkdwn', text: `*${issueLink(ctx.issueKey)}* — current target: *${ctx.risk?.targetEnd || 'none'}*` } },
+            {
+              type: 'input', block_id: 'target_block', optional: true,
+              label: { type: 'plain_text', text: 'New target date' },
+              element: { type: 'datepicker', action_id: 'new_end', initial_date: ctx.risk?.targetEnd || today },
+            },
+            {
+              type: 'input', block_id: 'clear_block', optional: true,
+              label: { type: 'plain_text', text: 'Or' },
+              element: { type: 'checkboxes', action_id: 'clear',
+                options: [{ text: { type: 'plain_text', text: 'Clear the target (the work is not scheduled)' }, value: 'clear' }] },
+            },
+          ],
+        },
+      });
+    } catch (err) {
+      logger.error(`[risk] Failed to open target modal: ${err.message}`);
+    }
+  });
+
+  app.view('risk_target_modal', async ({ ack, body, view, client, logger }) => {
+    let ctx; try { ctx = JSON.parse(view.private_metadata); } catch { await ack(); logger.error('[risk] bad target metadata'); return; }
+    const clear = (view.state.values.clear_block?.clear?.selected_options || []).some((o) => o.value === 'clear');
+    const newEnd = view.state.values.target_block?.new_end?.selected_date || null;
+    if (!clear && !newEnd) {
+      await ack({ response_action: 'errors', errors: { target_block: 'Pick a new date or tick "Clear the target".' } });
+      return;
+    }
+    await ack();
+    const { issueKey, slackUserId, dmChannelId, messageTs, originalText = '' } = ctx;
+    if (dmChannelId && messageTs) await replaceButtons(client, dmChannelId, messageTs, originalText, '_Updating the target…_');
+    try {
+      const usingOAuth = services.oauthService?.hasToken(slackUserId) ?? false;
+      const jira = await resolveJira(slackUserId, client);
+      let detail;
+      if (clear) {
+        await jira.updateIssueField(issueKey, riskReview.FIELDS.TARGET, null, 'raw');
+        detail = 'target cleared';
+      } else {
+        const start = ctx.risk?.targetStart && ctx.risk.targetStart <= newEnd ? ctx.risk.targetStart : newEnd;
+        await jira.updateIssueField(issueKey, riskReview.FIELDS.TARGET, JSON.stringify({ start, end: newEnd }), 'text');
+        detail = `target → ${newEnd}`;
+      }
+      logger.info(`[risk] ${issueKey} ${detail} by ${slackUserId} ✓`);
+      if (dmChannelId && messageTs) {
+        await replaceButtons(client, dmChannelId, messageTs, originalText, `✅ *${issueLink(issueKey)}*: ${detail}.`);
+      }
+      await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
+      await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'target', detail, usingOAuth });
+    } catch (err) {
+      await riskFail(client, ctx, "Couldn't update the target", err, logger, 'move target');
+    }
+  });
+
+  app.action('risk_handled', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'handled'); if (!ctx) return;
+    const channelId = body.channel?.id; const messageTs = body.message?.ts; const originalText = body.message?.text || '';
+    const { issueKey, slackUserId } = ctx;
+    if (channelId && messageTs) {
+      await replaceButtons(client, channelId, messageTs, originalText, `👍 Noted — no changes made to *${issueLink(issueKey)}*.`);
+    }
+    await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
+    await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'handled (no change)' });
+    logger.info(`[risk] ${issueKey} marked handled by ${slackUserId}`);
   });
 
   // ── Fix Version: one-click apply of the suggestion ────────────────────────
