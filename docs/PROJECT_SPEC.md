@@ -94,7 +94,8 @@ children are Done; the bot asks the reporting PM to approve and move it to Done.
 **Rolling out safely.** Two controls: `scope` (`personal` = only the creator is ever DM'd; `global` =
 anyone matched) and an optional **pilot list** of Slack users. While a pilot list is set, only those
 people are asked (and FYI'd); everyone else the JQL matches is skipped *without* being recorded, so
-clearing the list later asks them normally. Typical path: personal → global + pilot list → global.
+clearing the list later asks them normally. `scope=personal` is checked first and wins: a pilot list
+only has an effect together with `scope=global`. Typical path: personal → global + pilot list → global.
 
 ### 2.3 DM conversation (Yes / No / Reply, LLM-interpreted)
 

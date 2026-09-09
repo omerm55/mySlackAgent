@@ -305,7 +305,7 @@ function buildJiraTriggerModal(admin, existing = null) {
       ...(existing?.pilot_slack_user_ids?.length ? { initial_users: existing.pilot_slack_user_ids } : {}),
     }, {
       optional: true,
-      hint: plain('While set, only these people are asked (and FYI\'d). Everyone else matched is skipped — not marked as asked — until you clear this.'),
+      hint: plain('Requires "Anyone matched by the JQL" below — "Only me" always wins. While set, only these people are asked (and FYI\'d); everyone else matched is skipped, not marked as asked, until you clear this.'),
     }),
     input('jt_action', 'On "Yes", do this (Yes / No asks only)', radios([['transition', 'Move to a status'], ['field', 'Set a field']], existing?.action_type ?? 'transition')),
     input('jt_transition', 'Target status (for "Move to a status")', textInput('e.g. Done', { initial: existing?.transition_to }), { optional: true }),
@@ -315,7 +315,7 @@ function buildJiraTriggerModal(admin, existing = null) {
   ];
   if (admin) {
     blocks.push(input('jt_scope', 'Who does this apply to?', radios(
-      [['global', 'Anyone matched by the JQL'], ['personal', 'Only me (DM me only)']],
+      [['global', 'Anyone matched by the JQL (narrow with the pilot list above)'], ['personal', 'Only me (DM me only — ignores the pilot list)']],
       existing?.scope ?? 'global',
     )));
   }
