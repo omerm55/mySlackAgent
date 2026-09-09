@@ -18,6 +18,11 @@
 const { issueLink, issueLinkLabelled, mentionsIssue } = require('./jiraLink');
 
 const CF = /^customfield_\d+$/;
+// PR roadmap fields that explain *why* the fields matter (env-overridable, see pr-sns-knowledge)
+const ROADMAP_FIELDS = {
+  CERTIFIED: process.env.PR_CERTIFIED_FIELD || 'customfield_12170',   // "Included in Certified Roadmap" (Yes/No)
+  TIMING: process.env.PR_TIMING_FIELD || 'customfield_14817',         // "Timing" (Triage/Now/Next/Later/Parked/Past)
+};
 const MAX_VALUE = 255;          // both A1 fields are Jira "textfield" (single line, 255 chars)
 const CTX_VALUE_CAP = 300;      // keep button values well under Slack's 2000-char cap
 
@@ -63,11 +68,23 @@ function currentValue(v) {
   return String(v);
 }
 
+/**
+ * Why these fields matter, from the Initiative itself — only claims "certified" when the field says so.
+ * @returns {string|null} one mrkdwn line, or null when nothing applies
+ */
+function visibilityLine(c) {
+  if (c?.certified) return '🌐 This Initiative is included in our *Certified Roadmap* — these fields are shown to customers as they are written here.';
+  if (c?.timing === 'Now') return '⏱ This Initiative is *Now*. These fields appear on the customer-facing roadmap once it is certified.';
+  return null;
+}
+
 /** What the poller stores in the payload: the trigger's fields plus each one's current value. */
 function collectContextFor(issue, trigger) {
   const f = issue.fields || {};
   return {
     summary: (f.summary || '').slice(0, 120),
+    certified: /^yes$/i.test(currentValue(f[ROADMAP_FIELDS.CERTIFIED])),
+    timing: currentValue(f[ROADMAP_FIELDS.TIMING]) || null,
     fields: (trigger.collect_fields || []).map((cf) => ({
       id: cf.id, name: cf.name, hint: cf.hint || null, required: cf.required !== false,
       current: currentValue(f[cf.id]).slice(0, CTX_VALUE_CAP),
@@ -85,6 +102,8 @@ function buttonCtx(context, slackUserId, extra = {}) {
     question: (context.question || '').slice(0, 300),
     collect: {
       summary: (c.summary || '').slice(0, 120),
+      certified: !!c.certified,
+      timing: c.timing || null,
       fields: (c.fields || []).map((f) => ({
         id: f.id, name: (f.name || f.id).slice(0, 60), hint: f.hint ? String(f.hint).slice(0, 120) : null,
         required: f.required !== false, current: (f.current || '').slice(0, CTX_VALUE_CAP),
@@ -108,8 +127,10 @@ function headerBlocks(context) {
   const headline = context.question && mentionsIssue(context.question, context.issueKey)
     ? context.question
     : `📝 *${issueLinkLabelled(context.issueKey, label)}* needs: *${describeCollectFields(c.fields)}*.`;
+  const why = visibilityLine(c);
   return [
     { type: 'section', text: { type: 'mrkdwn', text: headline } },
+    ...(why ? [{ type: 'section', text: { type: 'mrkdwn', text: why } }] : []),
     { type: 'section', text: { type: 'mrkdwn', text: fieldLines(c.fields) } },
     { type: 'context', elements: [{ type: 'mrkdwn', text: 'Describe it in your own words — I\'ll fill the fields and show you a preview before anything is saved.' }] },
   ];
@@ -191,8 +212,10 @@ async function sendCollect(client, slackUserId, context, opsNotifier) {
 function buildCollectModal(ctx, values = {}, { freeText = '' } = {}) {
   const c = ctx.collect || {};
   const label = c.summary ? `${ctx.issueKey} (${c.summary})` : ctx.issueKey;
+  const why = visibilityLine(c);
   const blocks = [
     { type: 'section', text: { type: 'mrkdwn', text: `*${issueLinkLabelled(ctx.issueKey, label)}* needs: *${describeCollectFields(c.fields)}*` } },
+    ...(why ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: why }] }] : []),
     {
       type: 'input', block_id: 'free_text', optional: true,
       label: { type: 'plain_text', text: 'In your own words' },
@@ -252,7 +275,7 @@ function mergeValues(fields, explicit = {}, extracted = {}) {
 }
 
 module.exports = {
-  CF, MAX_VALUE,
+  CF, MAX_VALUE, ROADMAP_FIELDS, visibilityLine,
   parseCollectFields, formatCollectFields, describeCollectFields, collectContextFor, currentValue,
   buttonCtx, buildCollectBlocks, previewBlocks, sendCollect, buildCollectModal, readCollectModal, mergeValues,
   fieldLines,

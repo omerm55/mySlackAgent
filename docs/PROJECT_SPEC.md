@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (192 passing, 19 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (193 passing, 19 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -188,7 +188,13 @@ name** (`customfield_11822`) or a **Customer value** (`customfield_15249`) — b
 fields — and DMs the **PR PM owner** (`customfield_11909`, `notify = user_field`):
 
 > 📝 *PR-1234 (Smart Alerts)* needs: *Customer-friendly name, Customer value*.
+> 🌐 This Initiative is included in our *Certified Roadmap* — these fields are shown to customers as they are written here.
 > • Customer-friendly name: _empty_ · • Customer value: _empty_ — **✍️ Answer** · **Skip**
+
+The second line is read from the Initiative, never assumed: *Included in Certified Roadmap* = Yes
+(`customfield_12170`) gives the customer-visibility line; otherwise *Timing* = Now (`customfield_14817`)
+gives "appears on the customer-facing roadmap once it is certified"; otherwise no line. The same line
+sits at the top of the answer modal. Field ids are overridable (`PR_CERTIFIED_FIELD`, `PR_TIMING_FIELD`).
 
 **Answer** opens a modal with one free-text box ("in your own words") and one optional input per field,
 prefilled with the current Jira value. On *Preview* the LLM extracts each field from the free text
@@ -284,7 +290,7 @@ src/
     opsNotifier.js  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (192 tests, 19 suites)
+tests/                         Jest (193 tests, 19 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -383,7 +389,8 @@ when `context.askType === 'risk_review'`, so digests, the Connect nudge and ops 
 
 **`collectMessage.js`** (utils) — the `collect` ask: `parseCollectFields` / `formatCollectFields`
 (trigger-modal text ⇄ `[{id, name, hint, required}]`), `collectContextFor(issue, trigger)` (current
-values, capped), `buildCollectBlocks` / `sendCollect` (Answer + Skip), `buildCollectModal(ctx, values,
+values, capped, plus `certified` / `timing` from the PR roadmap fields), `visibilityLine(ctx)` (why the
+fields matter — certified → "shown to customers", Now → "once it is certified", else nothing), `buildCollectBlocks` / `sendCollect` (Answer + Skip), `buildCollectModal(ctx, values,
 {freeText})` (free text + one optional input per field, prefilled; metadata drops values/free text to stay
 under Slack's 3000-char cap), `readCollectModal` (explicit values only where typed and changed),
 `mergeValues(fields, explicit, extracted)` (explicit wins, 255-char cap, `null` when neither),
@@ -676,9 +683,10 @@ Failure ─► ❌ with Jira's error ─► deletePromptsForIssue (re-asked next
 
 ```
 JiraPoller tick ─► trigger ask_type=collect, collect_fields=[cf 11822, cf 15249], notify=user_field cf[11909]
-  ─► searchIssues(jql, + collect field ids) ─► new issues only (jira_prompts) ─► PM owner → Slack id
+  ─► searchIssues(jql, + collect field ids + cf[12170] Certified + cf[14817] Timing) ─► new issues only (jira_prompts) ─► PM owner → Slack id
   ─► scope / pilot list / digest preference as for every trigger
-  ─► sendDmQuestion(payload{askType:'collect', collect:{summary, fields:[{id,name,hint,required,current}]}}) → sendCollect
+  ─► sendDmQuestion(payload{askType:'collect', collect:{summary, certified, timing, fields:[{id,name,hint,required,current}]}}) → sendCollect
+       (DM + modal carry visibilityLine: certified → "shown to customers"; Now → "once it is certified")
 PM clicks:
   [✍️ Answer] ─► collect_modal (free text + one input per field, prefilled with current values)
      Preview ─► nothing entered? inline error
@@ -866,6 +874,7 @@ style base with `OPENAI_DEPLOYMENT` = deployment name (GPT-5.1). Uses `api-key` 
 | `CURRENT_RELEASE_VERSION` | no | Override "current release" for Fix Version suggestions |
 | `KEEP_ALIVE_URL`, `KEEP_ALIVE_INTERVAL_SEC`, `KEEP_ALIVE_DISABLED` | no | Self-ping (defaults from `RENDER_EXTERNAL_URL`, 300 s) |
 | `PR_LATEST_NOTIFICATION_FIELD`, `PR_NOTES_FIELD`, `PR_TARGET_FIELD`, `PR_DEV_OWNER_FIELD`, `PR_PM_OWNER_FIELD` | no | PR field ids for the risk review (defaults `customfield_15525` / `12958` / `11818` / `11962` / `11909`) |
+| `PR_CERTIFIED_FIELD`, `PR_TIMING_FIELD` | no | PR field ids the collect ask reads for its "why this matters" line (defaults `customfield_12170` / `14817`). Like the other `PR_*` ids, not listed in `render.yaml`: the defaults are the live ids |
 | `RISK_NOTIFICATION_MAX_AGE_DAYS` | no (8) | Risk reviews ignore `Latest notification` stamps older than this |
 | `RISK_NOTIFICATION_MATCH` | no (`progress red`) | Case-insensitive regex the `Latest notification` stamp must match for a risk review to fire; empty = every flag |
 | `RENDER_EXTERNAL_URL`, `PORT` | set by Render | |
@@ -1034,7 +1043,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 192 tests in 19 suites:
+`npm test` → Jest, `tests/*.test.js`, 193 tests in 19 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1047,7 +1056,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `dmQuestionFormat` | Template rendering (`{key} ({summary})` → one link, pipe-safety), headline dedup, button context |
 | `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change; `parseNotificationDate` / `notificationAge` (current year, year roll-back, unparseable = fresh, 8-day cutoff); `notificationMatches` (case-insensitive regex, empty = all, invalid regex = substring) |
 | `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; stale `Latest notification` stamps (older than `RISK_NOTIFICATION_MAX_AGE_DAYS`) are skipped without recording and counted in the Run-now summary; stamps that don't match `RISK_NOTIFICATION_MATCH` (orange, Overdue, Status mismatch…) are skipped the same way; collect trigger requests its field ids and DMs the PM owner an Answer/Skip ask with current values in the payload |
-| `collect` | Trigger field list parse/format round-trip + errors; `collectContextFor` current values; ask blocks (Answer/Skip, unique ids, ctx < 2000 chars); preview Save/Edit/Cancel vs missing-required (no Save); `mergeValues` precedence + 255 cap; modal prefill + slim metadata; `readCollectModal`; `sendDmQuestion` delegation; handlers: Answer opens modal with DM location, empty submit → inline error, explicit-only → no LLM, free text → LLM with typed field winning, LLM partial → "Almost there", LLM failure → note, Save → ONE `updateIssueFields` PUT + ✅ + answered + ops + FYI, save failure → ❌ + re-ask, Edit prefilled, Cancel restores ask, Skip |
+| `collect` | Trigger field list parse/format round-trip + errors; `collectContextFor` current values + certified/timing; `visibilityLine`; certified line in DM and modal, absent otherwise; ask blocks (Answer/Skip, unique ids, ctx < 2000 chars); preview Save/Edit/Cancel vs missing-required (no Save); `mergeValues` precedence + 255 cap; modal prefill + slim metadata; `readCollectModal`; `sendDmQuestion` delegation; handlers: Answer opens modal with DM location, empty submit → inline error, explicit-only → no LLM, free text → LLM with typed field winning, LLM partial → "Almost there", LLM failure → note, Save → ONE `updateIssueFields` PUT + ✅ + answered + ops + FYI, save failure → ❌ + re-ask, Edit prefilled, Cancel restores ask, Skip |
 | `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; save-time run posts the Run-now summary with queued matches called out |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
@@ -1130,6 +1139,11 @@ Chronological, with rationale (see `git log` for commits):
     match "disappear": the run right after saving queued it silently, and the next Run now counted it
     as already asked. The save-time run now posts the Run-now summary, and the summary distinguishes
     "already asked or waiting in a digest" and marks queued matches with 🔔.
+27. **Say why the fields matter, from the data.** The A1 ask now tells the PM that the Initiative is on
+    the Certified Roadmap and that the two fields are customer-visible — but only when *Included in
+    Certified Roadmap* actually says Yes; a *Now* Initiative gets the softer "once it is certified" line.
+    Reading the field beats putting the claim in the trigger's question text, which would be wrong for
+    half the JQL's matches.
 
 ---
 

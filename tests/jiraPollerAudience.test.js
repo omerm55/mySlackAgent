@@ -124,7 +124,7 @@ describe('poller: collect ask type', () => {
     };
     const poller = new JiraPoller({ jiraService: jira, db, slackClient: slack, logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } });
     const [stats] = await poller.runOnce({ force: true });
-    expect(jira.searchIssues).toHaveBeenCalledWith('x', expect.arrayContaining([PM, NAME, VALUE]));
+    expect(jira.searchIssues).toHaveBeenCalledWith('x', expect.arrayContaining([PM, NAME, VALUE, 'customfield_12170', 'customfield_14817']));
     expect(stats.sent).toBe(1);
     const msg = slack.chat.postMessage.mock.calls[0][0];
     expect(msg.channel).toBe('DPM');

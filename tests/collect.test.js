@@ -28,11 +28,18 @@ describe('collect: trigger field list', () => {
     expect(cm.parseCollectFields('Customer value | x').error).toMatch(/must start with a field id/);
     expect(cm.parseCollectFields(`${NAME} | a\n${NAME} | b`).error).toMatch(/listed twice/);
   });
-  test('collectContextFor carries current values (capped) from the searched issue', () => {
-    const issue = { key: 'PR-1', fields: { summary: 'S', [NAME]: '  Smart Alerts ', [VALUE]: null } };
+  test('collectContextFor carries current values (capped) and the roadmap context from the searched issue', () => {
+    const issue = { key: 'PR-1', fields: { summary: 'S', [NAME]: '  Smart Alerts ', [VALUE]: null, [cm.ROADMAP_FIELDS.CERTIFIED]: { value: 'Yes' }, [cm.ROADMAP_FIELDS.TIMING]: { value: 'Now' } } };
     const c = cm.collectContextFor(issue, { collect_fields: FIELDS });
     expect(c.summary).toBe('S');
     expect(c.fields.map((f) => f.current)).toEqual(['Smart Alerts', '']);
+    expect(c.certified).toBe(true); expect(c.timing).toBe('Now');
+    expect(cm.collectContextFor({ key: 'PR-2', fields: {} }, { collect_fields: FIELDS })).toMatchObject({ certified: false, timing: null });
+  });
+  test('visibilityLine: certified → shown to customers; Now → once certified; otherwise nothing', () => {
+    expect(cm.visibilityLine({ certified: true, timing: 'Now' })).toMatch(/Certified Roadmap.*shown to customers/);
+    expect(cm.visibilityLine({ certified: false, timing: 'Now' })).toMatch(/once it is certified/);
+    expect(cm.visibilityLine({ certified: false, timing: 'Next' })).toBeNull();
   });
 });
 
@@ -48,6 +55,13 @@ describe('collect: DM, preview and modal', () => {
     expect(val).toMatchObject({ askType: 'collect', issueKey: 'PR-1234', slackUserId: 'U1' });
     expect(val.collect.fields).toHaveLength(2);
     expect(blocks.find((b) => b.type === 'actions').elements[0].value.length).toBeLessThan(2000);
+    // certified Initiative → the DM and the modal say the fields are customer-visible; ctx carries it
+    const cert = ctxFor(); cert.collect.certified = true;
+    const cblocks = cm.buildCollectBlocks(cert, 'U1');
+    expect(JSON.stringify(cblocks)).toContain('Certified Roadmap');
+    expect(JSON.parse(cblocks.find((b) => b.type === 'actions').elements[0].value).collect.certified).toBe(true);
+    expect(JSON.stringify(cm.buildCollectModal(cert, {}, {}).blocks)).toContain('Certified Roadmap');
+    expect(JSON.stringify(blocks)).not.toContain('Certified Roadmap');
   });
   test('preview: all values → Save/Edit/Cancel; missing required → no Save, "Add the missing part"', () => {
     const full = cm.previewBlocks(ctxFor({ freeText: 'my words' }), 'U1', { [NAME]: 'Smart Alerts', [VALUE]: 'Know when a KPI drifts.' });
