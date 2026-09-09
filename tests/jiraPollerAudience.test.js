@@ -26,7 +26,7 @@ describe('resolvePerson', () => {
   });
   test('fieldsFor requests the user field, watch field and risk fields', () => {
     const f = fieldsFor({ notify: 'user_field', notify_field_id: FIELDS.DEV_OWNER, watch_field: FIELDS.NOTIFICATION, ask_type: 'risk_review' });
-    expect(f).toEqual(expect.arrayContaining(['summary', 'status', 'reporter', 'assignee', FIELDS.DEV_OWNER, FIELDS.NOTIFICATION, FIELDS.TARGET]));
+    expect(f).toEqual(expect.arrayContaining(['summary', 'status', 'reporter', 'assignee', FIELDS.DEV_OWNER, FIELDS.NOTIFICATION, FIELDS.TARGET, FIELDS.NOTES]));
   });
 });
 

@@ -35,7 +35,7 @@ function fieldsFor(trigger) {
   const fields = new Set(['summary', 'status', 'reporter', 'assignee']);
   if (trigger.notify === 'user_field' && trigger.notify_field_id) fields.add(trigger.notify_field_id);
   if (trigger.watch_field) fields.add(trigger.watch_field);
-  if (trigger.ask_type === 'risk_review') { fields.add(RISK_FIELDS.NOTIFICATION); fields.add(RISK_FIELDS.TARGET); }
+  if (trigger.ask_type === 'risk_review') { fields.add(RISK_FIELDS.NOTIFICATION); fields.add(RISK_FIELDS.TARGET); fields.add(RISK_FIELDS.NOTES); }
   const fyi = fyiFieldFor(trigger);
   if (fyi) fields.add(fyi);
   return [...fields];

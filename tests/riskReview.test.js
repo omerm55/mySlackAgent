@@ -24,7 +24,7 @@ describe('riskReviewMessage helpers', () => {
 
   test('riskContextFor reads notification, status, summary and target from a searched issue', () => {
     const issue = { key: 'PR-1', fields: { summary: 'S', status: { name: 'On Track' }, [rr.FIELDS.NOTIFICATION]: ` ${NOTIF} `, [rr.FIELDS.TARGET]: '{"start":"2026-06-01","end":"2026-08-31"}' } };
-    expect(rr.riskContextFor(issue)).toEqual({ notification: NOTIF, status: 'On Track', summary: 'S', targetStart: '2026-06-01', targetEnd: '2026-08-31' });
+    expect(rr.riskContextFor(issue)).toEqual({ notification: NOTIF, status: 'On Track', summary: 'S', targetStart: '2026-06-01', targetEnd: '2026-08-31', notes: '' });
   });
 
   test.each([
@@ -97,7 +97,7 @@ describe('risk review handlers', () => {
     expect(jira.transitionIssue).toHaveBeenCalledWith('PR-1234', 'High Risk');
     const last = updates[updates.length - 1];
     expect(last.text).toMatch(/moved to \*High Risk\*/);
-    expect(actionIds(last.blocks)).toEqual(['risk_update_notes']);
+    expect(actionIds(last.blocks)).toEqual(['risk_update_notes', 'risk_skip_notes']);
     expect(db.markPromptAnswered).toHaveBeenCalledWith('PR-1234', 'U1');
     expect(ops.riskReviewAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'set status', detail: 'High Risk' }));
   });
@@ -181,5 +181,48 @@ describe('risk review FYI follow-ups', () => {
     client.chat.postMessage.mockClear();
     await statusHandler({ ack: jest.fn(), body: mk(null), client, logger });
     expect(client.chat.postMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('Notes in the risk review', () => {
+  test('plainText handles strings and ADF documents', () => {
+    expect(rr.plainText('  hello  ')).toBe('hello');
+    expect(rr.plainText({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] }, { type: 'paragraph', content: [{ type: 'text', text: 'c' }] }] })).toBe('a\nb\nc'.replace('a\nb', 'ab'));
+    expect(rr.plainText(null)).toBe('');
+  });
+
+  test('riskContextFor carries a truncated Notes preview', () => {
+    const long = 'x'.repeat(500);
+    const issue = { key: 'PR-1', fields: { summary: 'S', status: { name: 'On Track' }, [rr.FIELDS.NOTES]: long } };
+    expect(rr.riskContextFor(issue).notes).toHaveLength(401);
+    expect(rr.riskContextFor(issue).notes.endsWith('…')).toBe(true);
+  });
+
+  test('DM and FYI show Notes, or say they are empty', async () => {
+    const withNotes = rr.buildRiskReviewBlocks({ ...ctxFor('On Track'), risk: { ...ctxFor('On Track').risk, notes: 'Waiting on infra.\nETA Tuesday.' } }, 'U1');
+    expect(JSON.stringify(withNotes)).toContain('*Notes:*\\n> Waiting on infra.\\n> ETA Tuesday.');
+    const empty = rr.buildRiskReviewBlocks(ctxFor('On Track'), 'U1');
+    expect(JSON.stringify(empty)).toContain('*Notes:* _empty_');
+
+    const client = { conversations: { open: jest.fn().mockResolvedValue({ channel: { id: 'D' } }) }, chat: { postMessage: jest.fn().mockResolvedValue({ ts: '1' }) } };
+    await rr.sendFyi(client, 'UPM', ctxFor('On Track'), 'UDEV', null);
+    expect(JSON.stringify(client.chat.postMessage.mock.calls[0][0].blocks)).toContain('*Notes:* _empty_');
+  });
+});
+
+describe('Skip after a status change', () => {
+  test('finalises the message without touching Jira', async () => {
+    const handlers = {};
+    const app = { action: (id, fn) => { handlers[String(id)] = fn; }, view: (id, fn) => { handlers[String(id)] = fn; } };
+    const client = { chat: { update: jest.fn().mockResolvedValue({}), postMessage: jest.fn().mockResolvedValue({}) }, views: { open: jest.fn() }, conversations: { open: jest.fn() } };
+    const jira = { transitionIssue: jest.fn(), updateIssueField: jest.fn(), getIssue: jest.fn() };
+    const ops = { riskReviewAction: jest.fn().mockResolvedValue(undefined) };
+    registerDmHandler(app, jira, { db: {}, oauthService: null, opsNotifier: ops });
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    const body = { actions: [{ value: JSON.stringify({ askType: 'risk_review', issueKey: 'PR-9', slackUserId: 'UDEV', risk: { status: 'High Risk' } }) }], channel: { id: 'D1' }, message: { ts: '1', text: 'o' }, user: { id: 'UDEV' } };
+    await handlers.risk_skip_notes({ ack: jest.fn(), body, client, logger });
+    expect(jira.updateIssueField).not.toHaveBeenCalled();
+    expect(client.chat.update).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringMatching(/PR-9.* is \*High Risk\*\. Notes left unchanged\./) }));
+    expect(ops.riskReviewAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'skipped Notes update' }));
   });
 });

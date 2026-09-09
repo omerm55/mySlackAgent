@@ -349,6 +349,12 @@ function registerDmHandler(app, jiraService, services) {
     await ack();
     const ctx = parseCtx(body, logger, 'notes'); if (!ctx) return;
     const metadata = JSON.stringify({ ...ctx, dmChannelId: body.channel?.id, messageTs: body.message?.ts, originalText: (body.message?.text || '').slice(0, 600) });
+    // Show the current Notes so the author knows what they're adding to (quick read; skipped if slow)
+    let currentNotes = '';
+    try {
+      const issue = await withTimeout(jiraService.getIssue(ctx.issueKey), 2_000, 'notes read');
+      currentNotes = riskReview.notesPreview(issue?.fields?.[riskReview.FIELDS.NOTES]);
+    } catch { /* cosmetic */ }
     try {
       await client.views.open({
         trigger_id: body.trigger_id,
@@ -359,6 +365,7 @@ function registerDmHandler(app, jiraService, services) {
           close: { type: 'plain_text', text: 'Cancel' },
           blocks: [
             { type: 'section', text: { type: 'mrkdwn', text: `*${issueLink(ctx.issueKey)}*${ctx.risk?.summary ? ` — ${ctx.risk.summary}` : ''}${ctx.risk?.notification ? `\n> ${ctx.risk.notification}` : ''}` } },
+            riskReview.notesBlock(currentNotes),
             {
               type: 'input', block_id: 'note_block',
               label: { type: 'plain_text', text: 'What are you doing about it?' },
@@ -477,6 +484,21 @@ function registerDmHandler(app, jiraService, services) {
     } catch (err) {
       await riskFail(client, ctx, "Couldn't update the target", err, logger, 'move target');
     }
+  });
+
+  // "Skip" after a status change: finish without touching Notes.
+  app.action('risk_skip_notes', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'skip notes'); if (!ctx) return;
+    const channelId = body.channel?.id; const messageTs = body.message?.ts; const originalText = body.message?.text || '';
+    const { issueKey, slackUserId } = ctx;
+    const status = ctx.risk?.status;
+    if (channelId && messageTs) {
+      await replaceButtons(client, channelId, messageTs, originalText,
+        `✅ *${issueLink(issueKey)}*${status ? ` is *${status}*` : ''}. Notes left unchanged.`);
+    }
+    await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'skipped Notes update' });
+    logger.info(`[risk] ${issueKey}: Notes update skipped by ${slackUserId}`);
   });
 
   app.action('risk_handled', async ({ ack, body, client, logger }) => {

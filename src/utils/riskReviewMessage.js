@@ -37,6 +37,31 @@ function parseInterval(value) {
   }
 }
 
+/** Plain text from a Jira text field that may arrive as a string or as an ADF document. */
+function plainText(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'object') {
+    const out = [];
+    const walk = (n) => {
+      if (!n || typeof n !== 'object') return;
+      if (n.type === 'text' && typeof n.text === 'string') out.push(n.text);
+      if (n.type === 'paragraph' || n.type === 'hardBreak') out.push('\n');
+      (n.content || []).forEach(walk);
+    };
+    walk(value);
+    return out.join('').replace(/\n{3,}/g, '\n\n').trim();
+  }
+  return String(value).trim();
+}
+
+const NOTES_PREVIEW_CHARS = 400;
+function notesPreview(notes) {
+  const t = plainText(notes);
+  if (!t) return '';
+  return t.length > NOTES_PREVIEW_CHARS ? `${t.slice(0, NOTES_PREVIEW_CHARS).trimEnd()}…` : t;
+}
+
 /** Build the risk part of a Jira-trigger payload from a searched issue. */
 function riskContextFor(issue) {
   const f = issue.fields || {};
@@ -47,7 +72,16 @@ function riskContextFor(issue) {
     summary: String(f.summary || '').slice(0, 120),
     targetStart: target?.start || null,
     targetEnd: target?.end || null,
+    notes: notesPreview(f[FIELDS.NOTES]),
   };
+}
+
+/** "*Notes:* …" block — quoted preview or an explicit "empty". */
+function notesBlock(notes) {
+  const text = notes
+    ? `*Notes:*\n${notes.split('\n').map((l) => `> ${l}`).join('\n')}`
+    : '*Notes:* _empty_';
+  return { type: 'section', text: { type: 'mrkdwn', text } };
 }
 
 /** Which status buttons to offer, per the notifier's "already at risk" and "On hold" rules. */
@@ -103,6 +137,7 @@ function headerBlocks(context) {
       text: `Status: *${r.status || 'unknown'}*  ·  Target: *${r.targetEnd || 'none'}*`,
     }],
   });
+  blocks.push(notesBlock(r.notes));
   return blocks;
 }
 
@@ -181,6 +216,7 @@ async function sendFyi(client, fyiSlackUserId, context, askedSlackUserId, opsNot
       { type: 'section', text: { type: 'mrkdwn', text: `ℹ️ *FYI* — *${link}* was flagged by the weekly R&D Initiative Notifier. I've asked the Dev owner <@${askedSlackUserId}> to act; you'll get a note here when they do.` } },
       ...(r.notification ? [{ type: 'section', text: { type: 'mrkdwn', text: `> ${r.notification}` } }] : []),
       { type: 'context', elements: [{ type: 'mrkdwn', text: `Status: *${r.status || 'unknown'}*  ·  Target: *${r.targetEnd || 'none'}*` }] },
+      notesBlock(r.notes),
     ]
     : [
       { type: 'section', text: { type: 'mrkdwn', text: `ℹ️ *FYI* — I've asked <@${askedSlackUserId}> about *${issueLink(context.issueKey)}*:\n> ${(context.question || '').replace(/^\W*/, '')}` } },
@@ -192,9 +228,19 @@ async function sendFyi(client, fyiSlackUserId, context, askedSlackUserId, opsNot
   return { channelId: dm.channel.id, messageTs: result.ts };
 }
 
-/** After a status change: keep only the Notes button (the notifier's ask is "flag at risk AND refresh Notes"). */
+/**
+ * After a status change: offer Notes (the notifier's ask is "flag at risk AND refresh Notes")
+ * but always with a way out.
+ */
 function afterStatusBlocks(context, slackUserId) {
-  return actionBlocks(context, slackUserId, { includeStatus: false, includeTarget: false, includeHandled: false });
+  const ctx = (extra) => buttonCtx(context, slackUserId, extra);
+  return [{
+    type: 'actions',
+    elements: [
+      { type: 'button', text: { type: 'plain_text', text: '📝 Update Notes', emoji: true }, action_id: 'risk_update_notes', value: ctx(), style: 'primary' },
+      { type: 'button', text: { type: 'plain_text', text: 'Skip', emoji: true }, action_id: 'risk_skip_notes', value: ctx() },
+    ],
+  }];
 }
 
 /** Notes entry line prepended to the Notes field. */
@@ -211,5 +257,5 @@ function prependNotes(existing, entry) {
 module.exports = {
   FIELDS, RISK_STATUSES, AT_RISK, ON_TRACK, STATUS_BUTTON,
   parseInterval, riskContextFor, statusChoices, buildRiskReviewBlocks, actionBlocks, afterStatusBlocks,
-  sendRiskReview, sendFyi, notesEntry, prependNotes, issueLink,
+  sendRiskReview, sendFyi, notesEntry, prependNotes, issueLink, plainText, notesPreview, notesBlock,
 };

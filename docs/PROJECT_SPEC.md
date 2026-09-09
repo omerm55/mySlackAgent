@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (153 passing, 17 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (157 passing, 17 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -136,8 +136,8 @@ one-line diagnosis onto each flagged Initiative in **`Latest notification`** (`c
 `Sep 8 — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress`. It does not DM owners.
 
 A Jira trigger with **ask type `risk_review`** reads that field and DMs the **Dev owner** (`PR Dev
-Owner/FC Sponsor`, `customfield_11962`, fallback assignee → reporter) with the diagnosis, current status and
-target, and buttons:
+Owner/FC Sponsor`, `customfield_11962`, fallback assignee → reporter) with the diagnosis, current status,
+target and the **current Notes** (first 400 chars, or "_empty_"), and buttons:
 
 - **🟡 Low Risk / 🔴 High Risk / ⛔ Off Track** — transition as the owner. When the status is already one
   of those, **🟢 Back On Track** is offered instead (the skill's *already-at-risk* rule); when `On hold`,
@@ -148,12 +148,13 @@ target, and buttons:
   (`customfield_11818`) as a Polaris interval JSON string, or `null`.
 - **✅ Handled** — records the acknowledgement; no Jira write.
 
-After a status change the message keeps only *Update Notes* (the notifier's ask is "flag at risk **and**
-refresh Notes"). The trigger uses **`watch_field = customfield_15525`**, so each weekly rewrite re-asks;
+After a status change the message offers *📝 Update Notes* and *Skip* (the notifier's ask is "flag at
+risk **and** refresh Notes", but nobody is forced). The Notes modal shows the current Notes above the
+input. The trigger uses **`watch_field = customfield_15525`**, so each weekly rewrite re-asks;
 an unchanged value never does. Field ids are overridable via `PR_*_FIELD` env vars.
 
 **FYI to the PM owner.** When the Dev owner is asked, the **PR PM owner** (`customfield_11909`) gets an
-informational DM at the same time — the same diagnosis, status and target, no buttons — and a one-line
+informational DM at the same time — the same diagnosis, status, target and Notes, no buttons — and a one-line
 follow-up whenever the Dev owner acts ("set to High Risk", "updated Notes: …", "changed the target",
 "marked handled"). Skipped when PM and Dev owner are the same person. Generic: any Jira trigger can
 name an FYI user field (`fyi_field_id`); risk reviews default to the PM owner when unset. FYIs are sent
@@ -235,7 +236,7 @@ src/
     opsNotifier.js  dmQuestion.js  riskReviewMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (153 tests, 17 suites)
+tests/                         Jest (157 tests, 17 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -267,7 +268,7 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 |---|---|---|
 | `reactionHandler.js` | `reaction_added` | Match channel triggers by channel; fetch message; extract issue keys; per-trigger scope/allowlist/rate/dedup; update field via user OAuth or service account; thread confirmation; audit + ops. |
 | `replyHandler.js` | `message` (thread replies, non-bot) | Same for thread replies (root message holds the issue key). |
-| `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_move_target`, `risk_handled`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; clears `jira_prompts` on failure so the poller re-asks. |
+| `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; clears `jira_prompts` on failure so the poller re-asks. |
 | `homeHandler.js` | `app_home_opened` | Builds the Home view (connection, notifications, how it works, persistent recent activity; trigger sections **admin-only**); exports `publishHome` for other handlers to refresh it. |
 | `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (Jira-trigger modal: ask type yes/no vs risk review, notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, cadence, action); validates JQL against Jira before saving; Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
@@ -322,9 +323,10 @@ context so `dmHandler` can echo actions to them. Returns per-trigger stats `{mat
 fyi, skipped[], sentTo[], queuedFor[]}`. `runOnce({force, onlyId})` is used by Run now / Re-ask / save.
 
 **`riskReviewMessage.js`** (utils) — builds the `risk_review` DM (`buildRiskReviewBlocks`,
-`sendRiskReview`, `afterStatusBlocks`), the buttonless `sendFyi` (risk-review and generic variants),
-`statusChoices(status)`, `parseInterval`, `riskContextFor(issue)`, `notesEntry`/`prependNotes`, and the
-`FIELDS` constants (env-overridable, incl. `PM_OWNER`). `sendDmQuestion` delegates to it
+`sendRiskReview`, `afterStatusBlocks` = Update Notes + Skip), the buttonless `sendFyi` (risk-review and
+generic variants), `statusChoices(status)`, `parseInterval`, `riskContextFor(issue)` (incl. a 400-char
+Notes preview), `plainText` (string or ADF → text), `notesPreview`/`notesBlock`, `notesEntry`/`prependNotes`,
+and the `FIELDS` constants (env-overridable, incl. `PM_OWNER`). `sendDmQuestion` delegates to it
 when `context.askType === 'risk_review'`, so digests, the Connect nudge and ops reporting are unchanged.
 
 **`digestScheduler.js`** — tick every 60 s. For each `user_preferences` row with
@@ -585,14 +587,15 @@ Permission: creator or ADMIN_SLACK_USER_IDS. Admins may set scope=global.
 ```
 rd-initiative-notifier (weekly, Claude scheduled task) ─► writes cf[15525] "Latest notification" on flagged Initiatives
 JiraPoller tick ─► trigger ask_type=risk_review, watch_field=cf[15525]
-  ─► searchIssues(jql, + notify_field_id + watch field + target) ─► for each issue:
+  ─► searchIssues(jql, + notify_field_id + watch field + target + Notes) ─► for each issue:
        stored watchedValue == current? skip : deletePromptsForIssue + treat as new
   ─► resolvePerson: user_field cf[11962] → first user → email → Slack id (fallback assignee → reporter)
   ─► FYI: fyiFieldFor → PM owner cf[11909] → Slack id ≠ Dev owner? sendFyi (no buttons) + payload.fyiSlackUserId
   ─► sendDmQuestion(payload{askType:'risk_review', risk:{notification,status,target}}) → sendRiskReview
 Dev owner clicks:
-  [Low/High Risk | Off Track | Back On Track] ─► transitionIssue as user ─► ✅ + keep [📝 Update Notes]
-  [📝 Update Notes] ─► modal ─► llm.tidyNote (fallback raw) ─► prepend "YYYY-MM-DD (Name): …" to cf[12958]
+  [Low/High Risk | Off Track | Back On Track] ─► transitionIssue as user ─► ✅ + [📝 Update Notes] [Skip]
+  [📝 Update Notes] ─► modal (shows current Notes) ─► llm.tidyNote (fallback raw) ─► prepend "YYYY-MM-DD (Name): …" to cf[12958]
+  [Skip] ─► ✅ "Notes left unchanged"
   [📅 Move / clear target] ─► modal (date | clear) ─► cf[11818] = {"start","end"} JSON string | null
   [✅ Handled] ─► answered_at only
 Every action ─► markPromptAnswered ─► ops riskReviewAction ─► activity_log ─► FYI follow-up DM to fyiSlackUserId
@@ -889,7 +892,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 153 tests in 17 suites:
+`npm test` → Jest, `tests/*.test.js`, 157 tests in 17 suites:
 
 | Suite | Covers |
 |---|---|
@@ -900,7 +903,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `jiraPollerQueue` | Send vs queue by preference |
 | `dmFixVersionOffer` | Offer rendering, unique action_ids, progress lines, fallback when Slack rejects blocks |
 | `dmQuestionFormat` | Template rendering (`{key} ({summary})` → one link, pipe-safety), headline dedup, button context |
-| `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one) |
+| `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change |
 | `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
@@ -957,6 +960,9 @@ Chronological, with rationale (see `git log` for commits):
     informational DM when the Dev owner is asked and a follow-up when they act. Implemented as a
     generic per-trigger `fyi_field_id` (defaulting to the PM owner for risk reviews) rather than a
     risk-review special case, so other asks can copy a second person too.
+20. **Notes in the loop; Skip.** First live test showed two gaps: people act on Notes without seeing
+    them, and the post-status follow-up offered only "Update Notes". The DM, the FYI and the Notes modal
+    now show the current Notes (or "empty"), and a Skip button ends the flow without a write.
 
 ---
 
