@@ -297,6 +297,16 @@ function registerDmHandler(app, jiraService, services) {
     }
   }
 
+  /** Echo a Dev owner's action to the FYI recipient (e.g. PM owner), if there is one. Never throws. */
+  async function fyiFollowUp(client, ctx, text) {
+    if (!ctx?.fyiSlackUserId) return;
+    try {
+      await client.chat.postMessage({ channel: ctx.fyiSlackUserId, text: `ℹ️ ${text}` });
+    } catch (err) {
+      baseLogger.warn(`[risk] FYI follow-up to ${ctx.fyiSlackUserId} failed: ${err.data?.error || err.message}`);
+    }
+  }
+
   async function riskFail(client, ctx, where, err, logger, action) {
     const { issueKey, slackUserId, dmChannelId, messageTs, originalText = '' } = ctx;
     logger.error(`[risk] ${action} failed for ${issueKey}: ${err.message}`);
@@ -329,6 +339,7 @@ function registerDmHandler(app, jiraService, services) {
       await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
       await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'set status', detail: status, usingOAuth });
       await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'status', fieldValue: status });
+      await fyiFollowUp(client, ctx, `<@${slackUserId}> set *${issueLink(issueKey)}* to *${status}*.`);
     } catch (err) {
       await riskFail(client, { ...ctx, dmChannelId: channelId, messageTs, originalText }, `Couldn't move to ${status}`, err, logger, 'set status');
     }
@@ -392,6 +403,7 @@ function registerDmHandler(app, jiraService, services) {
       await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
       await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'updated Notes', detail: `"${note.slice(0, 140)}"`, usingOAuth });
       await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'Notes', fieldValue: note.slice(0, 80) });
+      await fyiFollowUp(client, ctx, `<@${slackUserId}> updated Notes on *${issueLink(issueKey)}*:\n> ${entry}`);
     } catch (err) {
       await riskFail(client, ctx, "Couldn't update Notes", err, logger, 'update Notes');
     }
@@ -461,6 +473,7 @@ function registerDmHandler(app, jiraService, services) {
       await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
       await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'target', detail, usingOAuth });
       await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'Project target', fieldValue: clear ? 'cleared' : newEnd });
+      await fyiFollowUp(client, ctx, `<@${slackUserId}> changed the target of *${issueLink(issueKey)}*: ${detail}.`);
     } catch (err) {
       await riskFail(client, ctx, "Couldn't update the target", err, logger, 'move target');
     }
@@ -477,6 +490,7 @@ function registerDmHandler(app, jiraService, services) {
     await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
     await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'handled (no change)' });
     await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'acknowledged', fieldValue: 'no change' });
+    await fyiFollowUp(client, ctx, `<@${slackUserId}> marked *${issueLink(issueKey)}* as handled — no change needed.`);
     logger.info(`[risk] ${issueKey} marked handled by ${slackUserId}`);
   });
 

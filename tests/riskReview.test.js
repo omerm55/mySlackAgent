@@ -160,3 +160,26 @@ describe('risk review handlers', () => {
     expect(updates[updates.length - 1].text).toMatch(/Noted — no changes/);
   });
 });
+
+describe('risk review FYI follow-ups', () => {
+  test('status change is echoed to the FYI recipient; nothing sent without one', async () => {
+    const handlers = {};
+    const app = { action: (id, fn) => { handlers[String(id)] = fn; }, view: (id, fn) => { handlers[String(id)] = fn; } };
+    const client = {
+      chat: { update: jest.fn().mockResolvedValue({}), postMessage: jest.fn().mockResolvedValue({}) },
+      views: { open: jest.fn() }, conversations: { open: jest.fn() },
+    };
+    const jira = { transitionIssue: jest.fn().mockResolvedValue(undefined) };
+    registerDmHandler(app, jira, { db: { markPromptAnswered: jest.fn().mockResolvedValue(undefined) }, oauthService: null });
+    const statusHandler = handlers[Object.keys(handlers).find((k) => k.startsWith('/^risk_set_status_'))];
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    const mk = (fyi) => ({ actions: [{ value: JSON.stringify({ askType: 'risk_review', issueKey: 'PR-9', slackUserId: 'UDEV', status: 'High Risk', fyiSlackUserId: fyi, risk: {} }) }], channel: { id: 'D1' }, message: { ts: '1', text: 'o' }, user: { id: 'UDEV' } });
+
+    await statusHandler({ ack: jest.fn(), body: mk('UPM'), client, logger });
+    expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'UPM', text: expect.stringMatching(/<@UDEV> set .*PR-9.* to \*High Risk\*/) }));
+
+    client.chat.postMessage.mockClear();
+    await statusHandler({ ack: jest.fn(), body: mk(null), client, logger });
+    expect(client.chat.postMessage).not.toHaveBeenCalled();
+  });
+});

@@ -18,6 +18,7 @@ const FIELDS = {
   NOTES:        process.env.PR_NOTES_FIELD || 'customfield_12958',               // Notes (multi-line text)
   TARGET:       process.env.PR_TARGET_FIELD || 'customfield_11818',              // Project target (Polaris interval JSON string)
   DEV_OWNER:    process.env.PR_DEV_OWNER_FIELD || 'customfield_11962',           // PR Dev Owner/FC Sponsor (user array)
+  PM_OWNER:     process.env.PR_PM_OWNER_FIELD || 'customfield_11909',            // PR PM owner (user array) — FYI recipient
 };
 
 const RISK_STATUSES = ['Low Risk', 'High Risk', 'Off Track'];
@@ -72,6 +73,7 @@ function buttonCtx(context, slackUserId, extra = {}) {
     issueKey: context.issueKey,
     slackUserId,
     question: (context.question || '').slice(0, 300),
+    fyiSlackUserId: context.fyiSlackUserId || null,
     risk: {
       notification: (r.notification || '').slice(0, 255),
       status: r.status || '',
@@ -166,6 +168,30 @@ async function sendRiskReview(client, slackUserId, context, opsNotifier) {
   return { channelId: dm.channel.id, messageTs: result.ts };
 }
 
+/**
+ * Informational DM to a second person (e.g. the PM owner) when the main person is asked.
+ * No buttons — they are being kept in the loop, not asked to act.
+ */
+async function sendFyi(client, fyiSlackUserId, context, askedSlackUserId, opsNotifier) {
+  const r = context.risk || {};
+  const label = r.summary ? `${context.issueKey} (${r.summary})` : context.issueKey;
+  const link = issueLinkLabelled(context.issueKey, label);
+  const blocks = context.askType === 'risk_review'
+    ? [
+      { type: 'section', text: { type: 'mrkdwn', text: `ℹ️ *FYI* — *${link}* was flagged by the weekly R&D Initiative Notifier. I've asked the Dev owner <@${askedSlackUserId}> to act; you'll get a note here when they do.` } },
+      ...(r.notification ? [{ type: 'section', text: { type: 'mrkdwn', text: `> ${r.notification}` } }] : []),
+      { type: 'context', elements: [{ type: 'mrkdwn', text: `Status: *${r.status || 'unknown'}*  ·  Target: *${r.targetEnd || 'none'}*` }] },
+    ]
+    : [
+      { type: 'section', text: { type: 'mrkdwn', text: `ℹ️ *FYI* — I've asked <@${askedSlackUserId}> about *${issueLink(context.issueKey)}*:\n> ${(context.question || '').replace(/^\W*/, '')}` } },
+    ];
+  const dm = await client.conversations.open({ users: fyiSlackUserId });
+  const text = `ℹ️ FYI — ${context.issueKey} flagged; asked <@${askedSlackUserId}> to act`;
+  const result = await client.chat.postMessage({ channel: dm.channel.id, text, blocks });
+  await opsNotifier?.post?.(`ℹ️ FYI sent to <@${fyiSlackUserId}> about *${context.issueKey}* (asked <@${askedSlackUserId}>)`);
+  return { channelId: dm.channel.id, messageTs: result.ts };
+}
+
 /** After a status change: keep only the Notes button (the notifier's ask is "flag at risk AND refresh Notes"). */
 function afterStatusBlocks(context, slackUserId) {
   return actionBlocks(context, slackUserId, { includeStatus: false, includeTarget: false, includeHandled: false });
@@ -185,5 +211,5 @@ function prependNotes(existing, entry) {
 module.exports = {
   FIELDS, RISK_STATUSES, AT_RISK, ON_TRACK, STATUS_BUTTON,
   parseInterval, riskContextFor, statusChoices, buildRiskReviewBlocks, actionBlocks, afterStatusBlocks,
-  sendRiskReview, notesEntry, prependNotes, issueLink,
+  sendRiskReview, sendFyi, notesEntry, prependNotes, issueLink,
 };

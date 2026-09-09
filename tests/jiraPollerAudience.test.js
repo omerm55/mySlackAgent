@@ -101,3 +101,67 @@ describe('poller: risk_review + watch_field', () => {
     expect(slack.chat.postMessage).not.toHaveBeenCalled();
   });
 });
+
+describe('poller: FYI to the PM owner', () => {
+  const { fyiFieldFor } = JiraPoller;
+  test('fyiFieldFor: explicit field wins; risk reviews default to the PM owner; yes/no has none', () => {
+    expect(fyiFieldFor({ ask_type: 'risk_review', fyi_field_id: 'customfield_1' })).toBe('customfield_1');
+    expect(fyiFieldFor({ ask_type: 'risk_review', fyi_field_id: null })).toBe(FIELDS.PM_OWNER);
+    expect(fyiFieldFor({ ask_type: 'yes_no', fyi_field_id: null })).toBeNull();
+  });
+
+  const trigger = {
+    id: 't2', name: 'Risk', jql: 'x', question: '{link} was flagged.', scope: 'global',
+    notify: 'user_field', notify_field_id: FIELDS.DEV_OWNER, ask_type: 'risk_review', watch_field: null,
+    poll_interval_min: 60, last_polled_at: null, fyi_field_id: null,
+  };
+  const issueWith = (pmEmail) => ({
+    key: 'PR-2', fields: { summary: 'S', status: { name: 'On Track' }, reporter: person('r@x.com', 'Rep'),
+      [FIELDS.DEV_OWNER]: [person('dev@x.com', 'Dev')], [FIELDS.PM_OWNER]: [person(pmEmail, 'PM')],
+      [FIELDS.NOTIFICATION]: NOTIF, [FIELDS.TARGET]: null },
+  });
+  function setup(issue) {
+    const jira = { searchIssues: jest.fn().mockResolvedValue([issue]) };
+    const db = {
+      getActiveJiraTriggers: jest.fn().mockResolvedValue([trigger]),
+      getPromptedIssueKeys: jest.fn().mockResolvedValue(new Set()),
+      recordPrompt: jest.fn().mockResolvedValue(undefined),
+      updateJiraTrigger: jest.fn().mockResolvedValue(undefined),
+      getUserPreference: jest.fn().mockResolvedValue(null),
+    };
+    const ids = { 'dev@x.com': 'UDEV', 'pm@x.com': 'UPM' };
+    const slack = {
+      users: { lookupByEmail: jest.fn(async ({ email }) => ({ user: { id: ids[email] } })) },
+      chat: { postMessage: jest.fn().mockResolvedValue({ ts: '1' }) },
+      conversations: { open: jest.fn(async ({ users }) => ({ channel: { id: 'D' + users } })) },
+    };
+    const ops = { post: jest.fn().mockResolvedValue(undefined), dmQuestionSent: jest.fn().mockResolvedValue(undefined) };
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    return { poller: new JiraPoller({ jiraService: jira, db, slackClient: slack, opsNotifier: ops, logger }), jira, db, slack, ops };
+  }
+
+  test('PM owner ≠ Dev owner → Dev gets the ask, PM gets a buttonless FYI, payload carries fyiSlackUserId', async () => {
+    const { poller, jira, db, slack, ops } = setup(issueWith('pm@x.com'));
+    const [stats] = await poller.runOnce({ force: true });
+    expect(jira.searchIssues.mock.calls[0][1]).toEqual(expect.arrayContaining([FIELDS.PM_OWNER]));
+    expect(stats.sent).toBe(1);
+    expect(stats.fyi).toBe(1);
+    const byChannel = Object.fromEntries(slack.chat.postMessage.mock.calls.map((c) => [c[0].channel, c[0]]));
+    expect(byChannel.DUDEV.blocks.some((b) => b.type === 'actions')).toBe(true);
+    expect(byChannel.DUPM.blocks.some((b) => b.type === 'actions')).toBe(false);
+    expect(JSON.stringify(byChannel.DUPM.blocks)).toContain('<@UDEV>');
+    expect(JSON.stringify(byChannel.DUPM.blocks)).toContain(NOTIF);
+    // the Dev owner's buttons carry the FYI recipient for follow-ups
+    const btn = JSON.parse(byChannel.DUDEV.blocks.find((b) => b.type === 'actions').elements[0].value);
+    expect(btn.fyiSlackUserId).toBe('UPM');
+    expect(db.recordPrompt).toHaveBeenCalledWith('t2', 'PR-2', 'UDEV', expect.objectContaining({ payload: expect.objectContaining({ fyiSlackUserId: 'UPM' }) }));
+    expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/FYI sent to <@UPM>/));
+  });
+
+  test('PM owner is the Dev owner → no FYI', async () => {
+    const { poller, slack } = setup(issueWith('dev@x.com'));
+    const [stats] = await poller.runOnce({ force: true });
+    expect(stats.fyi).toBe(0);
+    expect(slack.chat.postMessage).toHaveBeenCalledTimes(1);
+  });
+});

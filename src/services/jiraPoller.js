@@ -2,9 +2,15 @@
 
 const { sendDmQuestion } = require('../utils/dmQuestion');
 const { issueLink, issueLinkLabelled } = require('../utils/jiraLink');
-const { FIELDS: RISK_FIELDS, riskContextFor } = require('../utils/riskReviewMessage');
+const { FIELDS: RISK_FIELDS, riskContextFor, sendFyi } = require('../utils/riskReviewMessage');
 
 const normalizeWatched = (v) => (v === null || v === undefined ? '' : String(typeof v === 'object' ? JSON.stringify(v) : v).trim());
+const firstUser = (v) => (Array.isArray(v) ? v[0] : v) || null;
+
+/** The user-picker field whose person gets an FYI (explicit, else PM owner for risk reviews). */
+function fyiFieldFor(trigger) {
+  return trigger.fyi_field_id || (trigger.ask_type === 'risk_review' ? RISK_FIELDS.PM_OWNER : null);
+}
 
 /**
  * Who to DM for an issue, per the trigger's `notify`:
@@ -30,6 +36,8 @@ function fieldsFor(trigger) {
   if (trigger.notify === 'user_field' && trigger.notify_field_id) fields.add(trigger.notify_field_id);
   if (trigger.watch_field) fields.add(trigger.watch_field);
   if (trigger.ask_type === 'risk_review') { fields.add(RISK_FIELDS.NOTIFICATION); fields.add(RISK_FIELDS.TARGET); }
+  const fyi = fyiFieldFor(trigger);
+  if (fyi) fields.add(fyi);
   return [...fields];
 }
 
@@ -139,7 +147,7 @@ class JiraPoller {
 
   async _evaluateTrigger(trigger) {
     const tag = `[jiraPoller/${trigger.name}]`;
-    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, skipped: [], sentTo: [], queuedFor: [] };
+    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, fyi: 0, skipped: [], sentTo: [], queuedFor: [] };
     const prefCache = new Map();
 
     const issues = await this.jira.searchIssues(trigger.jql, fieldsFor(trigger));
@@ -243,6 +251,28 @@ class JiraPoller {
         };
       if (watchedValue !== undefined) payload.watchedValue = watchedValue;
 
+      // Optional FYI to a second person (e.g. the PM owner): informational, sent right away,
+      // skipped when it's the same person we're asking. Carried in the payload so the
+      // Dev owner's actions can be echoed to them later.
+      const fyiFieldId = fyiFieldFor(trigger);
+      let fyiSlackUserId = null;
+      if (fyiFieldId) {
+        const fyiPerson = firstUser(issue.fields?.[fyiFieldId]);
+        if (fyiPerson?.emailAddress) {
+          const id = await this._resolveSlackUser(fyiPerson.emailAddress);
+          if (id && id !== slackUserId) fyiSlackUserId = id;
+        }
+      }
+      if (fyiSlackUserId) {
+        payload.fyiSlackUserId = fyiSlackUserId;
+        try {
+          await sendFyi(this.slack, fyiSlackUserId, payload, slackUserId, this.ops);
+          stats.fyi += 1;
+        } catch (err) {
+          this.logger.warn(`${tag} FYI to ${fyiSlackUserId} for ${issue.key} failed: ${err.message}`);
+        }
+      }
+
       // Respect the user's notification preference: queue for a digest, or send now.
       const frequency = await this._digestFrequency(slackUserId, prefCache);
       if (frequency !== 'immediate') {
@@ -334,3 +364,4 @@ module.exports = JiraPoller;
 module.exports.renderTemplate = renderTemplate;
 module.exports.resolvePerson = resolvePerson;
 module.exports.fieldsFor = fieldsFor;
+module.exports.fyiFieldFor = fyiFieldFor;

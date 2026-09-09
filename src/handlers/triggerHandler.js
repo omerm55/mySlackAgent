@@ -285,6 +285,10 @@ function buildJiraTriggerModal(admin, existing = null) {
       optional: true,
       hint: plain('Normally each issue is asked about once. With a watch field, a new value re-asks — e.g. every weekly notifier run.'),
     }),
+    input('jt_fyi_field', 'Also FYI the user in this field (optional)', textInput('e.g. customfield_11909 (PR PM owner)', { initial: existing?.fyi_field_id }), {
+      optional: true,
+      hint: plain('They get an informational DM when the main person is asked, and a note when they act. Risk reviews default to the PR PM owner.'),
+    }),
     input('jt_action', 'On "Yes", do this (Yes / No asks only)', radios([['transition', 'Move to a status'], ['field', 'Set a field']], existing?.action_type ?? 'transition')),
     input('jt_transition', 'Target status (for "Move to a status")', textInput('e.g. Done', { initial: existing?.transition_to }), { optional: true }),
     input('jt_field_id', 'Jira field ID (for "Set a field")', textInput('e.g. customfield_11296', { initial: existing?.jira_field_id }), { optional: true }),
@@ -358,7 +362,7 @@ function registerJiraTriggerHandler(app, services) {
         if (stats.error) {
           lines.push(`❌ ${stats.error}`);
         } else {
-          lines.push(`${stats.matched} issue(s) match · ${stats.fresh} not yet asked · ${stats.sent} DM(s) sent${stats.queued ? ` · ${stats.queued} queued for digests` : ''}`);
+          lines.push(`${stats.matched} issue(s) match · ${stats.fresh} not yet asked · ${stats.sent} DM(s) sent${stats.queued ? ` · ${stats.queued} queued for digests` : ''}${stats.fyi ? ` · ${stats.fyi} FYI` : ''}`);
           if (stats.sentTo.length) lines.push(...stats.sentTo.map((s) => `  • ${s}`));
           if (stats.queuedFor?.length) lines.push(...stats.queuedFor.map((s) => `  🔔 ${s}`));
           if (stats.skipped.length) lines.push(...stats.skipped.slice(0, 10).map((s) => `  ⏭ ${s}`));
@@ -415,6 +419,7 @@ function registerJiraTriggerHandler(app, services) {
     const askType = v.jt_ask_type?.value?.selected_option?.value || 'yes_no';
     const notifyFieldId = v.jt_notify_field?.value?.value?.trim() || null;
     const watchField = v.jt_watch_field?.value?.value?.trim() || null;
+    const fyiFieldId = v.jt_fyi_field?.value?.value?.trim() || null;
     const pollIntervalMin = parseInt(v.jt_interval?.value?.selected_option?.value || '2', 10) || 2;
     const actionType = v.jt_action.value.selected_option?.value || 'transition';
     const transitionTo = v.jt_transition?.value?.value?.trim();
@@ -426,6 +431,7 @@ function registerJiraTriggerHandler(app, services) {
     const CF = /^customfield_\d+$/;
     if (notify === 'user_field' && !CF.test(notifyFieldId || '')) errors.jt_notify_field = 'Enter the user field id, e.g. customfield_11962.';
     if (watchField && !CF.test(watchField)) errors.jt_watch_field = 'Field ids look like customfield_15525.';
+    if (fyiFieldId && !CF.test(fyiFieldId)) errors.jt_fyi_field = 'Field ids look like customfield_11909.';
     if (askType === 'yes_no') {
       if (actionType === 'transition' && !transitionTo) errors.jt_transition = 'Enter the target status, e.g. Done.';
       if (actionType === 'field' && !fieldId) errors.jt_field_id = 'Enter the Jira field ID.';
@@ -461,6 +467,7 @@ function registerJiraTriggerHandler(app, services) {
       ask_type: askType,
       notify_field_id: notify === 'user_field' ? notifyFieldId : null,
       watch_field: watchField,
+      fyi_field_id: fyiFieldId,
       poll_interval_min: pollIntervalMin,
       action_type: actionType,
       transition_to: askType === 'yes_no' && actionType === 'transition' ? transitionTo : null,
@@ -489,7 +496,9 @@ function registerJiraTriggerHandler(app, services) {
         ? 'They can set a risk status, update Notes, move or clear the target, or mark it handled.'
         : `On *Yes* I'll ${actionType === 'transition' ? `move the issue to *${transitionTo}*` : `set *${fieldName || fieldId}* = *${fieldValue}*`}.`;
       const watch = watchField ? ` Re-asks whenever \`${watchField}\` changes.` : '';
-      await notifyOps(services, client, userId, `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${who}* of any new match. ${outcome}${watch}`);
+      const fyiField = fyiFieldId || (askType === 'risk_review' ? 'customfield_11909' : null);
+      const fyi = fyiField ? ` FYI DM to the user in \`${fyiField}\`.` : '';
+      await notifyOps(services, client, userId, `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${who}* of any new match. ${outcome}${watch}${fyi}`);
       // Evaluate this trigger right away regardless of its cadence
       services.jiraPoller?.runOnce({ force: true, onlyId: savedId }).catch(() => {});
     } catch (err) {
