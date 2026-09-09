@@ -289,6 +289,7 @@ src/
   utils/
     opsNotifier.js  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
+docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (Sept 2026 answer to the March security review), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6)
 tests/                         Jest (193 tests, 19 suites)
 config/*.example.json          Local-dev config templates (legacy path)
@@ -1185,6 +1186,14 @@ Ordered by value ÷ effort; each item is independently shippable.
 - Retries with backoff for Jira/Slack 429/5xx; central Slack rate-limit queue.
 
 ### 16.2 Security
+
+[`SECURITY_SUMMARY.md`](SECURITY_SUMMARY.md) maps the March 2026 security review (authorization, ownership,
+audit, operational controls, governance, data) to what the rebuild did and what is still open, and lists
+the risks the rebuild introduced (unauthenticated `/send-dm`, plaintext OAuth tokens, predictable OAuth
+`state`, public HTTP surface, PaaS hosting, LLM writes without preview on the Yes/No path, user text in
+logs). Its P0 list, in order: remove `/send-dm`; random single-use `state`; encrypt tokens + RLS + key
+rotation + Disconnect; stop logging user text; `require_oauth` per trigger (default on for PR).
+
 - Remove or authenticate `/send-dm`; add a shared-secret header if kept.
 - Encrypt OAuth tokens at rest (pgcrypto or app-level) and rotate the Supabase secret key.
 - Enable RLS with a service role and audit table access; least-privilege Slack scopes review.
