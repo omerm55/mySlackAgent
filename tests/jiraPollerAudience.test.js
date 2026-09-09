@@ -4,7 +4,9 @@ const JiraPoller = require('../src/services/jiraPoller');
 const { resolvePerson, fieldsFor } = JiraPoller;
 const { FIELDS } = require('../src/utils/riskReviewMessage');
 
-const NOTIF = 'Sep 8 — Overdue 5d. Action: flag at risk';
+// Dated today so the age filter never makes this fixture stale; mentions red progress so the flag filter passes.
+const todayStamp = (() => { const d = new Date(); return `${d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' })} ${d.getUTCDate()}`; })();
+const NOTIF = `${todayStamp} — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress`;
 const person = (email, name) => ({ emailAddress: email, displayName: name });
 
 describe('resolvePerson', () => {
@@ -256,6 +258,37 @@ describe('poller: stale notifications are skipped', () => {
     expect(stats.sent).toBe(1);
     expect(stats.stale).toBe(2);
     expect(stats.skipped).toEqual(expect.arrayContaining([expect.stringMatching(/2 stale notification/)]));
+    expect(db.recordPrompt).toHaveBeenCalledTimes(1);
+    expect(db.recordPrompt).toHaveBeenCalledWith('t4', 'PR-1', 'UDEV', expect.anything());
+  });
+
+  test('only notifications about "progress red" fire; other flags are counted, not recorded', async () => {
+    const fresh = (flags) => stamp(1).replace('Progress red 1%/exp 50%. Action: update progress', flags);
+    const jira = { searchIssues: jest.fn().mockResolvedValue([
+      issue('PR-1', fresh('Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress')),
+      issue('PR-2', fresh('Progress orange 64%/exp 80%. Action: update progress')),
+      issue('PR-3', fresh('Status mismatch. Action: update Status')),
+      issue('PR-4', fresh('Overdue 3d. Action: flag at risk')),
+    ]) };
+    const db = {
+      getActiveJiraTriggers: jest.fn().mockResolvedValue([trigger]),
+      getPromptsForTrigger: jest.fn().mockResolvedValue([]),
+      recordPrompt: jest.fn().mockResolvedValue(undefined),
+      updateJiraTrigger: jest.fn().mockResolvedValue(undefined),
+      getUserPreference: jest.fn().mockResolvedValue(null),
+    };
+    const slack = {
+      users: { lookupByEmail: jest.fn().mockResolvedValue({ user: { id: 'UDEV' } }) },
+      chat: { postMessage: jest.fn().mockResolvedValue({ ts: '1' }) },
+      conversations: { open: jest.fn().mockResolvedValue({ channel: { id: 'D' } }) },
+    };
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    const poller = new JiraPoller({ jiraService: jira, db, slackClient: slack, logger });
+    const [stats] = await poller.runOnce({ force: true });
+    expect(stats.sent).toBe(1);
+    expect(stats.offTopic).toBe(3);
+    expect(stats.stale).toBe(0);
+    expect(stats.skipped).toEqual(expect.arrayContaining([expect.stringMatching(/3 notification\(s\) not about "progress red"/)]));
     expect(db.recordPrompt).toHaveBeenCalledTimes(1);
     expect(db.recordPrompt).toHaveBeenCalledWith('t4', 'PR-1', 'UDEV', expect.anything());
   });

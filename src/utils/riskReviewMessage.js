@@ -107,6 +107,21 @@ function notificationAge(text, now = new Date(), maxAgeDays = 8) {
   return { stale: ageDays > maxAgeDays, ageDays };
 }
 
+/**
+ * Does the notification talk about the condition we care about? `pattern` is a case-insensitive
+ * regular expression (env RISK_NOTIFICATION_MATCH, default "progress red"); an invalid regex falls
+ * back to a plain substring match, and an empty pattern matches everything.
+ */
+function notificationMatches(text, pattern) {
+  if (!pattern) return true;
+  const hay = plainText(text) || '';
+  try {
+    return new RegExp(pattern, 'i').test(hay);
+  } catch {
+    return hay.toLowerCase().includes(String(pattern).toLowerCase());
+  }
+}
+
 /** "*Notes:* …" block — quoted preview or an explicit "empty". */
 function notesBlock(notes) {
   const text = notes
@@ -289,5 +304,5 @@ module.exports = {
   FIELDS, RISK_STATUSES, AT_RISK, ON_TRACK, STATUS_BUTTON,
   parseInterval, riskContextFor, statusChoices, buildRiskReviewBlocks, actionBlocks, afterStatusBlocks,
   sendRiskReview, sendFyi, notesEntry, prependNotes, issueLink, plainText, notesPreview, notesBlock,
-  parseNotificationDate, notificationAge,
+  parseNotificationDate, notificationAge, notificationMatches,
 };

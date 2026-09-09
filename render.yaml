@@ -57,3 +57,5 @@ services:
         value: "10"
       - key: RISK_NOTIFICATION_MAX_AGE_DAYS
         value: "8"
+      - key: RISK_NOTIFICATION_MATCH
+        value: "progress red"

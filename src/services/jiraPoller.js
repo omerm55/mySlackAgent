@@ -2,11 +2,14 @@
 
 const { sendDmQuestion } = require('../utils/dmQuestion');
 const { issueLink, issueLinkLabelled } = require('../utils/jiraLink');
-const { FIELDS: RISK_FIELDS, riskContextFor, sendFyi, notificationAge } = require('../utils/riskReviewMessage');
+const { FIELDS: RISK_FIELDS, riskContextFor, sendFyi, notificationAge, notificationMatches } = require('../utils/riskReviewMessage');
 
 // Risk reviews only act on a notification from the latest weekly notifier run; older stamps are
 // leftovers the notifier never clears (env RISK_NOTIFICATION_MAX_AGE_DAYS, default 8).
 const RISK_MAX_AGE_DAYS = Math.max(1, parseInt(process.env.RISK_NOTIFICATION_MAX_AGE_DAYS || '8', 10) || 8);
+// …and only when the notification is about the condition we focus on (case-insensitive regex; set the
+// env var to an empty string to review every flagged Initiative).
+const RISK_MATCH = process.env.RISK_NOTIFICATION_MATCH === undefined ? 'progress red' : process.env.RISK_NOTIFICATION_MATCH.trim();
 
 const normalizeWatched = (v) => (v === null || v === undefined ? '' : String(typeof v === 'object' ? JSON.stringify(v) : v).trim());
 const firstUser = (v) => (Array.isArray(v) ? v[0] : v) || null;
@@ -151,7 +154,7 @@ class JiraPoller {
 
   async _evaluateTrigger(trigger) {
     const tag = `[jiraPoller/${trigger.name}]`;
-    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, fyi: 0, pilotSkipped: 0, stale: 0, skipped: [], sentTo: [], queuedFor: [] };
+    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, fyi: 0, pilotSkipped: 0, stale: 0, offTopic: 0, skipped: [], sentTo: [], queuedFor: [] };
     const prefCache = new Map();
     // Pilot list: only these Slack users are asked / FYI'd while it is set
     const pilot = Array.isArray(trigger.pilot_slack_user_ids) && trigger.pilot_slack_user_ids.length
@@ -217,6 +220,11 @@ class JiraPoller {
         if (stale) {
           stats.stale += 1;
           this.logger.info(`${tag} ${issue.key}: notification is ${ageDays}d old (> ${RISK_MAX_AGE_DAYS}d) — skipping`);
+          continue;
+        }
+        if (!notificationMatches(text, RISK_MATCH)) {
+          stats.offTopic += 1;
+          this.logger.info(`${tag} ${issue.key}: notification does not mention /${RISK_MATCH}/i — skipping: "${String(text).slice(0, 80)}"`);
           continue;
         }
       }
@@ -335,6 +343,7 @@ class JiraPoller {
     stats.sent = sent;
     if (stats.pilotSkipped) stats.skipped.push(`${stats.pilotSkipped} outside the pilot list (not recorded)`);
     if (stats.stale) stats.skipped.push(`${stats.stale} stale notification(s) older than ${RISK_MAX_AGE_DAYS} days (not recorded)`);
+    if (stats.offTopic) stats.skipped.push(`${stats.offTopic} notification(s) not about "${RISK_MATCH}" (not recorded)`);
     return stats;
   }
 

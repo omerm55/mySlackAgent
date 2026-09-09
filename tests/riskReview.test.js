@@ -238,6 +238,17 @@ describe('notification age', () => {
   test('a stamp in the future rolls back a year (December run read in January)', () => {
     expect(rr.parseNotificationDate('Dec 29 — Overdue 3d', new Date('2027-01-03T00:00:00Z')).toISOString()).toBe('2026-12-29T00:00:00.000Z');
   });
+  test('notificationMatches: case-insensitive regex, empty = everything, invalid regex = substring', () => {
+    expect(rr.notificationMatches('Sep 8 — Overdue 5d; Progress red 12%/exp 50%. Action: update progress', 'progress red')).toBe(true);
+    expect(rr.notificationMatches('Sep 8 — Progress orange 64%/exp 80%. Action: update progress', 'progress red')).toBe(false);
+    expect(rr.notificationMatches('Sep 8 — Overdue 5d. Action: flag at risk', 'progress red')).toBe(false);
+    expect(rr.notificationMatches('Sep 8 — Overdue 5d', '')).toBe(true);
+    expect(rr.notificationMatches('Sep 8 — Overdue 5d', null)).toBe(true);
+    expect(rr.notificationMatches('Sep 8 — Progress orange 1%', 'progress (red|orange)')).toBe(true);
+    expect(rr.notificationMatches('a (b', '(b')).toBe(true); // invalid regex → substring
+    expect(rr.notificationMatches(null, 'progress red')).toBe(false);
+  });
+
   test('notificationAge: fresh within 8 days, stale beyond, unparseable = fresh', () => {
     expect(rr.notificationAge('Sep 7 — x', NOW)).toEqual({ stale: false, ageDays: 2 });
     expect(rr.notificationAge('Aug 31 — x', NOW)).toEqual({ stale: true, ageDays: 9 });
