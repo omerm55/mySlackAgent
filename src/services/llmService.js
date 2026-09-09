@@ -58,6 +58,18 @@ Initiative's Notes field. Rules:
 Respond ONLY with valid JSON (no markdown fences):
 { "note": "<the tidied update>" }`;
 
+const COLLECT_FIELDS_PROMPT = `You extract Jira field values from a short message written by a product manager about a roadmap
+Initiative. You are given the list of fields wanted (id, name, hint) and the author's text. Rules:
+- Only use what the author actually said. Never invent, guess or pad. If a field is not stated, return null for it.
+- Keep the author's wording and meaning; you may fix grammar and casing and drop filler such as
+  "call it" / "the value is". Do not add facts, adjectives or marketing language.
+- Each value is a single line of plain text, at most 255 characters, no markdown, no quotes around it.
+- A "name" style field is a short noun phrase (2-6 words). A "value" style field is one sentence about
+  what the customer gets, written for customers.
+
+Respond ONLY with valid JSON (no markdown fences):
+{ "values": { "<field id>": "<value or null>", ... }, "note": "<one short sentence if something was ambiguous, else null>" }`;
+
 class LlmService {
   /**
    * @param {'anthropic'|'gemini'} provider
@@ -125,6 +137,21 @@ class LlmService {
       `Owner's update (verbatim): "${userText}"\n\n` +
       `Rewrite the owner's update as a Notes entry.`;
     return this._callJson(TIDY_NOTE_PROMPT, userMessage);
+  }
+
+  /**
+   * Pull the wanted field values out of free text (collect ask type). Never invents; callers merge
+   * with explicit per-field inputs and show a preview before writing.
+   * @returns {Promise<{ values: Record<string, string|null>, note?: string|null }>}
+   */
+  async extractFields({ issueKey, summary, fields, userText }) {
+    const userMessage =
+      `Initiative: ${issueKey} — ${summary || ''}\n` +
+      `Fields wanted:\n` +
+      (fields || []).map((f) => `- id=${f.id} name="${f.name}"${f.hint ? ` hint="${f.hint}"` : ''}${f.current ? ` current="${f.current}"` : ''}`).join('\n') +
+      `\n\nAuthor's text (verbatim): "${userText}"\n\n` +
+      `Return the value for each field id, or null when the text does not state it.`;
+    return this._callJson(COLLECT_FIELDS_PROMPT, userMessage);
   }
 
   async _callJson(systemPrompt, userMessage) {
@@ -215,3 +242,4 @@ class LlmService {
 }
 
 module.exports = LlmService;
+module.exports.COLLECT_FIELDS_PROMPT = COLLECT_FIELDS_PROMPT;

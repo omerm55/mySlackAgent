@@ -33,6 +33,16 @@ class OpsNotifier {
     await this.post(`🩺 <@${slackUserId}> · *${issueKey}* · ${action}${detail ? ` — ${detail}` : ''} ${auth}`.trim());
   }
 
+  // Someone answered (or skipped) a collect ask — fields filled from free text
+  async collectAction({ slackUserId, issueKey, action, detail, usingOAuth, error }) {
+    const auth = usingOAuth === true ? '_(OAuth ✅)_' : usingOAuth === false ? '_(no OAuth — acting as bot)_' : '';
+    if (error) {
+      await this.post(`📝 <@${slackUserId}> · *${issueKey}* · ${action} → ❌ ${error}`);
+      return;
+    }
+    await this.post(`📝 <@${slackUserId}> · *${issueKey}* · ${action}${detail ? ` — ${detail}` : ''} ${auth}`.trim());
+  }
+
   // Jira poller matched an issue but could not DM anyone
   async jiraTriggerSkipped({ trigger, issueKey, reason }) {
     await this.post(`🔍 Jira trigger *${trigger}* matched *${issueKey}* — skipped: ${reason}`);

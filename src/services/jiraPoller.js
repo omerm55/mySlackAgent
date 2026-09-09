@@ -3,6 +3,7 @@
 const { sendDmQuestion } = require('../utils/dmQuestion');
 const { issueLink, issueLinkLabelled } = require('../utils/jiraLink');
 const { FIELDS: RISK_FIELDS, riskContextFor, sendFyi, notificationAge, notificationMatches } = require('../utils/riskReviewMessage');
+const { collectContextFor } = require('../utils/collectMessage');
 
 // Risk reviews only act on a notification from the latest weekly notifier run; older stamps are
 // leftovers the notifier never clears (env RISK_NOTIFICATION_MAX_AGE_DAYS, default 8).
@@ -43,6 +44,7 @@ function fieldsFor(trigger) {
   if (trigger.notify === 'user_field' && trigger.notify_field_id) fields.add(trigger.notify_field_id);
   if (trigger.watch_field) fields.add(trigger.watch_field);
   if (trigger.ask_type === 'risk_review') { fields.add(RISK_FIELDS.NOTIFICATION); fields.add(RISK_FIELDS.TARGET); fields.add(RISK_FIELDS.NOTES); }
+  if (trigger.ask_type === 'collect') for (const cf of trigger.collect_fields || []) if (cf?.id) fields.add(cf.id);
   const fyi = fyiFieldFor(trigger);
   if (fyi) fields.add(fyi);
   return [...fields];
@@ -272,7 +274,14 @@ class JiraPoller {
           question,
           risk: riskContextFor(issue),
         }
-        : {
+        : trigger.ask_type === 'collect'
+          ? {
+            askType: 'collect',
+            issueKey: issue.key,
+            question,
+            collect: collectContextFor(issue, trigger),
+          }
+          : {
           issueKey: issue.key,
           question,
           ...(trigger.action_type === 'transition'

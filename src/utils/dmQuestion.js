@@ -20,6 +20,10 @@ async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, o
     const { sendRiskReview } = require('./riskReviewMessage');
     return sendRiskReview(client, slackUserId, context, opsNotifier);
   }
+  if (context.askType === 'collect') {
+    const { sendCollect } = require('./collectMessage');
+    return sendCollect(client, slackUserId, context, opsNotifier);
+  }
 
   const dm = await client.conversations.open({ users: slackUserId });
 

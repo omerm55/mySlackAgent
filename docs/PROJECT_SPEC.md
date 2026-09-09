@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (169 passing, 18 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (191 passing, 19 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -181,6 +181,33 @@ follow-up whenever the Dev owner acts ("set to High Risk", "updated Notes: …",
 name an FYI user field (`fyi_field_id`); risk reviews default to the PM owner when unset. FYIs are sent
 immediately (they don't go through the recipient's digest preference).
 
+### 2.10 Collect field values — Customer-friendly name & Customer value (catalog A1)
+
+The first `collect` ask: a Jira trigger whose JQL finds PR Initiatives that lack a **Customer-friendly
+name** (`customfield_11822`) or a **Customer value** (`customfield_15249`) — both plain single-line text
+fields — and DMs the **PR PM owner** (`customfield_11909`, `notify = user_field`):
+
+> 📝 *PR-1234 (Smart Alerts)* needs: *Customer-friendly name, Customer value*.
+> • Customer-friendly name: _empty_ · • Customer value: _empty_ — **✍️ Answer** · **Skip**
+
+**Answer** opens a modal with one free-text box ("in your own words") and one optional input per field,
+prefilled with the current Jira value. On *Preview* the LLM extracts each field from the free text
+(`extractFields`, §8.4 — never inventing, `null` when not stated); anything typed directly into a
+field input wins over the extraction. The DM is rewritten as a **preview** — the proposed values with
+**💾 Save to Jira / ✏️ Edit / Cancel**. A required field the text didn't cover shows "⚠️ not found in
+what you wrote" and the Save button is withheld until *Add the missing part* fills it. **Save** writes
+every field in **one PUT as the user** (`updateIssueFields`), replaces the DM with ✅ and the values,
+marks the prompt answered, reports to ops and echoes to the FYI recipient if the trigger names one.
+**Edit** reopens the modal prefilled with the extracted values and the author's text; **Cancel** puts
+the original Answer/Skip ask back (nothing saved); **Skip** marks it answered without a write. A
+failed save shows Jira's error and clears the prompt so the poller asks again. If no LLM is configured
+or the call fails, the preview says so and the person fills the fields directly.
+
+Generic: a trigger's field list (`collect_fields`, one per line in the modal —
+`customfield_11822 | Customer-friendly name | hint | optional`) can name any plain-text fields; the
+PM-owner audience, pilot list, digests, Connect nudge and ops reporting are the shared machinery.
+Text fields only for now (§15).
+
 ### 2.8 Operator visibility
 
 Every trigger firing, filtered event, DM sent, button click, LLM decision, digest, trigger
@@ -237,7 +264,7 @@ src/
   handlers/
     reactionHandler.js         reaction_added → channel triggers
     replyHandler.js            message (thread reply) → channel triggers
-    dmHandler.js               Yes / No / Reply, LLM execution, Fix Version offer + picker
+    dmHandler.js               Yes / No / Reply, LLM execution, Fix Version offer + picker, risk review, collect
     homeHandler.js             App Home builder (publishHome / buildHomeBlocks)
     triggerHandler.js          Create/Edit/Delete/Run/Re-ask for channel + Jira triggers (modals, menus)
     preferencesHandler.js      Notification frequency select
@@ -254,10 +281,10 @@ src/
     pendingQuestions.js        Legacy in-memory store (kept for API compatibility)
   server/callbackServer.js     HTTP: /oauth/callback, /health, /send-dm
   utils/
-    opsNotifier.js  dmQuestion.js  riskReviewMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
+    opsNotifier.js  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (169 tests, 18 suites)
+tests/                         Jest (191 tests, 19 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -289,9 +316,9 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 |---|---|---|
 | `reactionHandler.js` | `reaction_added` | Match channel triggers by channel; fetch message; extract issue keys; per-trigger scope/allowlist/rate/dedup; update field via user OAuth or service account; thread confirmation; audit + ops. |
 | `replyHandler.js` | `message` (thread replies, non-bot) | Same for thread replies (root message holds the issue key). |
-| `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; clears `jira_prompts` on failure so the poller re-asks. |
+| `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); clears `jira_prompts` on failure so the poller re-asks. |
 | `homeHandler.js` | `app_home_opened` | Builds the Home view (connection, notifications, how it works, persistent recent activity; trigger sections **admin-only**); exports `publishHome` for other handlers to refresh it. |
-| `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (Jira-trigger modal: ask type yes/no vs risk review, notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; Run now / Re-ask; all outcomes reported to **ops** (not DM). |
+| `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (Jira-trigger modal: ask type yes/no / risk review / collect (+ field list, one per line), notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
 
 Button/menu payloads: the full context (issue key, proposed action, user, question ≤300 chars,
@@ -301,7 +328,8 @@ carry it in `private_metadata`.
 ### 5.3 Services
 
 **`jiraService.js`** — `getIssue`, `updateIssueField(key, fieldId, value, type)` (`select` → `{value}`,
-`text`, `array` → `[{name}]`, `raw`), `addComment` (ADF paragraphs), `findUser(ByEmail)`, `assignIssue`,
+`text`, `array` → `[{name}]`, `raw`), `updateIssueFields(key, {fieldId: value})` (several fields, one PUT,
+values sent as given), `addComment` (ADF paragraphs), `findUser(ByEmail)`, `assignIssue`,
 `searchIssues(jql, fields, max=1000)` (POST `/rest/api/3/search/jql`, follows `nextPageToken`, flags
 `truncated`), `getTransitions` (with `expand=transitions.fields`), `transitionIssue(key, status)`
 (matches destination or transition name; auto-fills required Resolution; names unfillable required
@@ -338,7 +366,9 @@ user's digest preference (queue vs send), cap `JIRA_MAX_PROMPTS_PER_RUN` (10) pe
 the field's value in `jira_prompts.payload.watchedValue`; on later runs an issue whose current value
 differs is deleted from prompts and asked again (rows predating the feature are backfilled, not re-asked).
 Payloads: `yes_no` as before; `risk_review` = `{askType, issueKey, question, risk:{notification, status,
-summary, targetStart, targetEnd}}`; both may carry `fyiSlackUserId`. **FYI:** `fyiFieldFor(trigger)`
+summary, targetStart, targetEnd}}`; `collect` = `{askType, issueKey, question, collect:{summary,
+fields:[{id, name, hint, required, current}]}}` (`fieldsFor` requests every `collect_fields` id so the
+current values ride along); all may carry `fyiSlackUserId`. **FYI:** `fyiFieldFor(trigger)`
 (explicit `fyi_field_id`, else PM owner for risk reviews) → first user → Slack id; if different from the
 person asked, `sendFyi` posts an informational DM right away and the id rides in the payload/button
 context so `dmHandler` can echo actions to them. Returns per-trigger stats `{matched, fresh, sent, queued,
@@ -350,6 +380,15 @@ generic variants), `statusChoices(status)`, `parseInterval`, `riskContextFor(iss
 Notes preview), `plainText` (string or ADF → text), `notesPreview`/`notesBlock`, `notesEntry`/`prependNotes`,
 and the `FIELDS` constants (env-overridable, incl. `PM_OWNER`). `sendDmQuestion` delegates to it
 when `context.askType === 'risk_review'`, so digests, the Connect nudge and ops reporting are unchanged.
+
+**`collectMessage.js`** (utils) — the `collect` ask: `parseCollectFields` / `formatCollectFields`
+(trigger-modal text ⇄ `[{id, name, hint, required}]`), `collectContextFor(issue, trigger)` (current
+values, capped), `buildCollectBlocks` / `sendCollect` (Answer + Skip), `buildCollectModal(ctx, values,
+{freeText})` (free text + one optional input per field, prefilled; metadata drops values/free text to stay
+under Slack's 3000-char cap), `readCollectModal` (explicit values only where typed and changed),
+`mergeValues(fields, explicit, extracted)` (explicit wins, 255-char cap, `null` when neither),
+`previewBlocks(ctx, user, values, {note})` → Save / Edit (carries values + free text) / Cancel, Save
+withheld while a required field is missing. `sendDmQuestion` delegates when `askType === 'collect'`.
 
 **`digestScheduler.js`** — tick every 60 s. For each `user_preferences` row with
 `digest_frequency != immediate`, compute the latest slot (hourly: top of hour; daily: 09:00 local;
@@ -367,13 +406,13 @@ Returns `{pick, reason, alternative, acceptedAt, statusName, candidates, childre
 "current" = window containing today (or `CURRENT_RELEASE_VERSION`).
 
 **`llmService.js`** — `fromEnv()` picks provider by key precedence OpenAI → Gemini → Anthropic.
-`interpretJiraResponse(...)`, `suggestFixVersion(...)` and `tidyNote(...)` all call
+`interpretJiraResponse(...)`, `suggestFixVersion(...)`, `tidyNote(...)` and `extractFields(...)` all call
 `_callJson(systemPrompt, user)` and parse strict JSON. Azure OpenAI is detected by `OPENAI_BASE_URL` (uses `api-key` header,
 `OPENAI_DEPLOYMENT` as model, `max_completion_tokens`). Prompts in §8.
 
 ### 5.4 Utils
 
-`opsNotifier` (all ops messages), `dmQuestion.sendDmQuestion(client, userId, context, _, ops)` (builds
+`opsNotifier` (all ops messages, incl. `riskReviewAction` and `collectAction`), `dmQuestion.sendDmQuestion(client, userId, context, _, ops)` (builds
 the Yes/No/Reply message, optional Connect block, no key prefix if the question already names the
 issue), `jiraLink` (`issueUrl`, `issueLink`, `issueLinkLabelled` with link-safe labels — `|`→`∣`,
 `<>&` escaped), `jiraLinkParser.extractJiraIssueKeys`, `keepAlive` (self-GET `/health` every 5 min),
@@ -445,11 +484,12 @@ create table if not exists public.jira_triggers (
   jira_field_type   text null default 'select',
   poll_interval_min integer not null default 2,
   last_polled_at    timestamptz null,
-  ask_type          text not null default 'yes_no',      -- 'yes_no' | 'risk_review'
+  ask_type          text not null default 'yes_no',      -- 'yes_no' | 'risk_review' | 'collect'
   notify_field_id   text null,                           -- when notify = 'user_field'
   watch_field       text null,                           -- re-ask when this field's value changes
   fyi_field_id      text null,                           -- user field to FYI (risk reviews default to PM owner)
   pilot_slack_user_ids text[] null,                      -- while set, only these Slack users are asked / FYI'd
+  collect_fields    jsonb null,                          -- collect asks: [{id, name, hint, required}]
   active            boolean not null default true,
   created_at        timestamptz not null default now()
 );
@@ -490,6 +530,8 @@ alter table public.jira_prompts add column if not exists answered_at timestamptz
 alter table public.jira_triggers add column if not exists fyi_field_id text null;
 -- supabase/pilot_users.sql
 alter table public.jira_triggers add column if not exists pilot_slack_user_ids text[] null;
+-- supabase/collect_fields.sql
+alter table public.jira_triggers add column if not exists collect_fields jsonb null;
 ```
 
 ### 6.4 `release_calendar` — branch-out windows (`supabase/release_calendar.sql`)
@@ -630,6 +672,27 @@ Every action ─► markPromptAnswered ─► ops riskReviewAction ─► activi
 Failure ─► ❌ with Jira's error ─► deletePromptsForIssue (re-asked next run)
 ```
 
+### 7.7 Collect (A1: Customer-friendly name & Customer value)
+
+```
+JiraPoller tick ─► trigger ask_type=collect, collect_fields=[cf 11822, cf 15249], notify=user_field cf[11909]
+  ─► searchIssues(jql, + collect field ids) ─► new issues only (jira_prompts) ─► PM owner → Slack id
+  ─► scope / pilot list / digest preference as for every trigger
+  ─► sendDmQuestion(payload{askType:'collect', collect:{summary, fields:[{id,name,hint,required,current}]}}) → sendCollect
+PM clicks:
+  [✍️ Answer] ─► collect_modal (free text + one input per field, prefilled with current values)
+     Preview ─► nothing entered? inline error
+             ─► free text covers untyped fields? "_Reading what you wrote…_" ─► llm.extractFields (15 s cap; failure → note)
+             ─► mergeValues (typed > extracted) ─► preview: values · [💾 Save] [✏️ Edit] [Cancel]
+                 required field missing ─► "ℹ️ Almost there — I still need …" · [✏️ Add the missing part] [Cancel] (no Save)
+  [💾 Save]   ─► updateIssueFields(key, {cf11822: …, cf15249: …}) as user (ONE PUT) ─► ✅ + values
+              ─► markPromptAnswered ─► ops collectAction ─► activity_log ─► FYI follow-up if fyiSlackUserId
+  [✏️ Edit]   ─► modal again, prefilled with the extracted values and the author's text
+  [Cancel]    ─► original Answer/Skip ask restored (nothing saved)
+  [Skip]      ─► answered_at only
+Failure ─► ❌ with Jira's error ─► deletePromptsForIssue (re-asked next run)
+```
+
 ---
 
 ## 8. LLM usage
@@ -714,6 +777,28 @@ Respond ONLY with valid JSON (no markdown fences):
 
 User message: Initiative key + summary, the notifier's diagnosis, and the owner's text verbatim. Any
 error or empty result → the raw text is written unchanged.
+
+### 8.4 Field extraction for collect asks (`COLLECT_FIELDS_PROMPT`)
+
+```
+You extract Jira field values from a short message written by a product manager about a roadmap
+Initiative. You are given the list of fields wanted (id, name, hint) and the author's text. Rules:
+- Only use what the author actually said. Never invent, guess or pad. If a field is not stated, return null for it.
+- Keep the author's wording and meaning; you may fix grammar and casing and drop filler such as
+  "call it" / "the value is". Do not add facts, adjectives or marketing language.
+- Each value is a single line of plain text, at most 255 characters, no markdown, no quotes around it.
+- A "name" style field is a short noun phrase (2-6 words). A "value" style field is one sentence about
+  what the customer gets, written for customers.
+
+Respond ONLY with valid JSON (no markdown fences):
+{ "values": { "<field id>": "<value or null>", ... }, "note": "<one short sentence if something was ambiguous, else null>" }
+```
+
+User message: Initiative key + summary, one line per wanted field (`id`, `name`, `hint`, `current`
+value if any) and the author's text verbatim. The result is merged with the modal's explicit inputs
+(explicit wins) and always shown as a preview before the single PUT; a `note` is rendered in italics
+under the preview. Any error → preview without extracted values and a "couldn't read that
+automatically" note.
 
 ---
 
@@ -878,6 +963,25 @@ notification` in Jira and **▶️ Run now**. To pilot with one *person* while t
 scope to Everyone and put only them on the pilot list; the Run-now summary reports how many matches
 were "outside the pilot list".
 
+### 12.2b Creating the A1 collect trigger (App Home → ➕ Create Jira Trigger)
+
+Run `supabase/collect_fields.sql` first (Supabase SQL editor).
+
+| Field | Value |
+|---|---|
+| Name | `Customer-friendly name & value` |
+| Ask type | **Collect field values** |
+| Fields to collect | `customfield_11822 \| Customer-friendly name \| External-facing name, 2–6 words` ⏎ `customfield_15249 \| Customer value \| One sentence on what the customer gets` |
+| JQL | `project = PR AND issuetype = Initiative AND (cf[14817] = "Now" OR cf[12170] = "Yes") AND (cf[11822] is EMPTY OR cf[15249] is EMPTY) AND status not in (Done, Acceptance, Cancelled)` |
+| Who to DM | **A user field** → `customfield_11909` (PR PM owner; falls back to assignee, then reporter) |
+| Question | leave empty (defaults to `{link} needs: Customer-friendly name, Customer value.`) |
+| Check Jira | every 4 hours or daily — the condition changes slowly |
+| Scope / pilot | `personal` to test on an Initiative you PM-own; then `global` + pilot list; then `global` |
+
+Test path: pick an Initiative where you are the PM owner, blank one of the two fields in Jira,
+**▶️ Run now**, answer in free text ("Call it Smart Alerts. Customers get pinged the moment a KPI
+drifts.") → preview → Save → both fields set in one changelog entry under your name.
+
 ### 12.3 SQL snippets used
 
 Re-ask a single issue:
@@ -921,13 +1025,15 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | Risk button fails: "Planned release is empty; PR PM owner is empty" | PR workflow validators on the target status | Set those fields on the Initiative (any status transition in PR requires them); consider a picker like Fix Version |
 | Home "recent activity" empty after a deploy | `activity_log` table missing → falls back to memory | Run `supabase/activity_log.sql` |
 | Risk review fired on Initiatives that aren't flagged any more | `Latest notification` is never cleared by the notifier; stamps older than the last run are leftovers | Handled: stamps older than `RISK_NOTIFICATION_MAX_AGE_DAYS` are skipped (Run-now summary shows "N stale notification(s)"); ask the recipients to press Handled on the ones already sent |
+| Collect preview says "not found in what you wrote" / no Save button | The LLM couldn't find a required field in the text (or AI isn't configured) | Press *Add the missing part* and type the value into its field directly — typed values always win |
+| Collect ask arrived but the modal has no field inputs | Trigger saved with an empty `collect_fields` (migration not run → save failed → see modal error) | Run `supabase/collect_fields.sql`, edit the trigger, re-enter the field list |
 | Risk review fired on an Initiative that is only Overdue / Status mismatch / orange | Every notifier flag writes the stamp; the pilot wants red progress only | Handled: the stamp must match `RISK_NOTIFICATION_MATCH` (default `progress red`); the Run-now summary shows "N notification(s) not about …". Widen the regex if other flags should fire |
 
 ---
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 169 tests in 18 suites:
+`npm test` → Jest, `tests/*.test.js`, 191 tests in 19 suites:
 
 | Suite | Covers |
 |---|---|
@@ -939,8 +1045,9 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `dmFixVersionOffer` | Offer rendering, unique action_ids, progress lines, fallback when Slack rejects blocks |
 | `dmQuestionFormat` | Template rendering (`{key} ({summary})` → one link, pipe-safety), headline dedup, button context |
 | `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change; `parseNotificationDate` / `notificationAge` (current year, year roll-back, unparseable = fresh, 8-day cutoff); `notificationMatches` (case-insensitive regex, empty = all, invalid regex = substring) |
-| `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; stale `Latest notification` stamps (older than `RISK_NOTIFICATION_MAX_AGE_DAYS`) are skipped without recording and counted in the Run-now summary; stamps that don't match `RISK_NOTIFICATION_MATCH` (orange, Overdue, Status mismatch…) are skipped the same way |
-| `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error |
+| `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; stale `Latest notification` stamps (older than `RISK_NOTIFICATION_MAX_AGE_DAYS`) are skipped without recording and counted in the Run-now summary; stamps that don't match `RISK_NOTIFICATION_MATCH` (orange, Overdue, Status mismatch…) are skipped the same way; collect trigger requests its field ids and DMs the PM owner an Answer/Skip ask with current values in the payload |
+| `collect` | Trigger field list parse/format round-trip + errors; `collectContextFor` current values; ask blocks (Answer/Skip, unique ids, ctx < 2000 chars); preview Save/Edit/Cancel vs missing-required (no Save); `mergeValues` precedence + 255 cap; modal prefill + slim metadata; `readCollectModal`; `sendDmQuestion` delegation; handlers: Answer opens modal with DM location, empty submit → inline error, explicit-only → no LLM, free text → LLM with typed field winning, LLM partial → "Almost there", LLM failure → note, Save → ONE `updateIssueFields` PUT + ✅ + answered + ops + FYI, save failure → ❌ + re-ask, Edit prefilled, Cancel restores ask, Skip |
+| `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
 
@@ -1013,6 +1120,11 @@ Chronological, with rationale (see `git log` for commits):
     significantly behind pace. Rather than hard-coding the phrase, the stamp must match
     `RISK_NOTIFICATION_MATCH` (default `progress red`), so widening to orange or Overdue later is a
     config change, not a deploy. Global for now; per-trigger patterns deferred (§15).
+25. **`collect` ask type, A1 first.** Built as planned in §18.4 with three simplifications: the field
+    list is typed one-per-line in the trigger modal (no fields editor), the marker field / TTL /
+    `require_oauth` extras are deferred (both A1 fields are unguarded text fields), and *Cancel* restores
+    the original ask instead of ending the conversation. The preview step is non-negotiable: the LLM
+    never writes to Jira on its own, and a typed value always beats an extracted one.
 
 ---
 
@@ -1031,6 +1143,8 @@ Chronological, with rationale (see `git log` for commits):
 - **Risk review re-asks track the field, not the outcome:** a Dev owner who clicks Handled is asked
   again on the next notifier run if the field is rewritten (by design — new run, new ask).
 - **Digest slots are fixed** (09:00 / 15:00); no per-user time choice yet.
+- **Collect asks write plain-text fields only** (values sent as strings in one PUT). Selects, users
+  and dates need per-field type handling; no marker field / expiry / `require_oauth` yet (§16.10).
 - **The risk-review flag filter is global** (`RISK_NOTIFICATION_MATCH` applies to every `risk_review`
   trigger). A per-trigger pattern (e.g. one trigger for red progress, another for Overdue) needs a
   `jira_triggers.notification_match` column + modal input — deferred until a second trigger exists.
@@ -1102,9 +1216,9 @@ Ordered by value ÷ effort; each item is independently shippable.
   in `#product-house-all`) kept in `docs/`.
 
 ### 16.10 From the scenario catalog (see §18)
-- **Generalised ask model:** `ask_type` on Jira triggers — `yes_no` (today), `choose` (N options),
-  `collect` (free text → LLM-extracted field values → preview → one PUT), `claim` (channel, atomic first
-  click), `acknowledge`, `create`.
+- **Generalised ask model:** `ask_type` on Jira triggers — `yes_no`, `risk_review`, `collect` (text
+  fields; built), then `choose` (N options), `collect` for typed fields (select / user / date + regex
+  validation), `claim` (channel, atomic first click), `acknowledge`, `create`.
 - **Audiences beyond reporter/assignee:** `user_field:<cf>` (e.g. PM owner), `channel:<id>`, fixed
   `user_list`, and lookup tables (team → PM, domain → lead).
 - **Writes distinguishable from human edits:** optional per-trigger marker field written in the same
@@ -1164,7 +1278,7 @@ where we stand, and the order we intend to build.
 
 | Requirement (catalog) | Status today | Planned change |
 |---|---|---|
-| Impersonated write for text, single-select, 3-option select, long text, date + reason | ✅ `updateIssueField` (select/text/array/raw), transitions | `updateIssueFields()` — several fields in one PUT |
+| Impersonated write for text, single-select, 3-option select, long text, date + reason | ✅ `updateIssueField` (select/text/array/raw), transitions, `updateIssueFields()` (several fields, one PUT) | Typed handling per field in `collect` |
 | Writes distinguishable from a human edit | ❌ | Per-trigger `marker_field_id` / `marker_value` in the same PUT |
 | Defer to the field's own permission gate | ✅ inherent to OAuth writes | `require_oauth` per trigger; never launder through the service account |
 | Path for people who haven't authorised | ✅ service-account fallback, attribution comment, Connect button in the DM | Keep; disable via `require_oauth` where gated |
@@ -1172,12 +1286,12 @@ where we stand, and the order we intend to build.
 | Asks expire | ❌ | `ask_ttl_hours` → `expires_at`; handlers refuse stale clicks |
 | Batched asks with per-row action | ✅ digests: one message per item, each independent | Single-message digest later (needs per-item update) |
 | Read Jira as the user to state *why* | ⚠️ partial (status-entered date, children) | Changelog placeholders in question templates |
-| Answer lands in a field, not only the thread | ✅ field/transition asks · ❌ free-text reasons | `collect` ask type (A1 pilot); optional Notes-field target for LLM comments |
+| Answer lands in a field, not only the thread | ✅ field/transition asks · ✅ free text → fields via `collect` (A1) · ✅ Notes via risk review | Typed `collect` variants (A2 regex, C6 date + reason) |
 
 ### 18.3 Our build order
 
-1. **A1 — Customer-friendly name & Customer value** (first pilot of `collect`; written mandate
-   JM-352; no Jira fix needed). Design in §18.4.
+1. ~~**A1 — Customer-friendly name & Customer value**~~ — **built** (first `collect` ask; written
+   mandate JM-352; no Jira fix needed). See §2.10 and §18.4.
 2. **A2 — Regression from build** (`collect` + per-field regex validation; largest comment volume).
 3. **B1 — Ratify release-notes decision** (`choose`; blocked on the `is EMPTY` write gate in Jira and a
    team → PM mapping).
@@ -1195,7 +1309,12 @@ first non-yes/no ask type. See §2.9. It delivered two of the §18.2 planned cha
 `user_field` audience and re-ask-on-change (`watch_field`). C1 (stale Notes → reply writes Notes) can
 now be a `risk_review`-style trigger with a different JQL; C6 needs the date+reason `collect` variant.
 
-### 18.4 Planned: A1 with LLM-extracted values
+### 18.4 Built: A1 with LLM-extracted values (design record)
+
+Implemented 2026-09-09 as §2.10 / §7.7 / §8.4. Differences from the plan below: field list typed
+one-per-line in the trigger modal (no fields editor); `marker_field_id`, `ask_ttl_hours`,
+`require_oauth` and `expires_at` deferred (§16.10); *Cancel* restores the ask. The PM-owner field is
+`customfield_11909` (confirmed via `expand=names,schema`; both target fields are `textfield`).
 
 **User experience.** The PM owner of an Initiative that moved to *Now* (or was flagged for the
 Certified Roadmap) and lacks a customer-friendly name or customer value gets a DM:
@@ -1224,6 +1343,6 @@ validation_regex?, options?}]`), `marker_field_id`, `marker_value`, `ask_ttl_hou
 with a `COLLECT_FIELDS_PROMPT`; trigger modal gains ask type, fields editor, audience "user field",
 marker, TTL, require-OAuth; ops `collectSaved`.
 
-**Open items before building.** Confirm from Jira (`expand=names`) that `cf[11822]` and `cf[15249]`
-are plain text and identify the PM-owner user field id — the catalog doesn't name it and Jira wasn't
-reachable from the authoring session. Estimated effort: one day including tests; A2 about two hours more.
+**Open items before building** (resolved): `cf[11822]` and `cf[15249]` are plain text
+(`com.atlassian.jira.plugin.system.customfieldtypes:textfield`); PM owner = `customfield_11909`
+(`people`, multi). A2 remains about two hours on top (regex validation per field).

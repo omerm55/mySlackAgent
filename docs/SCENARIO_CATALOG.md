@@ -17,14 +17,14 @@ as them. This file maps each one onto what **this app** needs; the reasoning liv
 | `yes_no_transition` | Yes/No/Reply → transition the issue | ✅ have |
 | `yes_no_field` | Yes/No/Reply → set one field | ✅ have |
 | `choose` | Pick one of N options (buttons or select) → set a field / transition | ❌ planned |
-| `collect` | Free text (or per-field inputs) → LLM extracts ≥1 field values → preview → write | ❌ planned (A1 pilot) |
+| `collect` | Free text (or per-field inputs) → LLM extracts ≥1 field values → preview → write | ✅ have for text fields (A1 built 2026-09-09); typed fields / regex planned |
 | `claim` | Channel post; first click assigns the issue and edits the message | ❌ planned |
 | `acknowledge` | Record an acknowledgement / undo; may write a marker field | ❌ planned |
 | `create` | Slack-originated issue creation via modal | ❌ planned |
 | `inform` | No write; contextual message only | ✅ trivial |
 
-**Audience:** `reporter`, `assignee` (✅ have), `user_field:<cf>` (a user-picker custom field, e.g. PM
-owner — ❌ planned), `channel:<id>` (❌ planned for asks; ✅ for confirmations), `user_list` (fixed set,
+**Audience:** `reporter`, `assignee`, `user_field:<cf>` (a user-picker custom field, e.g. PM
+owner — ✅ have), `channel:<id>` (❌ planned for asks; ✅ for confirmations), `user_list` (fixed set,
 ❌ planned), `mapping` (team → PM / domain → lead lookup table, ❌ planned).
 
 **Trigger:** `jql` (poll, ✅ have), `webhook` (Jira Automation → app, ❌ planned), `slack` (reaction /
@@ -37,7 +37,7 @@ first" rule). `—` means none known.
 
 | Id | Scenario | Today | Proposed Slack ask | Fields | Ask type | Audience | Trigger | Jira dependency | Refs |
 |---|---|---|---|---|---|---|---|---|---|
-| **A1** | Customer-friendly name & Customer value missing on a PR Initiative (moves to *Now* or flagged Certified Roadmap) | JPD comment | DM to PM owner; free text or two-field modal; writes both | `cf[11822]`, `cf[15249]` | `collect` | `user_field` (PM owner) → fallback reporter | `jql` | Confirm field ids/types; PM-owner field id | JM-352 |
+| **A1** ✅ built | Customer-friendly name & Customer value missing on a PR Initiative (moves to *Now* or flagged Certified Roadmap) | JPD comment | DM to PM owner; free text or two-field modal; preview; writes both in one PUT (`PROJECT_SPEC.md` §2.10) | `cf[11822]`, `cf[15249]` (both `textfield`) | `collect` | `user_field` `cf[11909]` (PM owner) → fallback assignee → reporter | `jql` | — (confirmed) | JM-352 |
 | A2 | Regression bug has no *Regression from build* | Two Jira comments (create + update) | DM to reporter with a validated input and a live example | `cf[12859]` | `collect` + regex validation | reporter | `jql` | Reconcile the rule's regex (`L2025.2.0.249`) with the asked format (`2026.2.2-build.1`) | rules "Notify on Regression bugs without regression from build" |
 | A3 | Bug has no Scrum team | Weekly Jira comment (Mon 09:00) | Channel post to the domain's lead with a 14-option team picker | `cf[11277]` | `choose` | `channel` / lead | `jql` | — | JM-47 |
 | A4 | Story/Task resolved with no parent | DM + `#ph-ops-orphans` (works) | Same, plus an Epic picker and an "unplanned, no parent" acknowledgement | parent | `choose` (epic search) + `acknowledge` | assignee + reporter | `webhook` | Extend the existing rule, don't rebuild | JM-174 |
@@ -107,7 +107,7 @@ first" rule). `—` means none known.
 
 | # | Scenario | Depends on |
 |---|---|---|
-| 1 | A1 — Customer-friendly name & value | — (written mandate JM-352) |
+| 1 | A1 — Customer-friendly name & value ✅ built | — (written mandate JM-352) |
 | 2 | B1 — ratify release-notes decision | Gate change on `cf[11228]` |
 | 3 | C2 — chase quiet escalations | `addCommentOnce` fix |
 | 4 | D1 — flag unauthorized priority changes | Allowlist incl. the automation actor |

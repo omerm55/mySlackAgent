@@ -174,6 +174,8 @@ async function buildHomeBlocks(userId, services, logger) {
       const fyiField = t.fyi_field_id || (t.ask_type === 'risk_review' ? 'customfield_11909' : null);
       const action = t.ask_type === 'risk_review'
         ? `🩺 risk review (status / Notes / target)${t.watch_field ? `, re-asks when \`${t.watch_field}\` changes` : ''}${fyiField ? `, FYI → \`${fyiField}\`` : ''}`
+        : t.ask_type === 'collect'
+        ? `📝 collect: *${(t.collect_fields || []).map((f) => f.name).join(', ') || 'no fields'}* (free text → AI → preview → save)${fyiField ? `, FYI → \`${fyiField}\`` : ''}`
         : (t.action_type === 'transition'
           ? `on Yes: move to *${t.transition_to}*`
           : `on Yes: set *${t.jira_field_name || t.jira_field_id}* = *${t.jira_field_value}*`);

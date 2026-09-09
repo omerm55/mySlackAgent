@@ -100,6 +100,26 @@ class JiraService {
   }
 
   /**
+   * Set several fields in ONE PUT (one changelog entry, one round of automation rules).
+   * Values are sent as given — pass the shape Jira expects for each field
+   * (plain string for text fields, {value} for selects, null to clear).
+   * @param {string} issueKey
+   * @param {Record<string, *>} fields  { customfield_11822: 'Smart Alerts', … }
+   */
+  async updateIssueFields(issueKey, fields) {
+    this._assertValidKey(issueKey);
+    const entries = Object.entries(fields || {});
+    if (!entries.length) return;
+    const path = `/rest/api/3/issue/${issueKey}`;
+    try {
+      await this.client.put(path, { fields: Object.fromEntries(entries) });
+    } catch (err) {
+      const fullUrl = `${this.client.defaults.baseURL}${path}`;
+      throw new Error(`${jiraErrorText(err)} — PUT ${fullUrl}`);
+    }
+  }
+
+  /**
    * Add a plain-text comment to a Jira issue.
    * Supports [~accountId:xxx] mentions in the text.
    * Errors are non-fatal — callers should catch and log.

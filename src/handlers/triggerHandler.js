@@ -2,6 +2,7 @@
 
 const { isAdmin, canManage } = require('../utils/admins');
 const { publishHome } = require('./homeHandler');
+const { parseCollectFields, formatCollectFields, describeCollectFields } = require('../utils/collectMessage');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Block Kit helpers
@@ -286,7 +287,12 @@ function buildJiraTriggerModal(admin, existing = null) {
     input('jt_ask_type', 'What kind of ask?', radios([
       ['yes_no', 'Yes / No question → move to a status or set a field'],
       ['risk_review', 'Risk review — R&D Initiative Notifier flag → Dev owner acts (status / Notes / target)'],
+      ['collect', 'Collect field values — they describe it in their words, AI fills the fields, they confirm, one save'],
     ], existing?.ask_type ?? 'yes_no')),
+    input('jt_collect_fields', 'Fields to collect (for "Collect field values")', textInput('customfield_11822 | Customer-friendly name | External-facing name\ncustomfield_15249 | Customer value | One line on what the customer gets', { multiline: true, initial: formatCollectFields(existing?.collect_fields) }), {
+      optional: true,
+      hint: plain('One per line: field id | label | hint (optional) | "optional" to not require it. Text fields only.'),
+    }),
     input('jt_notify', 'Who to DM', radios([
       ['reporter', 'Reporter'], ['assignee', 'Assignee'], ['user_field', 'A user field (enter its id below)'],
     ], existing?.notify ?? 'reporter')),
@@ -445,8 +451,10 @@ function registerJiraTriggerHandler(app, services) {
     const fieldId = v.jt_field_id?.value?.value?.trim();
     const fieldName = v.jt_field_name?.value?.value?.trim();
     const fieldValue = v.jt_field_value?.value?.value?.trim();
+    const collectParsed = askType === 'collect' ? parseCollectFields(v.jt_collect_fields?.value?.value) : { fields: [], error: null };
 
     const errors = {};
+    if (askType === 'collect' && collectParsed.error) errors.jt_collect_fields = collectParsed.error.slice(0, 250);
     const CF = /^customfield_\d+$/;
     if (notify === 'user_field' && !CF.test(notifyFieldId || '')) errors.jt_notify_field = 'Enter the user field id, e.g. customfield_11962.';
     if (watchField && !CF.test(watchField)) errors.jt_watch_field = 'Field ids look like customfield_15525.';
@@ -481,8 +489,10 @@ function registerJiraTriggerHandler(app, services) {
 
     const fields = {
       name, jql, notify, scope,
-      question: question || (askType === 'risk_review' ? '{link} was flagged by the weekly R&D Initiative Notifier.' : ''),
+      question: question || (askType === 'risk_review' ? '{link} was flagged by the weekly R&D Initiative Notifier.'
+        : askType === 'collect' ? `{link} needs: ${describeCollectFields(collectParsed.fields)}.` : ''),
       ask_type: askType,
+      collect_fields: askType === 'collect' ? collectParsed.fields : null,
       notify_field_id: notify === 'user_field' ? notifyFieldId : null,
       watch_field: watchField,
       fyi_field_id: fyiFieldId,
@@ -522,6 +532,8 @@ function registerJiraTriggerHandler(app, services) {
       const who = notify === 'user_field' ? `user in \`${notifyFieldId}\`` : notify;
       const outcome = askType === 'risk_review'
         ? 'They can set a risk status, update Notes, move or clear the target, or mark it handled.'
+        : askType === 'collect'
+        ? `They describe it in their words, AI fills *${describeCollectFields(collectParsed.fields)}*, they confirm a preview, and it's saved in one update.`
         : `On *Yes* I'll ${actionType === 'transition' ? `move the issue to *${transitionTo}*` : `set *${fieldName || fieldId}* = *${fieldValue}*`}.`;
       const watch = watchField ? ` Re-asks whenever \`${watchField}\` changes.` : '';
       const fyiField = fyiFieldId || (askType === 'risk_review' ? 'customfield_11909' : null);

@@ -66,6 +66,52 @@ describe('Jira trigger modal save', () => {
   });
 });
 
+describe('Jira trigger modal save — collect ask type', () => {
+  const base = {
+    jt_name: { value: txt('A1 — customer-friendly name & value') },
+    jt_jql: { value: txt('project = PR AND issuetype = Initiative') },
+    jt_question: { value: txt('') },
+    jt_notify: { value: opt('user_field') },
+    jt_notify_field: { value: txt('customfield_11909') },
+    jt_ask_type: { value: opt('collect') },
+    jt_interval: { value: opt('60') },
+    jt_action: { value: opt('transition') },
+    jt_scope: { value: opt('global') },
+  };
+  function setup() {
+    const { app, handlers } = fakeApp();
+    const db = { getActiveJiraTriggers: jest.fn().mockResolvedValue([]), insertJiraTrigger: jest.fn().mockResolvedValue({ id: 't1' }), updateJiraTrigger: jest.fn() };
+    const ops = { channelId: 'COPS', post: jest.fn().mockResolvedValue(undefined) };
+    registerJiraTriggerHandler(app, { db, jiraService: { searchIssues: jest.fn().mockResolvedValue([]) }, opsNotifier: ops, integrationCache: { getAll: jest.fn().mockResolvedValue([]) } });
+    const client = { views: { publish: jest.fn().mockResolvedValue({}), open: jest.fn() }, chat: { postMessage: jest.fn().mockResolvedValue({}) } };
+    return { handlers, db, ops, client, logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } };
+  }
+  test('bad field list → inline error on the fields input, no write', async () => {
+    const { handlers, db, client, logger } = setup();
+    const ack = jest.fn();
+    await handlers.create_jira_trigger_modal({ ack, body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: { ...base, jt_collect_fields: { value: txt('Customer value | no id here') } } } }, client, logger });
+    expect(ack).toHaveBeenCalledWith({ response_action: 'errors', errors: { jt_collect_fields: expect.stringMatching(/must start with a field id/) } });
+    expect(db.insertJiraTrigger).not.toHaveBeenCalled();
+  });
+  test('valid field list → collect_fields saved as JSON, default question names the fields, ops told', async () => {
+    const { handlers, db, ops, client, logger } = setup();
+    const ack = jest.fn();
+    const list = 'customfield_11822 | Customer-friendly name | External-facing name\ncustomfield_15249 | Customer value';
+    await handlers.create_jira_trigger_modal({ ack, body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: { ...base, jt_collect_fields: { value: txt(list) } } } }, client, logger });
+    expect(ack).toHaveBeenCalledWith();
+    expect(db.insertJiraTrigger).toHaveBeenCalledWith(expect.objectContaining({
+      ask_type: 'collect',
+      collect_fields: [
+        { id: 'customfield_11822', name: 'Customer-friendly name', hint: 'External-facing name', required: true },
+        { id: 'customfield_15249', name: 'Customer value', hint: null, required: true },
+      ],
+      question: '{link} needs: Customer-friendly name, Customer value.',
+      transition_to: null,
+    }));
+    expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/AI fills \*Customer-friendly name, Customer value\*/));
+  });
+});
+
 describe('Channel trigger modal save', () => {
   const values = {
     name_block: { value: txt('Doc review') },

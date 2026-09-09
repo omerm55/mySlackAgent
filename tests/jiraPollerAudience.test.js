@@ -104,6 +104,38 @@ describe('poller: risk_review + watch_field', () => {
   });
 });
 
+describe('poller: collect ask type', () => {
+  const NAME = 'customfield_11822'; const VALUE = 'customfield_15249'; const PM = 'customfield_11909';
+  const trigger = {
+    id: 't5', name: 'A1', jql: 'x', question: '', scope: 'global', notify: 'user_field', notify_field_id: PM, ask_type: 'collect',
+    collect_fields: [{ id: NAME, name: 'Customer-friendly name', hint: 'External-facing name', required: true }, { id: VALUE, name: 'Customer value', required: true }],
+    poll_interval_min: 60, last_polled_at: null, fyi_field_id: null,
+  };
+  test('requests the collect fields, DMs the PM owner an Answer/Skip ask with current values in the payload', async () => {
+    const jira = { searchIssues: jest.fn().mockResolvedValue([{ key: 'PR-7', fields: { summary: 'Smart Alerts', status: { name: 'Now' }, reporter: person('r@x.com', 'R'), [PM]: [person('pm@x.com', 'PM')], [NAME]: 'Smart Alerts', [VALUE]: null } }]) };
+    const db = {
+      getActiveJiraTriggers: jest.fn().mockResolvedValue([trigger]), getPromptsForTrigger: jest.fn().mockResolvedValue([]), getPromptedIssueKeys: jest.fn().mockResolvedValue(new Set()),
+      recordPrompt: jest.fn().mockResolvedValue(undefined), updateJiraTrigger: jest.fn().mockResolvedValue(undefined), getUserPreference: jest.fn().mockResolvedValue(null),
+    };
+    const slack = {
+      users: { lookupByEmail: jest.fn().mockResolvedValue({ user: { id: 'UPM' } }) },
+      chat: { postMessage: jest.fn().mockResolvedValue({ ts: '1' }) },
+      conversations: { open: jest.fn().mockResolvedValue({ channel: { id: 'DPM' } }) },
+    };
+    const poller = new JiraPoller({ jiraService: jira, db, slackClient: slack, logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } });
+    const [stats] = await poller.runOnce({ force: true });
+    expect(jira.searchIssues).toHaveBeenCalledWith('x', expect.arrayContaining([PM, NAME, VALUE]));
+    expect(stats.sent).toBe(1);
+    const msg = slack.chat.postMessage.mock.calls[0][0];
+    expect(msg.channel).toBe('DPM');
+    expect(msg.blocks.some((b) => b.type === 'actions' && b.elements.some((e) => e.action_id === 'collect_answer'))).toBe(true);
+    expect(JSON.stringify(msg.blocks)).toContain('Customer value:* _empty_');
+    expect(db.recordPrompt).toHaveBeenCalledWith('t5', 'PR-7', 'UPM', expect.objectContaining({
+      payload: expect.objectContaining({ askType: 'collect', collect: expect.objectContaining({ summary: 'Smart Alerts', fields: [expect.objectContaining({ id: NAME, current: 'Smart Alerts' }), expect.objectContaining({ id: VALUE, current: '' })] }) }),
+    }));
+  });
+});
+
 describe('poller: FYI to the PM owner', () => {
   const { fyiFieldFor } = JiraPoller;
   test('fyiFieldFor: explicit field wins; risk reviews default to the PM owner; yes/no has none', () => {

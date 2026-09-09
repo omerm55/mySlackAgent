@@ -3,6 +3,7 @@
 const { issueLink } = require('../utils/jiraLink');
 const { suggestFixVersion } = require('../services/fixVersionSuggester');
 const riskReview = require('../utils/riskReviewMessage');
+const collect = require('../utils/collectMessage');
 const { logger: baseLogger } = require('../utils/logger');
 const { withTimeout } = require('../utils/withTimeout');
 
@@ -514,6 +515,149 @@ function registerDmHandler(app, jiraService, services) {
     await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'acknowledged', fieldValue: 'no change' });
     await fyiFollowUp(client, ctx, `<@${slackUserId}> marked *${issueLink(issueKey)}* as handled — no change needed.`);
     logger.info(`[risk] ${issueKey} marked handled by ${slackUserId}`);
+  });
+
+  // ── Collect (free text → AI fills fields → preview → one save) ─────────────
+  //
+  // Buttons: collect_answer · collect_skip · collect_save · collect_edit · collect_cancel
+  // Modal:   collect_modal
+  // Every write goes through resolveJira (as the user via OAuth; bot fallback + nudge).
+
+  const collectLoc = (body) => ({ dmChannelId: body.channel?.id, messageTs: body.message?.ts, originalText: (body.message?.text || '').slice(0, 600) });
+
+  async function openCollectModal(client, body, ctx, values, freeText, logger) {
+    try {
+      await client.views.open({ trigger_id: body.trigger_id, view: collect.buildCollectModal(ctx, values, { freeText }) });
+    } catch (err) {
+      logger.error(`[collect] Failed to open modal for ${ctx.issueKey}: ${err.data?.error || err.message}`);
+    }
+  }
+
+  async function collectFail(client, ctx, where, err, logger, action) {
+    const { issueKey, slackUserId, dmChannelId, messageTs, originalText = '' } = ctx;
+    logger.error(`[collect] ${action} failed for ${issueKey}: ${err.message}`);
+    if (dmChannelId && messageTs) {
+      await replaceButtons(client, dmChannelId, messageTs, originalText,
+        `❌ ${where} on *${issueLink(issueKey)}*: ${err.message}\n_I'll ask again on the next check if it's still missing._`);
+    }
+    await services.db?.deletePromptsForIssue(issueKey, slackUserId).catch(() => {});
+    await services.opsNotifier?.collectAction({ slackUserId, issueKey, action, error: err.message });
+  }
+
+  app.action('collect_answer', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'collect answer'); if (!ctx) return;
+    await openCollectModal(client, body, { ...ctx, ...collectLoc(body) }, {}, '', logger);
+  });
+
+  app.action('collect_edit', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'collect edit'); if (!ctx) return;
+    // Preview messages replaced the original; keep the location we already carry, else take this one
+    const loc = ctx.dmChannelId && ctx.messageTs ? {} : collectLoc(body);
+    await openCollectModal(client, body, { ...ctx, ...loc, values: undefined }, ctx.values || {}, ctx.freeText || '', logger);
+  });
+
+  app.view('collect_modal', async ({ ack, body, view, client, logger }) => {
+    let ctx; try { ctx = JSON.parse(view.private_metadata); } catch { await ack(); logger.error('[collect] bad modal metadata'); return; }
+    const fields = ctx.collect?.fields || [];
+    const { freeText, explicit } = collect.readCollectModal(view, ctx);
+    if (!freeText && !Object.keys(explicit).length) {
+      await ack({ response_action: 'errors', errors: { free_text: 'Write something here, or fill in the fields below.' } });
+      return;
+    }
+    await ack();
+    const { issueKey, slackUserId, dmChannelId, messageTs, originalText = '' } = ctx;
+    // Anything the free text needs to fill that wasn't typed explicitly?
+    const needsLlm = freeText && fields.some((f) => !explicit[f.id]);
+    if (needsLlm && dmChannelId && messageTs) await replaceButtons(client, dmChannelId, messageTs, originalText, '_Reading what you wrote…_');
+
+    let extracted = {}; let note = null;
+    if (needsLlm) {
+      if (!services.llmService) {
+        note = 'AI extraction is not configured — fill the fields directly.';
+      } else {
+        try {
+          const res = await withTimeout(services.llmService.extractFields({ issueKey, summary: ctx.collect?.summary, fields, userText: freeText }), 15_000, 'field extraction');
+          extracted = res?.values && typeof res.values === 'object' ? res.values : {};
+          note = typeof res?.note === 'string' && res.note.trim() ? res.note.trim() : null;
+          logger.info({ issueKey, extracted }, '[collect] LLM extraction');
+        } catch (err) {
+          logger.warn(`[collect] extractFields failed for ${issueKey}: ${err.message}`);
+          note = "I couldn't read that automatically — fill the fields directly.";
+        }
+      }
+    }
+    const values = collect.mergeValues(fields, explicit, extracted);
+    const previewCtx = { ...ctx, freeText: freeText.slice(0, 1000) };
+    const { blocks, missing } = collect.previewBlocks(previewCtx, slackUserId, values, { note });
+    if (dmChannelId && messageTs) {
+      const ok = await replaceButtons(client, dmChannelId, messageTs, originalText,
+        missing.length ? `ℹ️ Almost there — I still need *${missing.map((f) => f.name).join(', ')}*.` : '✅ Ready to save. Please check:', blocks);
+      if (!ok) {
+        // Never leave the progress line up
+        await replaceButtons(client, dmChannelId, messageTs, originalText, `⚠️ I couldn't show the preview. Press *Answer* again to retry.`, [collect.buildCollectBlocks(ctx, slackUserId).pop()]);
+      }
+    }
+  });
+
+  app.action('collect_save', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'collect save'); if (!ctx) return;
+    const loc = ctx.dmChannelId && ctx.messageTs ? {} : collectLoc(body);
+    const full = { ...ctx, ...loc };
+    const { issueKey, slackUserId, dmChannelId, messageTs, originalText = '' } = full;
+    const fields = ctx.collect?.fields || [];
+    const values = ctx.values || {};
+    const toWrite = Object.fromEntries(fields.filter((f) => values[f.id]).map((f) => [f.id, values[f.id]]));
+    if (!Object.keys(toWrite).length) return;
+    if (dmChannelId && messageTs) await replaceButtons(client, dmChannelId, messageTs, originalText, '_Saving to Jira…_');
+    try {
+      const usingOAuth = services.oauthService?.hasToken(slackUserId) ?? false;
+      const jira = await resolveJira(slackUserId, client);
+      await jira.updateIssueFields(issueKey, toWrite);
+      logger.info(`[collect] ${issueKey} updated by ${slackUserId}: ${Object.keys(toWrite).join(', ')} ✓`);
+      const lines = fields.filter((f) => toWrite[f.id]).map((f) => `• *${f.name}:* ${toWrite[f.id]}`).join('\n');
+      if (dmChannelId && messageTs) {
+        await replaceButtons(client, dmChannelId, messageTs, originalText, `✅ Saved to *${issueLink(issueKey)}*:\n${lines}`);
+      }
+      await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
+      const detail = fields.filter((f) => toWrite[f.id]).map((f) => `${f.name} = "${toWrite[f.id].slice(0, 80)}"`).join(' · ');
+      await services.opsNotifier?.collectAction({ slackUserId, issueKey, action: 'saved', detail, usingOAuth });
+      await record(client, { slackUserId, issueKey, trigger: '📝 collect', fieldName: fields.filter((f) => toWrite[f.id]).map((f) => f.name).join(', '), fieldValue: Object.values(toWrite).map((v) => v.slice(0, 40)).join(' / ') });
+      await fyiFollowUp(client, ctx, `<@${slackUserId}> filled in *${issueLink(issueKey)}*:\n${lines}`);
+    } catch (err) {
+      await collectFail(client, full, "Couldn't save", err, logger, 'save');
+    }
+  });
+
+  app.action('collect_cancel', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'collect cancel'); if (!ctx) return;
+    const loc = ctx.dmChannelId && ctx.messageTs ? { dmChannelId: ctx.dmChannelId, messageTs: ctx.messageTs } : collectLoc(body);
+    const { issueKey, slackUserId } = ctx;
+    // Nothing saved — put the original ask back so they can come back to it
+    const fresh = { ...ctx, values: undefined, freeText: undefined, dmChannelId: undefined, messageTs: undefined, originalText: undefined };
+    if (loc.dmChannelId && loc.messageTs) {
+      try {
+        await client.chat.update({ channel: loc.dmChannelId, ts: loc.messageTs, text: `📝 ${issueKey} needs: ${collect.describeCollectFields(ctx.collect?.fields)}`, blocks: collect.buildCollectBlocks(fresh, slackUserId) });
+      } catch (err) { logger.warn(`[collect] cancel restore failed: ${err.data?.error || err.message}`); }
+    }
+    await services.opsNotifier?.collectAction({ slackUserId, issueKey, action: 'cancelled the preview (nothing saved)' });
+  });
+
+  app.action('collect_skip', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'collect skip'); if (!ctx) return;
+    const { dmChannelId, messageTs, originalText } = collectLoc(body);
+    const { issueKey, slackUserId } = ctx;
+    if (dmChannelId && messageTs) {
+      await replaceButtons(client, dmChannelId, messageTs, originalText, `👍 Skipped — *${issueLink(issueKey)}* left as is. I won't ask about it again unless the trigger is re-run.`);
+    }
+    await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
+    await services.opsNotifier?.collectAction({ slackUserId, issueKey, action: 'skipped' });
+    await record(client, { slackUserId, issueKey, trigger: '📝 collect', fieldName: 'skipped', fieldValue: 'no change' });
+    logger.info(`[collect] ${issueKey} skipped by ${slackUserId}`);
   });
 
   // ── Fix Version: one-click apply of the suggestion ────────────────────────
