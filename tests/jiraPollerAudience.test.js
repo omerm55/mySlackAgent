@@ -165,3 +165,60 @@ describe('poller: FYI to the PM owner', () => {
     expect(slack.chat.postMessage).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('poller: pilot list', () => {
+  const base = {
+    id: 't3', name: 'Risk', jql: 'x', question: '{link} was flagged.', scope: 'global',
+    notify: 'user_field', notify_field_id: FIELDS.DEV_OWNER, ask_type: 'risk_review', watch_field: null,
+    poll_interval_min: 60, last_polled_at: null, fyi_field_id: null,
+  };
+  const issue = (key, devEmail, pmEmail) => ({
+    key, fields: { summary: key, status: { name: 'On Track' }, reporter: person('r@x.com', 'Rep'),
+      [FIELDS.DEV_OWNER]: [person(devEmail, devEmail)], [FIELDS.PM_OWNER]: [person(pmEmail, pmEmail)],
+      [FIELDS.NOTIFICATION]: NOTIF, [FIELDS.TARGET]: null },
+  });
+  function setup(trigger, issues) {
+    const ids = { 'yehuda@x.com': 'UYEHUDA', 'omer@x.com': 'UOMER', 'pm@x.com': 'UPM' };
+    const jira = { searchIssues: jest.fn().mockResolvedValue(issues) };
+    const db = {
+      getActiveJiraTriggers: jest.fn().mockResolvedValue([trigger]),
+      getPromptedIssueKeys: jest.fn().mockResolvedValue(new Set()),
+      recordPrompt: jest.fn().mockResolvedValue(undefined),
+      updateJiraTrigger: jest.fn().mockResolvedValue(undefined),
+      getUserPreference: jest.fn().mockResolvedValue(null),
+    };
+    const slack = {
+      users: { lookupByEmail: jest.fn(async ({ email }) => ({ user: { id: ids[email] } })) },
+      chat: { postMessage: jest.fn().mockResolvedValue({ ts: '1' }) },
+      conversations: { open: jest.fn(async ({ users }) => ({ channel: { id: 'D' + users } })) },
+    };
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    return { poller: new JiraPoller({ jiraService: jira, db, slackClient: slack, logger }), db, slack };
+  }
+
+  test('only pilot users are asked; others are skipped without being recorded; FYI outside the list is suppressed', async () => {
+    const trigger = { ...base, pilot_slack_user_ids: ['UYEHUDA'] };
+    const { poller, db, slack } = setup(trigger, [issue('PR-10', 'yehuda@x.com', 'pm@x.com'), issue('PR-11', 'omer@x.com', 'pm@x.com')]);
+    const [stats] = await poller.runOnce({ force: true });
+    expect(stats.sent).toBe(1);
+    expect(stats.fyi).toBe(0); // PM is not on the pilot list
+    expect(stats.pilotSkipped).toBe(1);
+    expect(stats.skipped).toEqual(expect.arrayContaining([expect.stringMatching(/1 outside the pilot list/)]));
+    const channels = slack.chat.postMessage.mock.calls.map((c) => c[0].channel);
+    expect(channels).toEqual(['DUYEHUDA']);
+    expect(db.recordPrompt).toHaveBeenCalledTimes(1);
+    expect(db.recordPrompt).toHaveBeenCalledWith('t3', 'PR-10', 'UYEHUDA', expect.anything());
+  });
+
+  test('pilot list including the PM → FYI goes out; empty list → everyone', async () => {
+    const withPm = { ...base, pilot_slack_user_ids: ['UYEHUDA', 'UPM'] };
+    const a = setup(withPm, [issue('PR-10', 'yehuda@x.com', 'pm@x.com')]);
+    const [s1] = await a.poller.runOnce({ force: true });
+    expect(s1.sent).toBe(1); expect(s1.fyi).toBe(1);
+
+    const open = { ...base, pilot_slack_user_ids: null };
+    const b = setup(open, [issue('PR-10', 'yehuda@x.com', 'pm@x.com'), issue('PR-11', 'omer@x.com', 'pm@x.com')]);
+    const [s2] = await b.poller.runOnce({ force: true });
+    expect(s2.sent).toBe(2); expect(s2.pilotSkipped).toBe(0);
+  });
+});

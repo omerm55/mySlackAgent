@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (157 passing, 17 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (159 passing, 17 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -90,6 +90,11 @@ re-asked automatically if the Yes fails.
 
 Flagship use-case: *epics in Acceptance* — a Jira Automation moves an epic to Acceptance when all
 children are Done; the bot asks the reporting PM to approve and move it to Done.
+
+**Rolling out safely.** Two controls: `scope` (`personal` = only the creator is ever DM'd; `global` =
+anyone matched) and an optional **pilot list** of Slack users. While a pilot list is set, only those
+people are asked (and FYI'd); everyone else the JQL matches is skipped *without* being recorded, so
+clearing the list later asks them normally. Typical path: personal → global + pilot list → global.
 
 ### 2.3 DM conversation (Yes / No / Reply, LLM-interpreted)
 
@@ -236,7 +241,7 @@ src/
     opsNotifier.js  dmQuestion.js  riskReviewMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (157 tests, 17 suites)
+tests/                         Jest (159 tests, 17 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -270,7 +275,7 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 | `replyHandler.js` | `message` (thread replies, non-bot) | Same for thread replies (root message holds the issue key). |
 | `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; clears `jira_prompts` on failure so the poller re-asks. |
 | `homeHandler.js` | `app_home_opened` | Builds the Home view (connection, notifications, how it works, persistent recent activity; trigger sections **admin-only**); exports `publishHome` for other handlers to refresh it. |
-| `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (Jira-trigger modal: ask type yes/no vs risk review, notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, cadence, action); validates JQL against Jira before saving; Run now / Re-ask; all outcomes reported to **ops** (not DM). |
+| `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (Jira-trigger modal: ask type yes/no vs risk review, notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
 
 Button/menu payloads: the full context (issue key, proposed action, user, question ≤300 chars,
@@ -310,8 +315,9 @@ camelCase), refreshes every 60 s, `invalidate()` on writes.
 its `poll_interval_min`/`last_polled_at`: `searchIssues(jql, fieldsFor(trigger))`, decide which issues
 are new (see below), for each resolve the person via `resolvePerson` — `reporter` | `assignee` |
 `user_field` (`notify_field_id`, first user of an array; fallback assignee → reporter) — → email →
-Slack id (`users.lookupByEmail`, cached), honour `scope=personal`, honour the user's digest preference
-(queue vs send), cap `JIRA_MAX_PROMPTS_PER_RUN` (10) per trigger per run, record prompt, stamp
+Slack id (`users.lookupByEmail`, cached), honour `scope=personal`, honour the **pilot list**
+(`pilot_slack_user_ids`: others are skipped and not recorded; FYIs only to listed users), honour the
+user's digest preference (queue vs send), cap `JIRA_MAX_PROMPTS_PER_RUN` (10) per trigger per run, record prompt, stamp
 `last_polled_at` even on failure. **Watch field:** when `trigger.watch_field` is set, the poller stores
 the field's value in `jira_prompts.payload.watchedValue`; on later runs an issue whose current value
 differs is deleted from prompts and asked again (rows predating the feature are backfilled, not re-asked).
@@ -320,7 +326,7 @@ summary, targetStart, targetEnd}}`; both may carry `fyiSlackUserId`. **FYI:** `f
 (explicit `fyi_field_id`, else PM owner for risk reviews) → first user → Slack id; if different from the
 person asked, `sendFyi` posts an informational DM right away and the id rides in the payload/button
 context so `dmHandler` can echo actions to them. Returns per-trigger stats `{matched, fresh, sent, queued,
-fyi, skipped[], sentTo[], queuedFor[]}`. `runOnce({force, onlyId})` is used by Run now / Re-ask / save.
+fyi, pilotSkipped, skipped[], sentTo[], queuedFor[]}`. `runOnce({force, onlyId})` is used by Run now / Re-ask / save.
 
 **`riskReviewMessage.js`** (utils) — builds the `risk_review` DM (`buildRiskReviewBlocks`,
 `sendRiskReview`, `afterStatusBlocks` = Update Notes + Skip), the buttonless `sendFyi` (risk-review and
@@ -427,6 +433,7 @@ create table if not exists public.jira_triggers (
   notify_field_id   text null,                           -- when notify = 'user_field'
   watch_field       text null,                           -- re-ask when this field's value changes
   fyi_field_id      text null,                           -- user field to FYI (risk reviews default to PM owner)
+  pilot_slack_user_ids text[] null,                      -- while set, only these Slack users are asked / FYI'd
   active            boolean not null default true,
   created_at        timestamptz not null default now()
 );
@@ -465,6 +472,8 @@ alter table public.jira_triggers
 alter table public.jira_prompts add column if not exists answered_at timestamptz null;
 -- supabase/fyi_field.sql
 alter table public.jira_triggers add column if not exists fyi_field_id text null;
+-- supabase/pilot_users.sql
+alter table public.jira_triggers add column if not exists pilot_slack_user_ids text[] null;
 ```
 
 ### 6.4 `release_calendar` — branch-out windows (`supabase/release_calendar.sql`)
@@ -590,6 +599,7 @@ JiraPoller tick ─► trigger ask_type=risk_review, watch_field=cf[15525]
   ─► searchIssues(jql, + notify_field_id + watch field + target + Notes) ─► for each issue:
        stored watchedValue == current? skip : deletePromptsForIssue + treat as new
   ─► resolvePerson: user_field cf[11962] → first user → email → Slack id (fallback assignee → reporter)
+  ─► scope=personal? only creator · pilot list set? only listed users (others skipped, not recorded)
   ─► FYI: fyiFieldFor → PM owner cf[11909] → Slack id ≠ Dev owner? sendFyi (no buttons) + payload.fyiSlackUserId
   ─► sendDmQuestion(payload{askType:'risk_review', risk:{notification,status,target}}) → sendRiskReview
 Dev owner clicks:
@@ -839,11 +849,14 @@ architecture note superseded by this document.
 | Also FYI the user in this field | leave empty (risk reviews default to the PR PM owner, `customfield_11909`) |
 | Question | `{link} was flagged by the weekly R&D Initiative Notifier.` (optional; the diagnosis is rendered by the ask type) |
 | Check Jira | hourly (the notifier runs weekly) |
-| Scope | `personal` while piloting, `global` after |
+| Scope | `personal` to test on yourself; then `global` **with a pilot list**; then `global` alone |
+| Pilot: only DM these people | the few Dev owners to start with (e.g. Yehuda). Clear it to open up. |
 
 The first run asks about every Initiative that currently carries a `Latest notification`; later runs
 only ask again when the notifier rewrites it. To pilot with one Initiative, edit its `Latest
-notification` in Jira and **▶️ Run now**.
+notification` in Jira and **▶️ Run now**. To pilot with one *person* while the JQL stays broad, set
+scope to Everyone and put only them on the pilot list; the Run-now summary reports how many matches
+were "outside the pilot list".
 
 ### 12.3 SQL snippets used
 
@@ -892,7 +905,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 157 tests in 17 suites:
+`npm test` → Jest, `tests/*.test.js`, 159 tests in 17 suites:
 
 | Suite | Covers |
 |---|---|
@@ -904,7 +917,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `dmFixVersionOffer` | Offer rendering, unique action_ids, progress lines, fallback when Slack rejects blocks |
 | `dmQuestionFormat` | Template rendering (`{key} ({summary})` → one link, pipe-safety), headline dedup, button context |
 | `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change |
-| `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner |
+| `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
 
@@ -963,6 +976,9 @@ Chronological, with rationale (see `git log` for commits):
 20. **Notes in the loop; Skip.** First live test showed two gaps: people act on Notes without seeing
     them, and the post-status follow-up offered only "Update Notes". The DM, the FYI and the Notes modal
     now show the current Notes (or "empty"), and a Skip button ends the flow without a write.
+21. **Pilot list on Jira triggers.** Needed to run the risk review for one Dev owner without
+    narrowing the JQL or going global. Skipped people are deliberately *not* recorded as asked, so
+    clearing the list is all it takes to widen the rollout.
 
 ---
 

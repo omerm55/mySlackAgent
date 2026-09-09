@@ -289,6 +289,14 @@ function buildJiraTriggerModal(admin, existing = null) {
       optional: true,
       hint: plain('They get an informational DM when the main person is asked, and a note when they act. Risk reviews default to the PR PM owner.'),
     }),
+    input('jt_pilot_users', 'Pilot: only DM these people (optional)', {
+      type: 'multi_users_select',
+      placeholder: plain('Pick people to pilot with'),
+      ...(existing?.pilot_slack_user_ids?.length ? { initial_users: existing.pilot_slack_user_ids } : {}),
+    }, {
+      optional: true,
+      hint: plain('While set, only these people are asked (and FYI\'d). Everyone else matched is skipped — not marked as asked — until you clear this.'),
+    }),
     input('jt_action', 'On "Yes", do this (Yes / No asks only)', radios([['transition', 'Move to a status'], ['field', 'Set a field']], existing?.action_type ?? 'transition')),
     input('jt_transition', 'Target status (for "Move to a status")', textInput('e.g. Done', { initial: existing?.transition_to }), { optional: true }),
     input('jt_field_id', 'Jira field ID (for "Set a field")', textInput('e.g. customfield_11296', { initial: existing?.jira_field_id }), { optional: true }),
@@ -420,6 +428,7 @@ function registerJiraTriggerHandler(app, services) {
     const notifyFieldId = v.jt_notify_field?.value?.value?.trim() || null;
     const watchField = v.jt_watch_field?.value?.value?.trim() || null;
     const fyiFieldId = v.jt_fyi_field?.value?.value?.trim() || null;
+    const pilotUsers = v.jt_pilot_users?.value?.selected_users || [];
     const pollIntervalMin = parseInt(v.jt_interval?.value?.selected_option?.value || '2', 10) || 2;
     const actionType = v.jt_action.value.selected_option?.value || 'transition';
     const transitionTo = v.jt_transition?.value?.value?.trim();
@@ -468,6 +477,7 @@ function registerJiraTriggerHandler(app, services) {
       notify_field_id: notify === 'user_field' ? notifyFieldId : null,
       watch_field: watchField,
       fyi_field_id: fyiFieldId,
+      pilot_slack_user_ids: pilotUsers.length ? pilotUsers : null,
       poll_interval_min: pollIntervalMin,
       action_type: actionType,
       transition_to: askType === 'yes_no' && actionType === 'transition' ? transitionTo : null,
@@ -498,7 +508,8 @@ function registerJiraTriggerHandler(app, services) {
       const watch = watchField ? ` Re-asks whenever \`${watchField}\` changes.` : '';
       const fyiField = fyiFieldId || (askType === 'risk_review' ? 'customfield_11909' : null);
       const fyi = fyiField ? ` FYI DM to the user in \`${fyiField}\`.` : '';
-      await notifyOps(services, client, userId, `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${who}* of any new match. ${outcome}${watch}${fyi}`);
+      const pilotNote = pilotUsers.length ? ` 🧪 Pilot: only ${pilotUsers.map((u) => `<@${u}>`).join(', ')} will be asked.` : '';
+      await notifyOps(services, client, userId, `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${who}* of any new match. ${outcome}${watch}${fyi}${pilotNote}`);
       // Evaluate this trigger right away regardless of its cadence
       services.jiraPoller?.runOnce({ force: true, onlyId: savedId }).catch(() => {});
     } catch (err) {

@@ -147,8 +147,12 @@ class JiraPoller {
 
   async _evaluateTrigger(trigger) {
     const tag = `[jiraPoller/${trigger.name}]`;
-    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, fyi: 0, skipped: [], sentTo: [], queuedFor: [] };
+    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, fyi: 0, pilotSkipped: 0, skipped: [], sentTo: [], queuedFor: [] };
     const prefCache = new Map();
+    // Pilot list: only these Slack users are asked / FYI'd while it is set
+    const pilot = Array.isArray(trigger.pilot_slack_user_ids) && trigger.pilot_slack_user_ids.length
+      ? new Set(trigger.pilot_slack_user_ids) : null;
+    const inPilot = (id) => !pilot || pilot.has(id);
 
     const issues = await this.jira.searchIssues(trigger.jql, fieldsFor(trigger));
     stats.matched = issues.length;
@@ -229,6 +233,12 @@ class JiraPoller {
         continue;
       }
 
+      // Pilot list: skip (without recording) anyone not on it, so they are asked once the list is cleared
+      if (!inPilot(slackUserId)) {
+        stats.pilotSkipped += 1;
+        continue;
+      }
+
       const question = renderTemplate(trigger.question, issue);
       const payload = trigger.ask_type === 'risk_review'
         ? {
@@ -260,7 +270,7 @@ class JiraPoller {
         const fyiPerson = firstUser(issue.fields?.[fyiFieldId]);
         if (fyiPerson?.emailAddress) {
           const id = await this._resolveSlackUser(fyiPerson.emailAddress);
-          if (id && id !== slackUserId) fyiSlackUserId = id;
+          if (id && id !== slackUserId && inPilot(id)) fyiSlackUserId = id;
         }
       }
       if (fyiSlackUserId) {
@@ -306,6 +316,7 @@ class JiraPoller {
       }
     }
     stats.sent = sent;
+    if (stats.pilotSkipped) stats.skipped.push(`${stats.pilotSkipped} outside the pilot list (not recorded)`);
     return stats;
   }
 
