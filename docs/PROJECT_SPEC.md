@@ -121,6 +121,30 @@ Each user chooses **Immediately** (default), **Hourly**, **Twice a day (09:00 & 
 **Once a day (09:00)** in their Slack time zone. Non-immediate users have questions queued and
 delivered in a burst (header + one message per question) at their slot.
 
+### 2.9 R&D Initiative risk review (notifier → Dev owner loop)
+
+The `rd-initiative-notifier` Claude skill runs weekly per domain, flags PR Initiatives (Overdue, Progress
+red/orange, Missing inputs, Status mismatch, Placeholder target), posts to the leads' channel and writes a
+one-line diagnosis onto each flagged Initiative in **`Latest notification`** (`customfield_15525`), e.g.
+`Sep 8 — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress`. It does not DM owners.
+
+A Jira trigger with **ask type `risk_review`** reads that field and DMs the **Dev owner** (`PR Dev
+Owner/FC Sponsor`, `customfield_11962`, fallback assignee → reporter) with the diagnosis, current status and
+target, and buttons:
+
+- **🟡 Low Risk / 🔴 High Risk / ⛔ Off Track** — transition as the owner. When the status is already one
+  of those, **🟢 Back On Track** is offered instead (the skill's *already-at-risk* rule); when `On hold`,
+  no status buttons.
+- **📝 Update Notes** — modal; the text is tidied by the LLM (meaning preserved, never invents; raw text
+  on failure) and **prepended** to `Notes` (`customfield_12958`) as `YYYY-MM-DD (Name): …`, keeping history.
+- **📅 Move / clear target** — modal with a date picker or "clear"; writes `Project target`
+  (`customfield_11818`) as a Polaris interval JSON string, or `null`.
+- **✅ Handled** — records the acknowledgement; no Jira write.
+
+After a status change the message keeps only *Update Notes* (the notifier's ask is "flag at risk **and**
+refresh Notes"). The trigger uses **`watch_field = customfield_15525`**, so each weekly rewrite re-asks;
+an unchanged value never does. Field ids are overridable via `PR_*_FIELD` env vars.
+
 ### 2.8 Operator visibility
 
 Every trigger firing, filtered event, DM sent, button click, LLM decision, digest, trigger
@@ -229,7 +253,7 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 |---|---|---|
 | `reactionHandler.js` | `reaction_added` | Match channel triggers by channel; fetch message; extract issue keys; per-trigger scope/allowlist/rate/dedup; update field via user OAuth or service account; thread confirmation; audit + ops. |
 | `replyHandler.js` | `message` (thread replies, non-bot) | Same for thread replies (root message holds the issue key). |
-| `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; clears `jira_prompts` on failure so the poller re-asks. |
+| `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_move_target`, `risk_handled`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; clears `jira_prompts` on failure so the poller re-asks. |
 | `homeHandler.js` | `app_home_opened` | Builds the Home view; exports `publishHome` for other handlers to refresh it. |
 | `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds; validates JQL against Jira before saving; Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
@@ -266,12 +290,22 @@ jira_prompts (`getPromptedIssueKeys`, `recordPrompt(…, {payload, delivered})`,
 camelCase), refreshes every 60 s, `invalidate()` on writes.
 
 **`jiraPoller.js`** — tick every `JIRA_POLL_INTERVAL_SEC` (60). For each active Jira trigger due per
-its `poll_interval_min`/`last_polled_at`: `searchIssues(jql)`, subtract `jira_prompts`, for each new
-issue resolve reporter/assignee email → Slack id (`users.lookupByEmail`, cached), honour
-`scope=personal`, honour the user's digest preference (queue vs send), cap
-`JIRA_MAX_PROMPTS_PER_RUN` (10) per trigger per run, record prompt, stamp `last_polled_at` even on
-failure. Returns per-trigger stats `{matched, fresh, sent, queued, skipped[], sentTo[], queuedFor[]}`.
-`runOnce({force, onlyId})` is used by Run now / Re-ask / save.
+its `poll_interval_min`/`last_polled_at`: `searchIssues(jql, fieldsFor(trigger))`, decide which issues
+are new (see below), for each resolve the person via `resolvePerson` — `reporter` | `assignee` |
+`user_field` (`notify_field_id`, first user of an array; fallback assignee → reporter) — → email →
+Slack id (`users.lookupByEmail`, cached), honour `scope=personal`, honour the user's digest preference
+(queue vs send), cap `JIRA_MAX_PROMPTS_PER_RUN` (10) per trigger per run, record prompt, stamp
+`last_polled_at` even on failure. **Watch field:** when `trigger.watch_field` is set, the poller stores
+the field's value in `jira_prompts.payload.watchedValue`; on later runs an issue whose current value
+differs is deleted from prompts and asked again (rows predating the feature are backfilled, not re-asked).
+Payloads: `yes_no` as before; `risk_review` = `{askType, issueKey, question, risk:{notification, status,
+summary, targetStart, targetEnd}}`. Returns per-trigger stats `{matched, fresh, sent, queued, skipped[],
+sentTo[], queuedFor[]}`. `runOnce({force, onlyId})` is used by Run now / Re-ask / save.
+
+**`riskReviewMessage.js`** (utils) — builds the `risk_review` DM (`buildRiskReviewBlocks`,
+`sendRiskReview`, `afterStatusBlocks`), `statusChoices(status)`, `parseInterval`, `riskContextFor(issue)`,
+`notesEntry`/`prependNotes`, and the `FIELDS` constants (env-overridable). `sendDmQuestion` delegates to it
+when `context.askType === 'risk_review'`, so digests, the Connect nudge and ops reporting are unchanged.
 
 **`digestScheduler.js`** — tick every 60 s. For each `user_preferences` row with
 `digest_frequency != immediate`, compute the latest slot (hourly: top of hour; daily: 09:00 local;
@@ -365,6 +399,9 @@ create table if not exists public.jira_triggers (
   jira_field_type   text null default 'select',
   poll_interval_min integer not null default 2,
   last_polled_at    timestamptz null,
+  ask_type          text not null default 'yes_no',      -- 'yes_no' | 'risk_review'
+  notify_field_id   text null,                           -- when notify = 'user_field'
+  watch_field       text null,                           -- re-ask when this field's value changes
   active            boolean not null default true,
   created_at        timestamptz not null default now()
 );
@@ -376,8 +413,9 @@ create table if not exists public.jira_prompts (
   issue_key      text not null,
   slack_user_id  text null,            -- null = matched but nobody could be DM'd
   prompted_at    timestamptz not null default now(),
-  payload        jsonb null,           -- DM context for queued (digest) prompts
+  payload        jsonb null,           -- DM context; also holds watchedValue for watch_field triggers
   delivered_at   timestamptz null,     -- null = queued, awaiting a digest
+  answered_at    timestamptz null,     -- set when the user acted (button / modal)
   unique (trigger_id, issue_key)
 );
 create index if not exists jira_prompts_trigger_idx on public.jira_prompts (trigger_id);
@@ -394,6 +432,12 @@ alter table public.jira_prompts
   add column if not exists payload jsonb null,
   add column if not exists delivered_at timestamptz null;
 update public.jira_prompts set delivered_at = prompted_at where delivered_at is null;
+-- supabase/risk_review.sql
+alter table public.jira_triggers
+  add column if not exists ask_type        text not null default 'yes_no',
+  add column if not exists notify_field_id text null,
+  add column if not exists watch_field     text null;
+alter table public.jira_prompts add column if not exists answered_at timestamptz null;
 ```
 
 ### 6.4 `release_calendar` — branch-out windows (`supabase/release_calendar.sql`)
@@ -558,6 +602,22 @@ Respond ONLY with valid JSON (no markdown fences):
 The LLM is **not** called when children are unanimous (deterministic), and its answer is validated
 against the candidate list; any failure falls back to deterministic rules.
 
+### 8.3 Notes tidy-up for risk reviews (`TIDY_NOTE_PROMPT`)
+
+```
+You tidy a short status update written by the owner of an R&D Initiative so it reads well in the
+Initiative's Notes field. Rules:
+- Keep the author's meaning, facts, names and dates exactly. Never add, infer or soften anything.
+- Keep first person if they used it. One or two plain sentences, no bullet points, no markdown.
+- Fix grammar and remove filler. If the text is already clean, return it unchanged.
+
+Respond ONLY with valid JSON (no markdown fences):
+{ "note": "<the tidied update>" }
+```
+
+User message: Initiative key + summary, the notifier's diagnosis, and the owner's text verbatim. Any
+error or empty result → the raw text is written unchanged.
+
 ---
 
 ## 9. External configuration
@@ -697,6 +757,23 @@ architecture note superseded by this document.
 | 🔁 Re-ask open matches | `deletePromptsForTrigger` then force run — re-DMs everyone still matching (including those who answered No) |
 | 🗑 Delete | `active = false` |
 
+### 12.2a Creating the R&D risk-review trigger (App Home → ➕ Create Jira Trigger)
+
+| Field | Value |
+|---|---|
+| Name | `R&D Initiative risk review` |
+| Ask type | **Risk review** |
+| JQL | `project = PR AND issuetype = Initiative AND cf[15525] is not EMPTY AND status not in (Done, Acceptance, Cancelled)` |
+| Who to DM | **A user field** → `customfield_11962` |
+| Re-ask when this field changes | `customfield_15525` |
+| Question | `{link} was flagged by the weekly R&D Initiative Notifier.` (optional; the diagnosis is rendered by the ask type) |
+| Check Jira | hourly (the notifier runs weekly) |
+| Scope | `personal` while piloting, `global` after |
+
+The first run asks about every Initiative that currently carries a `Latest notification`; later runs
+only ask again when the notifier rewrites it. To pilot with one Initiative, edit its `Latest
+notification` in Jira and **▶️ Run now**.
+
 ### 12.3 SQL snippets used
 
 Re-ask a single issue:
@@ -796,6 +873,10 @@ Chronological, with rationale (see `git log` for commits):
     audiences, triggers and Jira-side dependencies; nine requirements checked against the app. Decision:
     **no new capabilities before the 9 Sept demo**; A1 (`collect` ask type with LLM-extracted field
     values) is the first build afterwards, then A2, B1, D1/D3, claims.
+17. **Risk review ask type** (built the morning of the demo, reversing #16's freeze for one feature):
+    the notifier's `Latest notification` field is the handoff — no skill change, no new secret. First
+    non-yes/no ask type; introduced the generic `user_field` audience and `watch_field` re-ask, both
+    reused by the A1/A2 plan. Supabase ingest endpoint for richer flags deferred.
 
 ---
 
@@ -960,6 +1041,13 @@ where we stand, and the order we intend to build.
 
 The catalog's own top five is A1, B1, C2, D1, A2; we swap A2 forward because it reuses A1's machinery
 with two hours of extra work, and C2 depends on a Jira rule fix (`addCommentOnce`) we don't control.
+
+### 18.3a Built: R&D risk review (owner loop for the notifier)
+
+Not one of the 35 rows, but the same shape as C1/C6 (chase the owner, answer lands in a field) and the
+first non-yes/no ask type. See §2.9. It delivered two of the §18.2 planned changes early: the
+`user_field` audience and re-ask-on-change (`watch_field`). C1 (stale Notes → reply writes Notes) can
+now be a `risk_review`-style trigger with a different JQL; C6 needs the date+reason `collect` variant.
 
 ### 18.4 Planned: A1 with LLM-extracted values
 
