@@ -10,7 +10,7 @@
 
 - **The March review ended with "please don't deploy anything to production"** (Abhishek, 15 April),
   pending a proper review the security team had no bandwidth for at the time.
-- **Since 3 September the rebuilt bot runs on Render and is in use** by about ten people in Product
+- **Since 8 September the rebuilt bot runs on Render and is in use** by about ten people in Product
   (PMs, a few Dev owners) during the hackathon. It writes to the SNS and PR Jira projects. **No
   security sign-off has been obtained for this.** This document is the input for that sign-off; the
   ask is a decision on §5 (P0 items) and §6 (decisions needed), not a retroactive approval.
