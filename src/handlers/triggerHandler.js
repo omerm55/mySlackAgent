@@ -88,6 +88,22 @@ async function notifyOps(services, client, userId, text) {
 // Channel triggers (reaction / reply → set a Jira field)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Ops summary of one poller evaluation (Run now, Re-ask and the run right after saving). */
+function runSummaryLines(title, jql, stats) {
+  const lines = [`${title} — \`${jql}\``];
+  if (stats.error) {
+    lines.push(`❌ ${stats.error}`);
+    return lines;
+  }
+  const alreadyAsked = Math.max(0, stats.matched - stats.fresh);
+  lines.push(`${stats.matched} issue(s) match · ${stats.fresh} not yet asked${alreadyAsked ? ` · ${alreadyAsked} already asked or waiting in a digest` : ''} · ${stats.sent} DM(s) sent${stats.queued ? ` · ${stats.queued} queued for digests` : ''}${stats.fyi ? ` · ${stats.fyi} FYI` : ''}`);
+  if (stats.sentTo.length) lines.push(...stats.sentTo.map((s) => `  • ${s}`));
+  if (stats.queuedFor?.length) lines.push(...stats.queuedFor.map((s) => `  🔔 ${s} — held for their digest; switching to Immediate delivers it right away`));
+  if (stats.skipped.length) lines.push(...stats.skipped.slice(0, 10).map((s) => `  ⏭ ${s}`));
+  if (stats.matched > 0 && stats.fresh === 0) lines.push('_Everyone matching has already been asked (or is waiting in a digest). Use 🔁 Re-ask open matches to ask again._');
+  return lines;
+}
+
 function buildChannelTriggerModal(admin, existing = null) {
   const blocks = [
     input('name_block', 'Trigger name', textInput('e.g. PM Reviewed — Product Bugs', { initial: existing?.name })),
@@ -382,17 +398,7 @@ function registerJiraTriggerHandler(app, services) {
           await notifyOps(services, client, userId, `⏳ *${existing.name}* is already being evaluated — try again in a moment.`);
           return;
         }
-        const lines = [`▶️ Ran *${existing.name}* — \`${existing.jql}\``];
-        if (stats.error) {
-          lines.push(`❌ ${stats.error}`);
-        } else {
-          lines.push(`${stats.matched} issue(s) match · ${stats.fresh} not yet asked · ${stats.sent} DM(s) sent${stats.queued ? ` · ${stats.queued} queued for digests` : ''}${stats.fyi ? ` · ${stats.fyi} FYI` : ''}`);
-          if (stats.sentTo.length) lines.push(...stats.sentTo.map((s) => `  • ${s}`));
-          if (stats.queuedFor?.length) lines.push(...stats.queuedFor.map((s) => `  🔔 ${s}`));
-          if (stats.skipped.length) lines.push(...stats.skipped.slice(0, 10).map((s) => `  ⏭ ${s}`));
-          if (stats.matched > 0 && stats.fresh === 0) lines.push('_Everyone matching has already been asked. Use 🔁 Re-ask open matches to ask again._');
-        }
-        await notifyOps(services, client, userId, lines.join('\n'));
+        await notifyOps(services, client, userId, runSummaryLines(`▶️ Ran *${existing.name}*`, existing.jql, stats).join('\n'));
       } catch (err) {
         logger.error(`[jiraTrigger] Run now failed for ${id}: ${errDetail(err)}`);
         await notifyOps(services, client, userId, `❌ Run failed: ${errDetail(err)}`);
@@ -540,8 +546,12 @@ function registerJiraTriggerHandler(app, services) {
       const fyi = fyiField ? ` FYI DM to the user in \`${fyiField}\`.` : '';
       const pilotNote = pilotUsers.length ? ` 🧪 Pilot: only ${pilotUsers.map((u) => `<@${u}>`).join(', ')} will be asked.` : '';
       await notifyOps(services, client, userId, `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${who}* of any new match. ${outcome}${watch}${fyi}${pilotNote}`);
-      // Evaluate this trigger right away regardless of its cadence
-      services.jiraPoller?.runOnce({ force: true, onlyId: savedId }).catch(() => {});
+      // Evaluate this trigger right away regardless of its cadence, and report like Run now does
+      // (a queued-for-digest match is otherwise invisible)
+      if (services.jiraPoller && savedId) {
+        const [stats] = await services.jiraPoller.runOnce({ force: true, onlyId: savedId });
+        if (stats) await notifyOps(services, client, userId, runSummaryLines(`▶️ First run of *${name}*`, jql, stats).join('\n'));
+      }
     } catch (err) {
       // Saved fine; only the follow-ups (Home refresh / ops / immediate run) hiccuped
       logger.warn(`[jiraTrigger] Post-save step failed for "${name}": ${errDetail(err)}`);

@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (191 passing, 19 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (192 passing, 19 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -284,7 +284,7 @@ src/
     opsNotifier.js  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (191 tests, 19 suites)
+tests/                         Jest (192 tests, 19 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -318,7 +318,7 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 | `replyHandler.js` | `message` (thread replies, non-bot) | Same for thread replies (root message holds the issue key). |
 | `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); clears `jira_prompts` on failure so the poller re-asks. |
 | `homeHandler.js` | `app_home_opened` | Builds the Home view (connection, notifications, how it works, persistent recent activity; trigger sections **admin-only**); exports `publishHome` for other handlers to refresh it. |
-| `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (Jira-trigger modal: ask type yes/no / risk review / collect (+ field list, one per line), notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; Run now / Re-ask; all outcomes reported to **ops** (not DM). |
+| `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (Jira-trigger modal: ask type yes/no / risk review / collect (+ field list, one per line), notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; runs the trigger once right after saving and posts the same summary as Run now (`runSummaryLines`: matched · not yet asked · already asked or waiting in a digest · sent · queued, with 🔔 lines for matches held for a digest); Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
 
 Button/menu payloads: the full context (issue key, proposed action, user, question ≤300 chars,
@@ -1025,6 +1025,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | Risk button fails: "Planned release is empty; PR PM owner is empty" | PR workflow validators on the target status | Set those fields on the Initiative (any status transition in PR requires them); consider a picker like Fix Version |
 | Home "recent activity" empty after a deploy | `activity_log` table missing → falls back to memory | Run `supabase/activity_log.sql` |
 | Risk review fired on Initiatives that aren't flagged any more | `Latest notification` is never cleared by the notifier; stamps older than the last run are leftovers | Handled: stamps older than `RISK_NOTIFICATION_MAX_AGE_DAYS` are skipped (Run-now summary shows "N stale notification(s)"); ask the recipients to press Handled on the ones already sent |
+| Run now says "N already asked or waiting in a digest" and the person got nothing | Their notification preference is a digest (hourly / daily); the match was queued, not dropped. The bot confirms a preference change in the person's DM ("You'll now get questions as a *hourly* digest") | Wait for the slot, or have them switch to *Immediate* in App Home — that flushes their queue at once. The first run after saving a trigger now reports queued matches with a 🔔 line |
 | Collect preview says "not found in what you wrote" / no Save button | The LLM couldn't find a required field in the text (or AI isn't configured) | Press *Add the missing part* and type the value into its field directly — typed values always win |
 | Collect ask arrived but the modal has no field inputs | Trigger saved with an empty `collect_fields` (migration not run → save failed → see modal error) | Run `supabase/collect_fields.sql`, edit the trigger, re-enter the field list |
 | Risk review fired on an Initiative that is only Overdue / Status mismatch / orange | Every notifier flag writes the stamp; the pilot wants red progress only | Handled: the stamp must match `RISK_NOTIFICATION_MATCH` (default `progress red`); the Run-now summary shows "N notification(s) not about …". Widen the regex if other flags should fire |
@@ -1033,7 +1034,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 191 tests in 19 suites:
+`npm test` → Jest, `tests/*.test.js`, 192 tests in 19 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1047,7 +1048,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change; `parseNotificationDate` / `notificationAge` (current year, year roll-back, unparseable = fresh, 8-day cutoff); `notificationMatches` (case-insensitive regex, empty = all, invalid regex = substring) |
 | `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; stale `Latest notification` stamps (older than `RISK_NOTIFICATION_MAX_AGE_DAYS`) are skipped without recording and counted in the Run-now summary; stamps that don't match `RISK_NOTIFICATION_MATCH` (orange, Overdue, Status mismatch…) are skipped the same way; collect trigger requests its field ids and DMs the PM owner an Answer/Skip ask with current values in the payload |
 | `collect` | Trigger field list parse/format round-trip + errors; `collectContextFor` current values; ask blocks (Answer/Skip, unique ids, ctx < 2000 chars); preview Save/Edit/Cancel vs missing-required (no Save); `mergeValues` precedence + 255 cap; modal prefill + slim metadata; `readCollectModal`; `sendDmQuestion` delegation; handlers: Answer opens modal with DM location, empty submit → inline error, explicit-only → no LLM, free text → LLM with typed field winning, LLM partial → "Almost there", LLM failure → note, Save → ONE `updateIssueFields` PUT + ✅ + answered + ops + FYI, save failure → ❌ + re-ask, Edit prefilled, Cancel restores ask, Skip |
-| `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question |
+| `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; save-time run posts the Run-now summary with queued matches called out |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
 
@@ -1125,6 +1126,10 @@ Chronological, with rationale (see `git log` for commits):
     `require_oauth` extras are deferred (both A1 fields are unguarded text fields), and *Cancel* restores
     the original ask instead of ending the conversation. The preview step is non-negotiable: the LLM
     never writes to Jira on its own, and a typed value always beats an extracted one.
+26. **Save-time run reports to ops.** Testing A1 with an hourly digest preference made the first
+    match "disappear": the run right after saving queued it silently, and the next Run now counted it
+    as already asked. The save-time run now posts the Run-now summary, and the summary distinguishes
+    "already asked or waiting in a digest" and marks queued matches with 🔔.
 
 ---
 

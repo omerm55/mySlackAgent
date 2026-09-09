@@ -93,6 +93,22 @@ describe('Jira trigger modal save — collect ask type', () => {
     expect(ack).toHaveBeenCalledWith({ response_action: 'errors', errors: { jt_collect_fields: expect.stringMatching(/must start with a field id/) } });
     expect(db.insertJiraTrigger).not.toHaveBeenCalled();
   });
+  test('after saving, the trigger is run once and the summary goes to ops (queued matches are called out)', async () => {
+    const { app, handlers } = fakeApp();
+    const db = { getActiveJiraTriggers: jest.fn().mockResolvedValue([]), insertJiraTrigger: jest.fn().mockResolvedValue({ id: 't1' }), updateJiraTrigger: jest.fn() };
+    const ops = { channelId: 'COPS', post: jest.fn().mockResolvedValue(undefined) };
+    const stats = { matched: 15, fresh: 14, sent: 0, queued: 1, fyi: 0, sentTo: [], queuedFor: ['PR-1436 → <@UADMIN> (hourly)'], skipped: ['PR-1429: personal trigger, Maya is not the creator'] };
+    const jiraPoller = { runOnce: jest.fn().mockResolvedValue([stats]) };
+    registerJiraTriggerHandler(app, { db, jiraService: { searchIssues: jest.fn().mockResolvedValue([]) }, opsNotifier: ops, jiraPoller, integrationCache: { getAll: jest.fn().mockResolvedValue([]) } });
+    const client = { views: { publish: jest.fn().mockResolvedValue({}), open: jest.fn() }, chat: { postMessage: jest.fn().mockResolvedValue({}) } };
+    const list = 'customfield_11822 | Customer-friendly name';
+    await handlers.create_jira_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: { ...base, jt_collect_fields: { value: txt(list) } } } }, client, logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } });
+    expect(jiraPoller.runOnce).toHaveBeenCalledWith({ force: true, onlyId: 't1' });
+    const summary = ops.post.mock.calls.map((c) => c[0]).find((m) => /First run of/.test(m));
+    expect(summary).toMatch(/15 issue\(s\) match · 14 not yet asked · 1 already asked or waiting in a digest · 0 DM\(s\) sent · 1 queued for digests/);
+    expect(summary).toMatch(/🔔 PR-1436 → <@UADMIN> \(hourly\) — held for their digest/);
+  });
+
   test('valid field list → collect_fields saved as JSON, default question names the fields, ops told', async () => {
     const { handlers, db, ops, client, logger } = setup();
     const ack = jest.fn();
