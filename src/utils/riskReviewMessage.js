@@ -76,6 +76,37 @@ function riskContextFor(issue) {
   };
 }
 
+const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+
+/**
+ * The notifier's text starts with "{Mmm DD} — …" (no year). Resolve it to a date, assuming the
+ * current year and rolling back a year if that would land more than 2 days in the future.
+ * @returns {Date|null} null when the text doesn't start with a recognisable stamp
+ */
+function parseNotificationDate(text, now = new Date()) {
+  const m = /^\s*([A-Za-z]{3})\.?\s+(\d{1,2})\b/.exec(String(text || ''));
+  if (!m) return null;
+  const month = MONTHS[m[1].toLowerCase()];
+  const day = parseInt(m[2], 10);
+  if (month === undefined || day < 1 || day > 31) return null;
+  let d = new Date(Date.UTC(now.getUTCFullYear(), month, day));
+  if (d.getTime() - now.getTime() > 2 * 24 * 3600 * 1000) d = new Date(Date.UTC(now.getUTCFullYear() - 1, month, day));
+  return d;
+}
+
+/**
+ * Is this notification older than `maxAgeDays`? The notifier never clears the field, so an old
+ * stamp means "was flagged once, not any more". Unparseable text is treated as fresh (never drop
+ * something we can't read) — callers may log it.
+ * @returns {{ stale: boolean, ageDays: number|null }}
+ */
+function notificationAge(text, now = new Date(), maxAgeDays = 8) {
+  const d = parseNotificationDate(text, now);
+  if (!d) return { stale: false, ageDays: null };
+  const ageDays = Math.floor((now.getTime() - d.getTime()) / (24 * 3600 * 1000));
+  return { stale: ageDays > maxAgeDays, ageDays };
+}
+
 /** "*Notes:* …" block — quoted preview or an explicit "empty". */
 function notesBlock(notes) {
   const text = notes
@@ -258,4 +289,5 @@ module.exports = {
   FIELDS, RISK_STATUSES, AT_RISK, ON_TRACK, STATUS_BUTTON,
   parseInterval, riskContextFor, statusChoices, buildRiskReviewBlocks, actionBlocks, afterStatusBlocks,
   sendRiskReview, sendFyi, notesEntry, prependNotes, issueLink, plainText, notesPreview, notesBlock,
+  parseNotificationDate, notificationAge,
 };

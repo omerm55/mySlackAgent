@@ -226,3 +226,23 @@ describe('Skip after a status change', () => {
     expect(ops.riskReviewAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'skipped Notes update' }));
   });
 });
+
+describe('notification age', () => {
+  const NOW = new Date('2026-09-09T12:00:00Z');
+  test('parses the notifier\'s "Mmm DD — …" stamp, assuming the current year', () => {
+    expect(rr.parseNotificationDate('Sep 7 — Progress orange 64%/exp 80%. Action: update progress', NOW).toISOString()).toBe('2026-09-07T00:00:00.000Z');
+    expect(rr.parseNotificationDate('Jul 06 — Status mismatch. Action: update Status', NOW).toISOString()).toBe('2026-07-06T00:00:00.000Z');
+    expect(rr.parseNotificationDate('[Dev Domain] Sep 7 — x', NOW)).toBeNull(); // prefix breaks the stamp → unknown, treated as fresh
+    expect(rr.parseNotificationDate('', NOW)).toBeNull();
+  });
+  test('a stamp in the future rolls back a year (December run read in January)', () => {
+    expect(rr.parseNotificationDate('Dec 29 — Overdue 3d', new Date('2027-01-03T00:00:00Z')).toISOString()).toBe('2026-12-29T00:00:00.000Z');
+  });
+  test('notificationAge: fresh within 8 days, stale beyond, unparseable = fresh', () => {
+    expect(rr.notificationAge('Sep 7 — x', NOW)).toEqual({ stale: false, ageDays: 2 });
+    expect(rr.notificationAge('Aug 31 — x', NOW)).toEqual({ stale: true, ageDays: 9 });
+    expect(rr.notificationAge('Jun 8 — x', NOW).stale).toBe(true);
+    expect(rr.notificationAge('garbage', NOW)).toEqual({ stale: false, ageDays: null });
+    expect(rr.notificationAge('Aug 31 — x', NOW, 14).stale).toBe(false);
+  });
+});

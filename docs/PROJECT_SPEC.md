@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (163 passing, 18 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (167 passing, 18 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -159,6 +159,12 @@ risk **and** refresh Notes", but nobody is forced). The Notes modal shows the cu
 input. The trigger uses **`watch_field = customfield_15525`**, so each weekly rewrite re-asks;
 an unchanged value never does. Field ids are overridable via `PR_*_FIELD` env vars.
 
+**Only the latest run counts.** The notifier never clears `Latest notification`, so an Initiative
+flagged once keeps the text for months. The bot parses the stamp the notifier writes (`Mmm DD — …`,
+current year, rolling back a year if that lands in the future) and skips notifications older than
+`RISK_NOTIFICATION_MAX_AGE_DAYS` (default 8, one weekly run plus slack) without recording them; a fresh
+stamp next week asks normally. Unparseable stamps are treated as fresh and logged.
+
 **FYI to the PM owner.** When the Dev owner is asked, the **PR PM owner** (`customfield_11909`) gets an
 informational DM at the same time — the same diagnosis, status, target and Notes, no buttons — and a one-line
 follow-up whenever the Dev owner acts ("set to High Risk", "updated Notes: …", "changed the target",
@@ -242,7 +248,7 @@ src/
     opsNotifier.js  dmQuestion.js  riskReviewMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (163 tests, 18 suites)
+tests/                         Jest (167 tests, 18 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -601,6 +607,7 @@ JiraPoller tick ─► trigger ask_type=risk_review, watch_field=cf[15525]
        stored watchedValue == current? skip : deletePromptsForIssue + treat as new
   ─► resolvePerson: user_field cf[11962] → first user → email → Slack id (fallback assignee → reporter)
   ─► scope=personal? only creator · pilot list set? only listed users (others skipped, not recorded)
+  ─► notificationAge(cf[15525]) > RISK_NOTIFICATION_MAX_AGE_DAYS? skip (stale leftover, not recorded)
   ─► FYI: fyiFieldFor → PM owner cf[11909] → Slack id ≠ Dev owner? sendFyi (no buttons) + payload.fyiSlackUserId
   ─► sendDmQuestion(payload{askType:'risk_review', risk:{notification,status,target}}) → sendRiskReview
 Dev owner clicks:
@@ -764,6 +771,7 @@ style base with `OPENAI_DEPLOYMENT` = deployment name (GPT-5.1). Uses `api-key` 
 | `CURRENT_RELEASE_VERSION` | no | Override "current release" for Fix Version suggestions |
 | `KEEP_ALIVE_URL`, `KEEP_ALIVE_INTERVAL_SEC`, `KEEP_ALIVE_DISABLED` | no | Self-ping (defaults from `RENDER_EXTERNAL_URL`, 300 s) |
 | `PR_LATEST_NOTIFICATION_FIELD`, `PR_NOTES_FIELD`, `PR_TARGET_FIELD`, `PR_DEV_OWNER_FIELD`, `PR_PM_OWNER_FIELD` | no | PR field ids for the risk review (defaults `customfield_15525` / `12958` / `11818` / `11962` / `11909`) |
+| `RISK_NOTIFICATION_MAX_AGE_DAYS` | no (8) | Risk reviews ignore `Latest notification` stamps older than this |
 | `RENDER_EXTERNAL_URL`, `PORT` | set by Render | |
 
 `.env.example` documents all of these; `render.yaml` declares them (`sync: false` for secrets).
@@ -901,12 +909,13 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | Saving a trigger shows "Could not save: … column … does not exist" inline in the modal | A migration in §6 hasn't been run yet (the modal stays open and the ops channel gets the same error) | Run the relevant SQL in §6, then Save again |
 | Risk button fails: "Planned release is empty; PR PM owner is empty" | PR workflow validators on the target status | Set those fields on the Initiative (any status transition in PR requires them); consider a picker like Fix Version |
 | Home "recent activity" empty after a deploy | `activity_log` table missing → falls back to memory | Run `supabase/activity_log.sql` |
+| Risk review fired on Initiatives that aren't flagged any more | `Latest notification` is never cleared by the notifier; stamps older than the last run are leftovers | Handled: stamps older than `RISK_NOTIFICATION_MAX_AGE_DAYS` are skipped (Run-now summary shows "N stale notification(s)"); ask the recipients to press Handled on the ones already sent |
 
 ---
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 163 tests in 18 suites:
+`npm test` → Jest, `tests/*.test.js`, 167 tests in 18 suites:
 
 | Suite | Covers |
 |---|---|
@@ -917,8 +926,8 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `jiraPollerQueue` | Send vs queue by preference |
 | `dmFixVersionOffer` | Offer rendering, unique action_ids, progress lines, fallback when Slack rejects blocks |
 | `dmQuestionFormat` | Template rendering (`{key} ({summary})` → one link, pipe-safety), headline dedup, button context |
-| `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change |
-| `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone |
+| `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change; `parseNotificationDate` / `notificationAge` (current year, year roll-back, unparseable = fresh, 8-day cutoff) |
+| `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; stale `Latest notification` stamps (older than `RISK_NOTIFICATION_MAX_AGE_DAYS`) are skipped without recording and counted in the Run-now summary |
 | `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
@@ -984,6 +993,9 @@ Chronological, with rationale (see `git log` for commits):
 22. **Save before ack.** Editing a trigger before its migration had run made the modal close and look
     like a silent revert (the error only reached ops). Both trigger modals now write to Supabase first
     and, on failure, answer the submission with an inline error so the modal stays open.
+23. **Stale notifications.** The first pilot run asked about six Initiatives of which four carried
+    stamps from June, July and August — flagged once, never cleared. The risk review now parses the
+    notifier's date stamp and only acts on notifications from the latest weekly run (8-day window).
 
 ---
 

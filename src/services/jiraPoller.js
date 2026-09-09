@@ -2,7 +2,11 @@
 
 const { sendDmQuestion } = require('../utils/dmQuestion');
 const { issueLink, issueLinkLabelled } = require('../utils/jiraLink');
-const { FIELDS: RISK_FIELDS, riskContextFor, sendFyi } = require('../utils/riskReviewMessage');
+const { FIELDS: RISK_FIELDS, riskContextFor, sendFyi, notificationAge } = require('../utils/riskReviewMessage');
+
+// Risk reviews only act on a notification from the latest weekly notifier run; older stamps are
+// leftovers the notifier never clears (env RISK_NOTIFICATION_MAX_AGE_DAYS, default 8).
+const RISK_MAX_AGE_DAYS = Math.max(1, parseInt(process.env.RISK_NOTIFICATION_MAX_AGE_DAYS || '8', 10) || 8);
 
 const normalizeWatched = (v) => (v === null || v === undefined ? '' : String(typeof v === 'object' ? JSON.stringify(v) : v).trim());
 const firstUser = (v) => (Array.isArray(v) ? v[0] : v) || null;
@@ -147,7 +151,7 @@ class JiraPoller {
 
   async _evaluateTrigger(trigger) {
     const tag = `[jiraPoller/${trigger.name}]`;
-    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, fyi: 0, pilotSkipped: 0, skipped: [], sentTo: [], queuedFor: [] };
+    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, fyi: 0, pilotSkipped: 0, stale: 0, skipped: [], sentTo: [], queuedFor: [] };
     const prefCache = new Map();
     // Pilot list: only these Slack users are asked / FYI'd while it is set
     const pilot = Array.isArray(trigger.pilot_slack_user_ids) && trigger.pilot_slack_user_ids.length
@@ -202,6 +206,19 @@ class JiraPoller {
         this.logger.warn(`${tag} Reached ${MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN} prompts this run — rest deferred to next run`);
         stats.skipped.push(`${fresh.length - sent} more deferred to the next run (cap ${MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN}/run)`);
         break;
+      }
+
+      // Risk review: ignore notifications older than the latest weekly run (not recorded, so a
+      // fresh stamp next week asks normally)
+      if (trigger.ask_type === 'risk_review') {
+        const text = issue.fields?.[RISK_FIELDS.NOTIFICATION];
+        const { stale, ageDays } = notificationAge(text, new Date(), RISK_MAX_AGE_DAYS);
+        if (ageDays === null) this.logger.warn(`${tag} ${issue.key}: notification has no recognisable date stamp — treating as fresh: "${String(text).slice(0, 60)}"`);
+        if (stale) {
+          stats.stale += 1;
+          this.logger.info(`${tag} ${issue.key}: notification is ${ageDays}d old (> ${RISK_MAX_AGE_DAYS}d) — skipping`);
+          continue;
+        }
       }
 
       const { person, source } = resolvePerson(issue, trigger);
@@ -317,6 +334,7 @@ class JiraPoller {
     }
     stats.sent = sent;
     if (stats.pilotSkipped) stats.skipped.push(`${stats.pilotSkipped} outside the pilot list (not recorded)`);
+    if (stats.stale) stats.skipped.push(`${stats.stale} stale notification(s) older than ${RISK_MAX_AGE_DAYS} days (not recorded)`);
     return stats;
   }
 

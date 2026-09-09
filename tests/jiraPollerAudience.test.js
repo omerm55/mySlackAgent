@@ -222,3 +222,41 @@ describe('poller: pilot list', () => {
     expect(s2.sent).toBe(2); expect(s2.pilotSkipped).toBe(0);
   });
 });
+
+describe('poller: stale notifications are skipped', () => {
+  const trigger = {
+    id: 't4', name: 'Risk', jql: 'x', question: '{link} was flagged.', scope: 'global',
+    notify: 'user_field', notify_field_id: FIELDS.DEV_OWNER, ask_type: 'risk_review', watch_field: FIELDS.NOTIFICATION,
+    poll_interval_min: 60, last_polled_at: null, fyi_field_id: null,
+  };
+  const today = new Date();
+  const stamp = (daysAgo) => {
+    const d = new Date(today.getTime() - daysAgo * 24 * 3600 * 1000);
+    return `${d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' })} ${d.getUTCDate()} — Progress red 1%/exp 50%. Action: update progress`;
+  };
+  const issue = (key, notif) => ({ key, fields: { summary: key, status: { name: 'On Track' }, reporter: person('r@x.com', 'R'), [FIELDS.DEV_OWNER]: [person('dev@x.com', 'Dev')], [FIELDS.NOTIFICATION]: notif, [FIELDS.TARGET]: null } });
+
+  test('only the latest run\'s notifications fire; old ones are counted, not recorded', async () => {
+    const jira = { searchIssues: jest.fn().mockResolvedValue([issue('PR-1', stamp(2)), issue('PR-2', stamp(30)), issue('PR-3', stamp(90))]) };
+    const db = {
+      getActiveJiraTriggers: jest.fn().mockResolvedValue([trigger]),
+      getPromptsForTrigger: jest.fn().mockResolvedValue([]),
+      recordPrompt: jest.fn().mockResolvedValue(undefined),
+      updateJiraTrigger: jest.fn().mockResolvedValue(undefined),
+      getUserPreference: jest.fn().mockResolvedValue(null),
+    };
+    const slack = {
+      users: { lookupByEmail: jest.fn().mockResolvedValue({ user: { id: 'UDEV' } }) },
+      chat: { postMessage: jest.fn().mockResolvedValue({ ts: '1' }) },
+      conversations: { open: jest.fn().mockResolvedValue({ channel: { id: 'D' } }) },
+    };
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    const poller = new JiraPoller({ jiraService: jira, db, slackClient: slack, logger });
+    const [stats] = await poller.runOnce({ force: true });
+    expect(stats.sent).toBe(1);
+    expect(stats.stale).toBe(2);
+    expect(stats.skipped).toEqual(expect.arrayContaining([expect.stringMatching(/2 stale notification/)]));
+    expect(db.recordPrompt).toHaveBeenCalledTimes(1);
+    expect(db.recordPrompt).toHaveBeenCalledWith('t4', 'PR-1', 'UDEV', expect.anything());
+  });
+});
