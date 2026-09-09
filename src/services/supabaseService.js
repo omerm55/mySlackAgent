@@ -224,6 +224,42 @@ class SupabaseService {
     });
   }
 
+  // ── activity_log (per-user history for App Home) ──────────────────────
+
+  async insertActivity(e) {
+    await this.client.post('/activity_log', {
+      ts: new Date(e.ts || Date.now()).toISOString(),
+      slack_user_id: e.slackUserId,
+      slack_user_name: e.slackUserName ?? null,
+      integration_name: e.integrationName ?? null,
+      trigger: e.trigger,
+      issue_key: e.issueKey,
+      field_name: e.fieldName ?? null,
+      field_value: e.fieldValue == null ? null : String(e.fieldValue),
+      success: e.success !== false,
+      error: e.error ?? null,
+    }, { headers: { Prefer: 'return=minimal' } });
+  }
+
+  /** Newest first, normalised to the audit-entry shape. */
+  async getRecentActivity(slackUserId, limit = 5) {
+    const res = await this.client.get('/activity_log', {
+      params: { slack_user_id: `eq.${slackUserId}`, select: '*', order: 'ts.desc', limit },
+    });
+    return (res.data ?? []).map((r) => ({
+      ts: new Date(r.ts).getTime(),
+      slackUserId: r.slack_user_id,
+      slackUserName: r.slack_user_name,
+      integrationName: r.integration_name,
+      trigger: r.trigger,
+      issueKey: r.issue_key,
+      fieldName: r.field_name,
+      fieldValue: r.field_value,
+      success: r.success,
+      error: r.error,
+    }));
+  }
+
   // ── user_preferences (notification digest) ────────────────────────────
 
   /** @returns {Promise<{ slack_user_id, digest_frequency, tz, last_digest_at }|null>} */

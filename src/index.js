@@ -71,6 +71,7 @@ const auditLog = new AuditLog();
 const userCache = new UserCache();
 
 const supabaseService = SupabaseService.fromEnv();
+auditLog.setDb(supabaseService); // persist per-user activity for the App Home
 
 // OAuth impersonation — active only when JIRA_OAUTH_CLIENT_ID is set.
 const oauthService = process.env.JIRA_OAUTH_CLIENT_ID

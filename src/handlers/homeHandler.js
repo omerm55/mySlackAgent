@@ -1,6 +1,6 @@
 'use strict';
 
-const { canManage } = require('../utils/admins');
+const { canManage, isAdmin } = require('../utils/admins');
 const { FREQUENCIES } = require('../services/digestScheduler');
 
 /**
@@ -27,29 +27,36 @@ function manageMenu(actionId, id, extraOptions = []) {
  */
 async function buildHomeBlocks(userId, services, logger) {
   const { oauthService, auditLog, integrationCache } = services;
+  // Trigger management is an admin surface; everyone else gets connection, notifications, activity.
+  const admin = isAdmin(userId);
 
   const hasOAuth = oauthService?.hasToken(userId) ?? false;
   const authUrl = oauthService?.generateAuthUrl(userId);
 
-  const allIntegrations = integrationCache ? await integrationCache.getAll() : [];
-  const visibleIntegrations = allIntegrations.filter(
-    (i) => i.scope !== 'personal' || i.createdBy === userId,
-  );
-
+  let visibleIntegrations = [];
   let jiraTriggers = [];
-  if (services.db) {
-    try {
-      jiraTriggers = (await services.db.getActiveJiraTriggers())
-        .filter((t) => t.scope !== 'personal' || t.created_by === userId);
-    } catch (err) {
-      logger?.warn(`[home] Could not load Jira triggers: ${err.message}`);
+  if (admin) {
+    const allIntegrations = integrationCache ? await integrationCache.getAll() : [];
+    visibleIntegrations = allIntegrations.filter((i) => i.scope !== 'personal' || i.createdBy === userId);
+    if (services.db) {
+      try {
+        jiraTriggers = (await services.db.getActiveJiraTriggers())
+          .filter((t) => t.scope !== 'personal' || t.created_by === userId);
+      } catch (err) {
+        logger?.warn(`[home] Could not load Jira triggers: ${err.message}`);
+      }
     }
   }
 
-  const userEntries = (auditLog?.entries ?? [])
-    .filter((e) => e.slackUserId === userId)
-    .slice(-5)
-    .reverse();
+  // Persistent per-user history when Supabase is configured; in-memory otherwise
+  let userEntries = [];
+  try {
+    userEntries = auditLog?.recentFor
+      ? await auditLog.recentFor(userId, 5)
+      : (auditLog?.entries ?? []).filter((e) => e.slackUserId === userId).slice(-5).reverse();
+  } catch (err) {
+    logger?.warn(`[home] Could not load recent activity: ${err.message}`);
+  }
 
   // Notification preference + how many prompts are waiting in the next digest
   let frequency = 'immediate';
@@ -120,6 +127,8 @@ async function buildHomeBlocks(userId, services, logger) {
     },
     { type: 'divider' },
 
+    // ── Admin only: trigger management ───────────────────────
+    ...(admin ? [
     // ── Channel triggers ─────────────────────────────────────
     {
       type: 'section',
@@ -193,6 +202,7 @@ async function buildHomeBlocks(userId, services, logger) {
       text: { type: 'mrkdwn', text: '_No Jira triggers yet._' },
     }]),
     { type: 'divider' },
+    ] : []),
 
     // ── How it works ──────────────────────────────────────────
     { type: 'section', text: { type: 'mrkdwn', text: '*How it works*' } },
@@ -210,7 +220,7 @@ async function buildHomeBlocks(userId, services, logger) {
     ...(userEntries.length === 0
       ? [{
           type: 'section',
-          text: { type: 'mrkdwn', text: '_No activity recorded yet this session. React to a Jira-linked message to get started._' },
+          text: { type: 'mrkdwn', text: '_No activity yet. It fills in as you react to Jira-linked messages or answer the bot\'s questions._' },
         }]
       : userEntries.map((e) => {
           const time = new Date(e.ts).toLocaleString('en-US', {

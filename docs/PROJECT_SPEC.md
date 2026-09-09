@@ -111,9 +111,12 @@ an attribution comment naming the Slack user.
 
 ### 2.6 App Home
 
-Shows OAuth status + Connect button; notification preference; channel triggers and Jira triggers
-with ➕ Create and per-row ⋯ menus (✏️ Edit, ▶️ Run now, 🔁 Re-ask open matches, 🗑 Delete); how it
-works; the user's recent activity.
+Everyone sees: OAuth status + Connect button; notification preference; how it works; **their recent
+activity** (last 5 Jira changes the bot made on their behalf — reactions, replies, DM Yes / free-text,
+risk-review actions — read from the persistent `activity_log` table, so it survives restarts).
+**Admins only** (`ADMIN_SLACK_USER_IDS`) additionally see channel triggers and Jira triggers with
+➕ Create and per-row ⋯ menus (✏️ Edit, ▶️ Run now, 🔁 Re-ask open matches, 🗑 Delete). Non-admins
+cannot create or see triggers at all.
 
 ### 2.7 Notification preferences (digests)
 
@@ -466,6 +469,28 @@ on conflict (version_name) do update
 
 Semantics: a release is "worked on" during its branch-out month; an epic accepted on a date ships in
 the release whose window contains that date (gaps roll forward). Sept 8 2026 → current = 2026.4.0.
+
+### 6.6 `activity_log` — per-user history for App Home (`supabase/activity_log.sql`)
+
+```sql
+create table if not exists public.activity_log (
+  id               uuid primary key default gen_random_uuid(),
+  ts               timestamptz not null default now(),
+  slack_user_id    text not null,
+  slack_user_name  text null,
+  integration_name text null,
+  trigger          text not null,   -- '👍 reaction' | 'thread reply' | 'DM Yes' | 'DM reply' | '🩺 risk review'
+  issue_key        text not null,
+  field_name       text null,
+  field_value      text null,
+  success          boolean not null default true,
+  error            text null
+);
+create index if not exists activity_log_user_ts_idx on public.activity_log (slack_user_id, ts desc);
+```
+
+`AuditLog.addEntry` writes here (fire-and-forget) in addition to the in-memory list used for the daily
+ops summary; `AuditLog.recentFor(user)` reads the newest 5 for the Home tab, falling back to memory.
 
 ### 6.5 `user_preferences` — notification digests (`supabase/user_preferences.sql`)
 
@@ -877,6 +902,9 @@ Chronological, with rationale (see `git log` for commits):
     the notifier's `Latest notification` field is the handoff — no skill change, no new secret. First
     non-yes/no ask type; introduced the generic `user_field` audience and `watch_field` re-ask, both
     reused by the A1/A2 plan. Supabase ingest endpoint for richer flags deferred.
+18. **Home tab split by role; activity made persistent.** Trigger management is hidden from
+    non-admins; "recent activity" moved from the restart-prone in-memory audit log to an
+    `activity_log` table and now also records DM Yes / free-text / risk-review actions.
 
 ---
 
@@ -884,7 +912,8 @@ Chronological, with rationale (see `git log` for commits):
 
 - **Hosting:** Render free tier sleeps; self-ping mitigates but cannot revive a sleeping instance.
 - **Single workspace / single Jira site.** No multi-tenant config.
-- **In-memory audit log, dedup and rate limits** reset on restart (Supabase holds the durable state).
+- **In-memory dedup and rate limits** reset on restart (Supabase holds the durable state; per-user
+  activity is persisted in `activity_log`, the daily ops summary still uses the in-memory list).
 - **Email-based user mapping** depends on Atlassian profile visibility; no manual override table yet.
 - **Re-ask re-asks everyone**, including users who answered No; outcomes aren't stored per prompt.
 - **`/send-dm` test endpoint is unauthenticated** (only useful for demos; remove or protect).

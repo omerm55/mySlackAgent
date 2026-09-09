@@ -67,6 +67,16 @@ function registerDmHandler(app, jiraService, services) {
     }
   }
 
+  /** Per-user activity record (App Home "recent activity" + daily ops summary). Never throws. */
+  async function record(client, entry) {
+    try {
+      const slackUserName = entry.slackUserId
+        ? await services.userCache?.getName?.(client, entry.slackUserId).catch(() => null)
+        : null;
+      services.auditLog?.addEntry({ ts: Date.now(), integrationName: entry.integrationName || 'DM', success: true, slackUserName, ...entry });
+    } catch { /* cosmetic */ }
+  }
+
   const needsFixVersion = (err) => /fix\s*version/i.test(err?.message || '');
 
   /**
@@ -198,6 +208,7 @@ function registerDmHandler(app, jiraService, services) {
             : `✅ Done — Fix Version set to *${versionName}*, *${issueLink(issueKey)}* updated: *${jiraFieldName}* = *${jiraFieldValue}*`);
       }
       await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue: `${fieldValue} (fixVersion: ${versionName})`, usingOAuth });
+      await record(client, { slackUserId, issueKey, trigger: 'DM Yes', fieldName, fieldValue: `${fieldValue} (Fix Version ${versionName})` });
     } catch (err) {
       logger.error(`[dm] Fix Version retry failed for ${issueKey}: ${err.message}`);
       if (dmChannelId && messageTs) {
@@ -254,6 +265,7 @@ function registerDmHandler(app, jiraService, services) {
             : `✅ Done — *${issueLink(issueKey)}* updated: *${jiraFieldName}* = *${jiraFieldValue}*`);
       }
       await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue, usingOAuth });
+      await record(client, { slackUserId, issueKey, trigger: 'DM Yes', fieldName, fieldValue });
     } catch (err) {
       logger.error(`[dm] Failed to update ${issueKey}: ${err.message}`);
       if (needsFixVersion(err) && channelId && messageTs) {
@@ -316,6 +328,7 @@ function registerDmHandler(app, jiraService, services) {
       }
       await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
       await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'set status', detail: status, usingOAuth });
+      await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'status', fieldValue: status });
     } catch (err) {
       await riskFail(client, { ...ctx, dmChannelId: channelId, messageTs, originalText }, `Couldn't move to ${status}`, err, logger, 'set status');
     }
@@ -378,6 +391,7 @@ function registerDmHandler(app, jiraService, services) {
       }
       await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
       await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'updated Notes', detail: `"${note.slice(0, 140)}"`, usingOAuth });
+      await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'Notes', fieldValue: note.slice(0, 80) });
     } catch (err) {
       await riskFail(client, ctx, "Couldn't update Notes", err, logger, 'update Notes');
     }
@@ -446,6 +460,7 @@ function registerDmHandler(app, jiraService, services) {
       }
       await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
       await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'target', detail, usingOAuth });
+      await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'Project target', fieldValue: clear ? 'cleared' : newEnd });
     } catch (err) {
       await riskFail(client, ctx, "Couldn't update the target", err, logger, 'move target');
     }
@@ -461,6 +476,7 @@ function registerDmHandler(app, jiraService, services) {
     }
     await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
     await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'handled (no change)' });
+    await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'acknowledged', fieldValue: 'no change' });
     logger.info(`[risk] ${issueKey} marked handled by ${slackUserId}`);
   });
 
@@ -719,6 +735,13 @@ function registerDmHandler(app, jiraService, services) {
           didSomething ? `✅ ${confirmation} (${issueLink(issueKey)})` : confirmation);
       }
       await services.opsNotifier?.dmLlmDecision({ slackUserId, issueKey, userText, decision });
+      if (didSomething) {
+        const what = decision.action === 'transition' ? `status = ${decision.transitionTo || transitionTo}`
+          : decision.action === 'update_field' ? `${jiraFieldName || 'status'} = ${decision.fieldValue ?? jiraFieldValue ?? transitionTo}`
+            : decision.comment ? 'comment added' : decision.assignee ? `assigned to ${decision.assignee}` : 'updated';
+        const [fieldName, ...rest] = what.split(' = ');
+        await record(client, { slackUserId, issueKey, trigger: 'DM reply', fieldName, fieldValue: rest.join(' = ') || '✓' });
+      }
     } catch (err) {
       logger.error(`[dm] LLM-driven action failed for ${issueKey}: ${err.message}`);
       if (needsFixVersion(err) && dmChannelId && messageTs) {
