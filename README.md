@@ -87,3 +87,4 @@ src/
 - **Full project specification** (architecture, data model, flows, LLM prompts, external configuration, operations runbook, productization plan): [`docs/PROJECT_SPEC.md`](docs/PROJECT_SPEC.md)
 - Earlier architecture notes: [`docs/architecture.md`](docs/architecture.md)
 - Scenario catalog (35 Jira asks mapped to app capabilities): [`docs/SCENARIO_CATALOG.md`](docs/SCENARIO_CATALOG.md)
+- Working rules for contributors and AI sessions (spec-maintenance checklist): [`CLAUDE.md`](CLAUDE.md)

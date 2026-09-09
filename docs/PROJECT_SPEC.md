@@ -12,6 +12,10 @@ This document is written so that a person **or an LLM with no prior context** ca
 system does, how it is built, how to operate it, and what remains for production. Every script,
 SQL statement and configuration used so far is included verbatim.
 
+**Maintenance rule:** this spec is updated in the same commit as any change to behaviour, schema,
+configuration, prompts or operations. The per-section checklist lives in the repository root
+`CLAUDE.md`; a change without its spec update is treated as incomplete.
+
 ---
 
 ## Table of contents
@@ -1004,6 +1008,8 @@ Ordered by value ÷ effort; each item is independently shippable.
 - LLM prompt/response logging with PII controls for evaluation.
 
 ### 16.8 Engineering hygiene
+- CI guard for the maintenance rule: fail a PR that changes `src/` or `supabase/` without touching
+  `docs/PROJECT_SPEC.md` (a `git diff --name-only` check in GitHub Actions is enough).
 - CI (GitHub Actions): lint, `npm test`, dependency audit, deploy on green.
 - ESLint/Prettier config; JSDoc → TypeScript migration or type-checking via `checkJs`.
 - Remove legacy paths (`pendingQuestions`, JSON config loaders) once confirmed unused; update README
