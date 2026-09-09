@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (121 passing).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (149 passing, 17 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -221,10 +221,10 @@ src/
     pendingQuestions.js        Legacy in-memory store (kept for API compatibility)
   server/callbackServer.js     HTTP: /oauth/callback, /health, /send-dm
   utils/
-    opsNotifier.js  dmQuestion.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
-    admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js  alerting.js  userCache.js
-supabase/                      SQL for all tables (see §6)
-tests/                         Jest (121 tests)
+    opsNotifier.js  dmQuestion.js  riskReviewMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
+    admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
+supabase/                      SQL for all tables and migrations (see §6)
+tests/                         Jest (149 tests, 17 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -257,8 +257,8 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 | `reactionHandler.js` | `reaction_added` | Match channel triggers by channel; fetch message; extract issue keys; per-trigger scope/allowlist/rate/dedup; update field via user OAuth or service account; thread confirmation; audit + ops. |
 | `replyHandler.js` | `message` (thread replies, non-bot) | Same for thread replies (root message holds the issue key). |
 | `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_move_target`, `risk_handled`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; clears `jira_prompts` on failure so the poller re-asks. |
-| `homeHandler.js` | `app_home_opened` | Builds the Home view; exports `publishHome` for other handlers to refresh it. |
-| `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds; validates JQL against Jira before saving; Run now / Re-ask; all outcomes reported to **ops** (not DM). |
+| `homeHandler.js` | `app_home_opened` | Builds the Home view (connection, notifications, how it works, persistent recent activity; trigger sections **admin-only**); exports `publishHome` for other handlers to refresh it. |
+| `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (Jira-trigger modal: ask type yes/no vs risk review, notify reporter/assignee/user field + field id, re-ask watch field, cadence, action); validates JQL against Jira before saving; Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
 
 Button/menu payloads: the full context (issue key, proposed action, user, question ≤300 chars,
@@ -285,9 +285,11 @@ In-memory Map is a cache over the `oauth_tokens` table.
 Methods per table (see §6): tokens (`upsertToken`, `getToken`, `getAllTokens`, `deleteToken`),
 integrations (`getActiveIntegrations`, `upsertIntegration`, `updateIntegration`, `deactivateIntegration`),
 jira_triggers (`getActiveJiraTriggers`, `insertJiraTrigger`, `updateJiraTrigger`, `deactivateJiraTrigger`),
-jira_prompts (`getPromptedIssueKeys`, `recordPrompt(…, {payload, delivered})`, `deletePromptsForIssue`,
-`deletePromptsForTrigger`, `getPendingPrompts`, `markPromptsDelivered`), release_calendar
-(`getReleaseCalendar`), user_preferences (`getUserPreference`, `getDigestUsers`, `upsertUserPreference`).
+jira_prompts (`getPromptedIssueKeys`, `getPromptsForTrigger`, `recordPrompt(…, {payload, delivered})`,
+`updatePromptPayload`, `markPromptAnswered`, `deletePromptsForIssue`, `deletePromptsForTrigger`,
+`getPendingPrompts`, `markPromptsDelivered`), release_calendar (`getReleaseCalendar`), user_preferences
+(`getUserPreference`, `getDigestUsers`, `upsertUserPreference`), activity_log (`insertActivity`,
+`getRecentActivity`).
 
 **`integrationCache.js`** — merges static integrations with `integrations` rows (normalised to
 camelCase), refreshes every 60 s, `invalidate()` on writes.
@@ -326,8 +328,8 @@ Returns `{pick, reason, alternative, acceptedAt, statusName, candidates, childre
 "current" = window containing today (or `CURRENT_RELEASE_VERSION`).
 
 **`llmService.js`** — `fromEnv()` picks provider by key precedence OpenAI → Gemini → Anthropic.
-`interpretJiraResponse(...)` and `suggestFixVersion(...)` both call `_callJson(systemPrompt, user)`
-and parse strict JSON. Azure OpenAI is detected by `OPENAI_BASE_URL` (uses `api-key` header,
+`interpretJiraResponse(...)`, `suggestFixVersion(...)` and `tidyNote(...)` all call
+`_callJson(systemPrompt, user)` and parse strict JSON. Azure OpenAI is detected by `OPENAI_BASE_URL` (uses `api-key` header,
 `OPENAI_DEPLOYMENT` as model, `max_completion_tokens`). Prompts in §8.
 
 ### 5.4 Utils
@@ -337,7 +339,9 @@ the Yes/No/Reply message, optional Connect block, no key prefix if the question 
 issue), `jiraLink` (`issueUrl`, `issueLink`, `issueLinkLabelled` with link-safe labels — `|`→`∣`,
 `<>&` escaped), `jiraLinkParser.extractJiraIssueKeys`, `keepAlive` (self-GET `/health` every 5 min),
 `withTimeout`/`withTimeoutOr`, `admins.isAdmin/canManage` (`ADMIN_SLACK_USER_IDS`), `dedupCache`,
-`rateLimiter`, `auditLog` (+ daily summary), `alerting` (error threshold → ops), `userCache`, `logger`.
+`rateLimiter`, `auditLog` (in-memory list for the daily ops summary **plus** fire-and-forget persistence
+to `activity_log`; `recentFor(user)` feeds the Home tab), `alerting` (error threshold → ops), `userCache`,
+`logger`.
 
 ---
 
@@ -558,6 +562,24 @@ Home "Connect Jira" / DM "🔗 Connect Jira" (URL button) ─► auth.atlassian.
 Permission: creator or ADMIN_SLACK_USER_IDS. Admins may set scope=global.
 ```
 
+### 7.6 Risk review (notifier flag → Dev owner → act)
+
+```
+rd-initiative-notifier (weekly, Claude scheduled task) ─► writes cf[15525] "Latest notification" on flagged Initiatives
+JiraPoller tick ─► trigger ask_type=risk_review, watch_field=cf[15525]
+  ─► searchIssues(jql, + notify_field_id + watch field + target) ─► for each issue:
+       stored watchedValue == current? skip : deletePromptsForIssue + treat as new
+  ─► resolvePerson: user_field cf[11962] → first user → email → Slack id (fallback assignee → reporter)
+  ─► sendDmQuestion(payload{askType:'risk_review', risk:{notification,status,target}}) → sendRiskReview
+Dev owner clicks:
+  [Low/High Risk | Off Track | Back On Track] ─► transitionIssue as user ─► ✅ + keep [📝 Update Notes]
+  [📝 Update Notes] ─► modal ─► llm.tidyNote (fallback raw) ─► prepend "YYYY-MM-DD (Name): …" to cf[12958]
+  [📅 Move / clear target] ─► modal (date | clear) ─► cf[11818] = {"start","end"} JSON string | null
+  [✅ Handled] ─► answered_at only
+Every action ─► markPromptAnswered ─► ops riskReviewAction ─► activity_log
+Failure ─► ❌ with Jira's error ─► deletePromptsForIssue (re-asked next run)
+```
+
 ---
 
 ## 8. LLM usage
@@ -708,6 +730,7 @@ style base with `OPENAI_DEPLOYMENT` = deployment name (GPT-5.1). Uses `api-key` 
 | `JIRA_MAX_PROMPTS_PER_RUN` | no (10) | Max DMs one trigger sends per run |
 | `CURRENT_RELEASE_VERSION` | no | Override "current release" for Fix Version suggestions |
 | `KEEP_ALIVE_URL`, `KEEP_ALIVE_INTERVAL_SEC`, `KEEP_ALIVE_DISABLED` | no | Self-ping (defaults from `RENDER_EXTERNAL_URL`, 300 s) |
+| `PR_LATEST_NOTIFICATION_FIELD`, `PR_NOTES_FIELD`, `PR_TARGET_FIELD`, `PR_DEV_OWNER_FIELD` | no | PR field ids for the risk review (defaults `customfield_15525` / `12958` / `11818` / `11962`) |
 | `RENDER_EXTERNAL_URL`, `PORT` | set by Render | |
 
 `.env.example` documents all of these; `render.yaml` declares them (`sync: false` for secrets).
@@ -839,12 +862,14 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | Transition fails "A Fix Version is required" | Workflow validator | Bot offers suggestion + picker automatically |
 | Only 50 issues found | (fixed) pagination | Now follows `nextPageToken` |
 | 400 saving a trigger | Column mismatch / missing migration | Run the relevant SQL in §6 |
+| Risk button fails: "Planned release is empty; PR PM owner is empty" | PR workflow validators on the target status | Set those fields on the Initiative (any status transition in PR requires them); consider a picker like Fix Version |
+| Home "recent activity" empty after a deploy | `activity_log` table missing → falls back to memory | Run `supabase/activity_log.sql` |
 
 ---
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 121 tests:
+`npm test` → Jest, `tests/*.test.js`, 149 tests in 17 suites:
 
 | Suite | Covers |
 |---|---|
@@ -855,6 +880,9 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `jiraPollerQueue` | Send vs queue by preference |
 | `dmFixVersionOffer` | Offer rendering, unique action_ids, progress lines, fallback when Slack rejects blocks |
 | `dmQuestionFormat` | Template rendering (`{key} ({summary})` → one link, pipe-safety), headline dedup, button context |
+| `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask |
+| `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row |
+| `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
 
 Tests mock Slack/Jira/Supabase clients; no network. Ad-hoc harnesses used during development live
@@ -918,6 +946,10 @@ Chronological, with rationale (see `git log` for commits):
 - **Re-ask re-asks everyone**, including users who answered No; outcomes aren't stored per prompt.
 - **`/send-dm` test endpoint is unauthenticated** (only useful for demos; remove or protect).
 - **Slack rate limits** are not centrally managed (bursts capped only by `JIRA_MAX_PROMPTS_PER_RUN`).
+- **PR workflow validators** ("Planned release" and "PR PM owner" must be set for any status change)
+  are surfaced as Jira's error text on the risk-review buttons but not yet offered a fix-up picker.
+- **Risk review re-asks track the field, not the outcome:** a Dev owner who clicks Handled is asked
+  again on the next notifier run if the field is rewritten (by design — new run, new ask).
 - **Digest slots are fixed** (09:00 / 15:00); no per-user time choice yet.
 - **LLM output** is validated structurally, not semantically; reasons are shown to users as-is.
 - **Legacy code paths:** `pendingQuestions.js`, `config/*.json` loaders, Docker/pm2 files are kept
