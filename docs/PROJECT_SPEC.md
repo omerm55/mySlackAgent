@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (228 passing, 25 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (236 passing, 26 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -103,7 +103,13 @@ only has an effect together with `scope=global`. Typical path: personal → glob
 - **No** records a decline.
 - **💬 Reply** opens a modal; free text such as *"not yet, waiting on QA"*, *"yes but set it to Needs
   Review"*, *"move it to In Review and assign to Gaby"* is interpreted by an LLM into a structured
-  action (update field / transition / comment / assign / no-op) and executed.
+  action (update field / transition / comment / assign / no-op) and shown back as a **preview**:
+  *"🤖 Here's what I understood — nothing is changed yet"* with the bullet list of intended changes,
+  the person's own words quoted, and **✅ Confirm · ✏️ Edit reply · Cancel**. Nothing reaches Jira until
+  Confirm. *Edit reply* reopens the modal with their text; *Cancel* restores the original Yes/No/Reply
+  ask; a `no_action` decision needs no confirmation and just finalises the message; an LLM failure leaves
+  the Yes/No/Reply buttons in place. **The LLM never writes to Jira on its own** — this and the collect
+  ask both require an explicit human confirmation of the exact change.
 - If the user hasn't connected Jira, the question carries a **🔗 Connect Jira** button.
 - **OAuth is required for writes.** Pressing Yes / a risk button / Save / Reply without a connection
   writes nothing: the ask is put back exactly as it was, with its buttons, plus *"🔐 Connect Jira first,
@@ -304,7 +310,7 @@ src/
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (Sept 2026 answer to the March security review), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (228 tests, 25 suites)
+tests/                         Jest (236 tests, 26 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -336,7 +342,7 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 |---|---|---|
 | `reactionHandler.js` | `reaction_added` | Match channel triggers by channel; fetch message; extract issue keys; per-trigger scope/allowlist/**OAuth gate** (no token and `allowBotFallback` false → thread reply "connect, then react again" + auth DM + ops `reactionFiltered`, nothing written)/rate/dedup; update field via user OAuth (or the service account when the trigger allows it, with attribution comment); thread confirmation; audit + ops. |
 | `replyHandler.js` | `message` (thread replies, non-bot) | Same for thread replies (root message holds the issue key), including the OAuth gate. |
-| `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); **`resolveJira(user, client, ctx)`** returns the user's client, the service account only when `ctx.allowFallback`, else `null` → **`needsConnect`** re-renders the ask (the message's own blocks, or rebuilt from ctx) with a Connect nudge and leaves `jira_prompts` alone; modal openers check `canWrite` before opening; clears `jira_prompts` on failure so the poller re-asks. Pino logs carry issue keys, actions and text *lengths* only — never the user's text or extracted values (those go to the ops channel). |
+| `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_reply_confirm`, `jira_reply_edit`, `jira_reply_cancel`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text is **preview-then-confirm** (`buildReplyPreviewBlocks` → `executeDecision`; the LLM never writes unconfirmed); Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); **`resolveJira(user, client, ctx)`** returns the user's client, the service account only when `ctx.allowFallback`, else `null` → **`needsConnect`** re-renders the ask (the message's own blocks, or rebuilt from ctx) with a Connect nudge and leaves `jira_prompts` alone; modal openers check `canWrite` before opening; clears `jira_prompts` on failure so the poller re-asks. Pino logs carry issue keys, actions and text *lengths* only — never the user's text or extracted values (those go to the ops channel). |
 | `homeHandler.js` | `app_home_opened`; action `home_disconnect_jira`; view `home_disconnect_jira_modal` | Builds the Home view (connection with Connect / Disconnect, notifications, how it works, persistent recent activity; trigger sections **admin-only**); Disconnect → confirm modal → `oauthService.disconnect` → DM + ops line + Home refresh; exports `publishHome` for other handlers to refresh it. |
 | `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (both modals: admin-only **Jira identity** checkbox `allow_bot_fallback`, default off; Jira-trigger modal: ask type yes/no / risk review / collect (+ field list, one per line), notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; runs the trigger once right after saving and posts the same summary as Run now (`runSummaryLines`: matched · not yet asked · already asked or waiting in a digest · sent · queued, with 🔔 lines for matches held for a digest); Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
@@ -442,7 +448,7 @@ Returns `{pick, reason, alternative, acceptedAt, statusName, candidates, childre
 
 ### 5.4 Utils
 
-`tokenCrypto.TokenCrypto` (`encrypt` → `enc:v1:<iv>:<tag>:<data>` base64url, `decrypt` with legacy plaintext passthrough and previous-key fallback, `isEncrypted`, `isCurrent`, `fromEnv`), `opsNotifier` (all ops messages, incl. `riskReviewAction` and `collectAction`), `dmQuestion.sendDmQuestion(client, userId, context, _, ops)` (builds
+`tokenCrypto.TokenCrypto` (`encrypt` → `enc:v1:<iv>:<tag>:<data>` base64url, `decrypt` with legacy plaintext passthrough and previous-key fallback, `isEncrypted`, `isCurrent`, `fromEnv`), `opsNotifier` (all ops messages, incl. `riskReviewAction` and `collectAction`), `dmQuestion` (`sendDmQuestion`, `buildYesNoBlocks`, `connectBlocks`, `describeDecision` → human-readable list of an LLM decision's effects, `buildReplyPreviewBlocks` → preview + Confirm/Edit/Cancel with a compacted decision in the button value) (builds
 the Yes/No/Reply message, optional Connect block, no key prefix if the question already names the
 issue), `jiraLink` (`issueUrl`, `issueLink`, `issueLinkLabelled` with link-safe labels — `|`→`∣`,
 `<>&` escaped), `jiraLinkParser.extractJiraIssueKeys`, `keepAlive` (self-GET `/health` every 5 min),
@@ -678,7 +684,11 @@ User clicks Yes ─► dmHandler.resolveJira(user, ctx): own token → as user �
   ├─ ok ─► message replaced with ✅ (issue linked) ─► ops
   ├─ "Fix Version is required" ─► offerFixVersion (progress ≤5s/stage) ─► [Use X & retry][Use Y instead][Choose another…]
   └─ other error ─► ❌ + deletePromptsForIssue (poller re-asks next run)
-User clicks 💬 Reply ─► modal ─► LLM interpretJiraResponse ─► execute (transition/field/comment/assign) ─► ✅/❌
+User clicks 💬 Reply ─► modal ─► LLM interpretJiraResponse ─► *preview* (nothing written) + ops "proposes"
+  ├─ [✅ Confirm]    ─► execute (transition/field/comment/assign) as the user ─► ✅/❌ ─► ops decision
+  ├─ [✏️ Edit reply] ─► modal again, prefilled with their text
+  ├─ [Cancel]        ─► original Yes/No/Reply ask restored (nothing written) ─► ops
+  └─ no_action / LLM error ─► message finalised / Yes-No buttons kept, nothing written
 ```
 
 ### 7.3 Digest delivery
@@ -841,6 +851,9 @@ Respond ONLY with valid JSON (no markdown fences):
 
 User message: Initiative key + summary, the notifier's diagnosis, and the owner's text verbatim. Any
 error or empty result → the raw text is written unchanged.
+
+The reply interpretation (§8.1) is **never executed directly**: its decision is rendered as a preview the
+person must confirm (§2.3, §7.2).
 
 ### 8.4 Field extraction for collect asks (`COLLECT_FIELDS_PROMPT`)
 
@@ -1135,7 +1148,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 228 tests in 25 suites:
+`npm test` → Jest, `tests/*.test.js`, 236 tests in 26 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1149,6 +1162,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change; `parseNotificationDate` / `notificationAge` (current year, year roll-back, unparseable = fresh, 8-day cutoff); `notificationMatches` (case-insensitive regex, empty = all, invalid regex = substring) |
 | `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; stale `Latest notification` stamps (older than `RISK_NOTIFICATION_MAX_AGE_DAYS`) are skipped without recording and counted in the Run-now summary; stamps that don't match `RISK_NOTIFICATION_MATCH` (orange, Overdue, Status mismatch…) are skipped the same way; collect trigger requests its field ids and DMs the PM owner an Answer/Skip ask with current values in the payload; every payload carries `allowFallback` |
 | `collect` | Trigger field list parse/format round-trip + errors; `collectContextFor` current values + certified/timing; `visibilityLine`; certified line in DM and modal, absent otherwise; ask blocks (Answer/Skip, unique ids, ctx < 2000 chars); preview Save/Edit/Cancel vs missing-required (no Save); `mergeValues` precedence + 255 cap; modal prefill + slim metadata; `readCollectModal`; `sendDmQuestion` delegation; handlers: Answer opens modal with DM location, empty submit → inline error, explicit-only → no LLM, free text → LLM with typed field winning, LLM partial → "Almost there", LLM failure → note, Save → ONE `updateIssueFields` PUT + ✅ + answered + ops + FYI, save failure → ❌ + re-ask, Edit prefilled, Cancel restores ask, Skip |
+| `dmReplyPreview` | Modal submit previews and writes nothing (ops "proposed", not "decision"); Confirm applies transition + comment + assignee and reports to ops; Cancel restores the Yes/No/Reply ask; Edit reply reopens the modal prefilled; `no_action` finalises without buttons; LLM failure keeps the ask actionable; the preview button value stays under Slack's 2000-char cap; `describeDecision` renders each change kind |
 | `dmRequireOauth` | Yes without token/fallback → nothing written, ask restored with its buttons + Connect, prompt kept, ops told; with fallback → bot writes + nudge; with token → user writes; a second nudge does not stack; Reply / Update Notes / Answer without token → modal not opened; Notes modal submitted without token → ask rebuilt from ctx; risk status with fallback / token; No and Handled still work; all three ctx builders carry `allowFallback` |
 | `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; save-time run posts the Run-now summary with queued matches called out; Jira identity checkbox → `allow_bot_fallback` on both trigger kinds (default false; ops line says OAuth required / bot may act) |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), Connect (async URL) vs Disconnect by connection state, persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
@@ -1274,6 +1288,12 @@ Chronological, with rationale (see `git log` for commits):
     The exception is a visible admin checkbox (Home shows 🤖), off for every existing trigger.
     **Migration `supabase/require_oauth.sql` must be run before this deploys.** See
     `SECURITY_SUMMARY.md` F1 and §5 item 5.
+32. **Preview before every LLM-driven write.** The free-text Reply path used to interpret and execute in
+    one step — the last place where the LLM changed Jira without a human seeing the exact change. It now
+    renders the decision ("Move PR-1 to Needs Review · Add a comment: … · Assign to Gaby") with Confirm /
+    Edit reply / Cancel, reusing the shape the collect ask already had. `no_action` needs no confirmation;
+    an LLM error leaves the Yes/No buttons; Cancel restores the ask. The ops channel now distinguishes
+    *proposed* from *applied*. Closes the security summary's open item on unpreviewed LLM writes.
 
 ---
 
@@ -1296,7 +1316,8 @@ Chronological, with rationale (see `git log` for commits):
 - **The risk-review flag filter is global** (`RISK_NOTIFICATION_MATCH` applies to every `risk_review`
   trigger). A per-trigger pattern (e.g. one trigger for red progress, another for Overdue) needs a
   `jira_triggers.notification_match` column + modal input — deferred until a second trigger exists.
-- **LLM output** is validated structurally, not semantically; reasons are shown to users as-is.
+- **LLM output** is validated structurally, not semantically; reasons are shown to users as-is. Every
+  LLM-derived change is confirmed by the person before it is written (reply preview, collect preview).
 - **Legacy code paths:** `config/*.json` loaders, Docker/pm2 files are kept but not exercised in production.
 
 ---

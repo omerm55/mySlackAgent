@@ -4,7 +4,7 @@ const { issueLink } = require('../utils/jiraLink');
 const { suggestFixVersion } = require('../services/fixVersionSuggester');
 const riskReview = require('../utils/riskReviewMessage');
 const collect = require('../utils/collectMessage');
-const { buildYesNoBlocks, connectBlocks } = require('../utils/dmQuestion');
+const { buildYesNoBlocks, connectBlocks, buildReplyPreviewBlocks, describeDecision, yesNoHeadline } = require('../utils/dmQuestion');
 const { logger: baseLogger } = require('../utils/logger');
 const { withTimeout } = require('../utils/withTimeout');
 
@@ -845,31 +845,16 @@ function registerDmHandler(app, jiraService, services) {
 
   // ── Reply → open modal ────────────────────────────────────────────────────
 
-  app.action('jira_reply', async ({ ack, body, client, logger }) => {
-    await ack();
-    let context;
-    try { context = JSON.parse(body.actions[0].value); } catch {
-      logger.error('[dm] Could not parse button context for Reply');
-      return;
-    }
-    if (!canWrite(context)) { await needsConnect(client, context, body, 'reply', logger); return; }
-
-    // Embed channel + message ts so the view handler can update the original msg
-    const metadata = JSON.stringify({
-      ...context,
-      dmChannelId: body.channel?.id,
-      messageTs: body.message?.ts,
-      originalText: body.message?.text || '',
-    });
-
+  /** The free-text reply modal; `initialText` prefills it when the person comes back via "Edit reply". */
+  async function openReplyModal(client, triggerId, context, initialText = '') {
     await client.views.open({
-      trigger_id: body.trigger_id,
+      trigger_id: triggerId,
       view: {
         type: 'modal',
         callback_id: 'jira_response_modal',
-        private_metadata: metadata,
+        private_metadata: JSON.stringify(context),
         title: { type: 'plain_text', text: 'Reply to Jira Bot' },
-        submit: { type: 'plain_text', text: 'Send' },
+        submit: { type: 'plain_text', text: 'Preview' },
         close: { type: 'plain_text', text: 'Cancel' },
         blocks: [
           {
@@ -889,15 +874,36 @@ function registerDmHandler(app, jiraService, services) {
               type: 'plain_text_input',
               action_id: 'response_input',
               multiline: true,
+              ...(initialText ? { initial_value: initialText.slice(0, 3000) } : {}),
               placeholder: { type: 'plain_text', text: 'Type your answer — e.g. "Yes", "Not yet, waiting on QA", "Yes but set it to Needs Review instead"…' },
             },
+            hint: { type: 'plain_text', text: 'I\'ll show you what I understood before anything is changed in Jira.' },
           },
         ],
       },
     });
+  }
+
+  app.action('jira_reply', async ({ ack, body, client, logger }) => {
+    await ack();
+    let context;
+    try { context = JSON.parse(body.actions[0].value); } catch {
+      logger.error('[dm] Could not parse button context for Reply');
+      return;
+    }
+    if (!canWrite(context)) { await needsConnect(client, context, body, 'reply', logger); return; }
+
+    // Embed channel + message ts so the view handler can update the original msg
+    const metadata = {
+      ...context,
+      dmChannelId: body.channel?.id,
+      messageTs: body.message?.ts,
+      originalText: (body.message?.text || '').slice(0, 600),
+    };
+    await openReplyModal(client, body.trigger_id, metadata);
   });
 
-  // ── Modal submitted → LLM interprets → execute ────────────────────────────
+  // ── Modal submitted → LLM interprets → PREVIEW (nothing written yet) ──────
 
   app.view('jira_response_modal', async ({ ack, body, view, client, logger }) => {
     await ack(); // closes the modal immediately
@@ -916,7 +922,7 @@ function registerDmHandler(app, jiraService, services) {
     if (!llmService) {
       if (dmChannelId && messageTs) {
         await replaceButtons(client, dmChannelId, messageTs, originalText,
-          '⚠️ AI interpretation is not configured (ANTHROPIC_API_KEY missing). Please use the Yes/No buttons.');
+          '⚠️ AI interpretation is not configured. Please use the Yes/No buttons.', [buildYesNoBlocks(context, slackUserId)[1]]);
       }
       return;
     }
@@ -936,18 +942,43 @@ function registerDmHandler(app, jiraService, services) {
       logger.error(`[dm] LLM error: ${err.message}`);
       if (dmChannelId && messageTs) {
         await replaceButtons(client, dmChannelId, messageTs, originalText,
-          `❌ AI failed to interpret your response: ${err.message}`);
+          `❌ AI failed to interpret your response: ${err.message}\n_Try again with the buttons below._`, [buildYesNoBlocks(context, slackUserId)[1]]);
       }
       await services.opsNotifier?.dmLlmDecision({ slackUserId, issueKey, userText, decision: {}, error: err.message });
       return;
     }
 
+    // Nothing to do → say so, no preview needed (and nothing to confirm)
+    if (!describeDecision(decision, context).length) {
+      if (dmChannelId && messageTs) {
+        await replaceButtons(client, dmChannelId, messageTs, originalText, decision.confirmationMessage || 'OK, no changes made.');
+      }
+      await services.opsNotifier?.dmLlmDecision({ slackUserId, issueKey, userText, decision });
+      return;
+    }
+
+    // Preview: the person confirms before anything is written
+    if (dmChannelId && messageTs) {
+      const ok = await replaceButtons(client, dmChannelId, messageTs, originalText, '', buildReplyPreviewBlocks(context, decision, userText, slackUserId));
+      if (!ok) {
+        await replaceButtons(client, dmChannelId, messageTs, originalText, '⚠️ I couldn\'t show the preview. Nothing was changed — press 💬 Reply to try again.', [buildYesNoBlocks(context, slackUserId)[1]]);
+        return;
+      }
+    }
+    await services.opsNotifier?.dmLlmProposed({ slackUserId, issueKey, userText, decision });
+  });
+
+  /** Apply a confirmed LLM decision as the user (or the bot, where the trigger allows it). */
+  async function executeDecision(client, context, decision, userText, logger) {
+    const { issueKey, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType, transitionTo,
+            slackUserId, dmChannelId, messageTs, originalText = '' } = context;
+
     const effectiveJira = await resolveJira(slackUserId, client, context);
     if (!effectiveJira) {
-      // Nothing was written; the LLM decision is discarded and the ask is put back with a Connect nudge
       await needsConnect(client, context, null, 'apply your reply', logger);
       return;
     }
+    const usingOAuth = services.oauthService?.hasToken(slackUserId) ?? false;
 
     try {
       if (decision.action === 'transition') {
@@ -981,20 +1012,16 @@ function registerDmHandler(app, jiraService, services) {
         }
       }
 
-      const didSomething = decision.action !== 'no_action' || decision.comment || decision.assignee;
-      const confirmation = decision.confirmationMessage || (didSomething ? `Done — *${issueLink(issueKey)}* updated.` : 'OK, no changes made.');
+      const confirmation = decision.confirmationMessage || `Done — *${issueLink(issueKey)}* updated.`;
       if (dmChannelId && messageTs) {
-        await replaceButtons(client, dmChannelId, messageTs, originalText,
-          didSomething ? `✅ ${confirmation} (${issueLink(issueKey)})` : confirmation);
+        await replaceButtons(client, dmChannelId, messageTs, originalText, `✅ ${confirmation} (${issueLink(issueKey)})`);
       }
-      await services.opsNotifier?.dmLlmDecision({ slackUserId, issueKey, userText, decision });
-      if (didSomething) {
-        const what = decision.action === 'transition' ? `status = ${decision.transitionTo || transitionTo}`
-          : decision.action === 'update_field' ? `${jiraFieldName || 'status'} = ${decision.fieldValue ?? jiraFieldValue ?? transitionTo}`
-            : decision.comment ? 'comment added' : decision.assignee ? `assigned to ${decision.assignee}` : 'updated';
-        const [fieldName, ...rest] = what.split(' = ');
-        await record(client, { slackUserId, issueKey, trigger: 'DM reply', fieldName, fieldValue: rest.join(' = ') || '✓' });
-      }
+      await services.opsNotifier?.dmLlmDecision({ slackUserId, issueKey, userText, decision, usingOAuth });
+      const what = decision.action === 'transition' ? `status = ${decision.transitionTo || transitionTo}`
+        : decision.action === 'update_field' ? `${jiraFieldName || 'status'} = ${decision.fieldValue ?? jiraFieldValue ?? transitionTo}`
+          : decision.comment ? 'comment added' : decision.assignee ? `assigned to ${decision.assignee}` : 'updated';
+      const [fieldName, ...rest] = what.split(' = ');
+      await record(client, { slackUserId, issueKey, trigger: 'DM reply', fieldName, fieldValue: rest.join(' = ') || '✓' });
     } catch (err) {
       logger.error(`[dm] LLM-driven action failed for ${issueKey}: ${err.message}`);
       if (needsFixVersion(err) && dmChannelId && messageTs) {
@@ -1009,6 +1036,39 @@ function registerDmHandler(app, jiraService, services) {
         await services.db?.deletePromptsForIssue(issueKey, slackUserId).catch(() => {});
       }
     }
+  }
+
+  app.action('jira_reply_confirm', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'reply confirm'); if (!ctx) return;
+    const { decision, userText, ...context } = ctx;
+    if (!decision) { logger.error('[dm] reply confirm without a decision'); return; }
+    const loc = { dmChannelId: context.dmChannelId || body.channel?.id, messageTs: context.messageTs || body.message?.ts };
+    if (loc.dmChannelId && loc.messageTs) await replaceButtons(client, loc.dmChannelId, loc.messageTs, context.originalText || '', '_Applying…_');
+    await executeDecision(client, { ...context, ...loc }, decision, userText || '', logger);
+  });
+
+  app.action('jira_reply_edit', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'reply edit'); if (!ctx) return;
+    const { decision, userText, ...context } = ctx;
+    await openReplyModal(client, body.trigger_id, { ...context, dmChannelId: context.dmChannelId || body.channel?.id, messageTs: context.messageTs || body.message?.ts }, userText || '')
+      .catch((err) => logger.error(`[dm] Failed to reopen reply modal: ${err.data?.error || err.message}`));
+  });
+
+  app.action('jira_reply_cancel', async ({ ack, body, client, logger }) => {
+    await ack();
+    const ctx = parseCtx(body, logger, 'reply cancel'); if (!ctx) return;
+    const { decision, userText, ...context } = ctx;
+    const channelId = context.dmChannelId || body.channel?.id; const messageTs = context.messageTs || body.message?.ts;
+    // Nothing was written — put the original ask back so they can still act on it
+    if (channelId && messageTs) {
+      try {
+        await client.chat.update({ channel: channelId, ts: messageTs, text: yesNoHeadline(context), blocks: buildYesNoBlocks(context, context.slackUserId) });
+      } catch (err) { logger.warn(`[dm] cancel restore failed: ${err.data?.error || err.message}`); }
+    }
+    await services.opsNotifier?.post?.(`🤖 <@${context.slackUserId}> cancelled the proposed change on *${context.issueKey}* (nothing written)`);
+    logger.info(`[dm] ${context.slackUserId} cancelled LLM proposal on ${context.issueKey}`);
   });
 }
 

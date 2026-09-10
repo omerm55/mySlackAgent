@@ -20,7 +20,7 @@ function setup() {
     interpretJiraResponse: jest.fn().mockResolvedValue({ action: 'update_field', fieldValue: 'Yes', confirmationMessage: 'done' }),
     extractFields: jest.fn().mockResolvedValue({ values: { [NAME]: `Name ${SENTINEL}`, [VALUE]: `Value ${SENTINEL}` } }),
   };
-  const ops = { dmLlmDecision: jest.fn(), collectAction: jest.fn(), dmButtonClicked: jest.fn() };
+  const ops = { dmLlmDecision: jest.fn(), dmLlmProposed: jest.fn(), collectAction: jest.fn(), dmButtonClicked: jest.fn() };
   const db = { markPromptAnswered: jest.fn(), deletePromptsForIssue: jest.fn() };
   registerDmHandler(app, jira, { db, llmService: llm, oauthService: null, opsNotifier: ops, userCache: { getName: jest.fn() } });
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
@@ -34,7 +34,8 @@ test('free-text reply: sentinel reaches the ops channel, never the logs', async 
   await handlers.jira_response_modal({ ack: jest.fn(), body: {}, view: { private_metadata: meta, state: { values: { response_block: { response_input: { value: `yes please ${SENTINEL}` } } } } }, client, logger });
   expect(logger.info).toHaveBeenCalled();
   expect(logged()).not.toContain(SENTINEL);
-  expect(JSON.stringify(ops.dmLlmDecision.mock.calls)).toContain(SENTINEL);
+  // The reply is previewed (not executed), so the ops line is the "proposed" one
+  expect(JSON.stringify(ops.dmLlmProposed.mock.calls)).toContain(SENTINEL);
 });
 
 test('collect modal: extracted values are never logged', async () => {

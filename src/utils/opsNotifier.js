@@ -74,6 +74,16 @@ class OpsNotifier {
     }
   }
 
+  // User submitted a free-text reply; LLM interpreted it and the person is looking at the preview
+  async dmLlmProposed({ slackUserId, issueKey, userText, decision }) {
+    const parts = [`action: *${decision.action}*`];
+    if (decision.fieldValue) parts.push(`value: *${decision.fieldValue}*`);
+    if (decision.transitionTo) parts.push(`move to: *${decision.transitionTo}*`);
+    if (decision.comment) parts.push(`comment: "${decision.comment}"`);
+    if (decision.assignee) parts.push(`assign to: *${decision.assignee}*`);
+    await this.post(`🤖 <@${slackUserId}> replied to *${issueKey}*: "${userText}"\n→ LLM proposes: ${parts.join(' | ')} — waiting for their Confirm`);
+  }
+
   // User submitted a free-text reply; LLM interpreted it
   async dmLlmDecision({ slackUserId, issueKey, userText, decision, error }) {
     if (error) {

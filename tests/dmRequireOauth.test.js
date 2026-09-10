@@ -22,7 +22,7 @@ function setup({ hasToken = false } = {}) {
   const userJira = { updateIssueField: jest.fn().mockResolvedValue(undefined), transitionIssue: jest.fn().mockResolvedValue(undefined), updateIssueFields: jest.fn(), getIssue: jest.fn().mockResolvedValue({ fields: {} }) };
   const oauthService = { hasToken: jest.fn(() => hasToken), generateAuthUrl: jest.fn().mockResolvedValue('https://auth?state=r'), getJiraService: jest.fn().mockResolvedValue(userJira) };
   const db = { markPromptAnswered: jest.fn().mockResolvedValue(undefined), deletePromptsForIssue: jest.fn().mockResolvedValue(undefined) };
-  const ops = { post: jest.fn().mockResolvedValue(undefined), dmButtonClicked: jest.fn(), riskReviewAction: jest.fn(), collectAction: jest.fn(), dmLlmDecision: jest.fn() };
+  const ops = { post: jest.fn().mockResolvedValue(undefined), dmButtonClicked: jest.fn(), riskReviewAction: jest.fn(), collectAction: jest.fn(), dmLlmDecision: jest.fn(), dmLlmProposed: jest.fn() };
   registerDmHandler(app, botJira, { db, llmService: null, oauthService, opsNotifier: ops, userCache: { getName: jest.fn().mockResolvedValue('Omer') } });
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
   return { handlers, client, botJira, userJira, oauthService, db, ops, updates, logger };

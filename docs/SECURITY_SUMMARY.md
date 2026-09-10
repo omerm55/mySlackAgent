@@ -166,8 +166,10 @@ question as Lauren's, one hop further.
 - **The public HTTP surface is two paths**: `/health` and the OAuth callback. Everything else is 404, and
   a test pins this. Slack traffic is outbound Socket Mode; no inbound Slack endpoint exists.
 - **No user content in application logs**; a test asserts it.
-- **Preview before any LLM-extracted write** on the field-collection ask: the person sees exactly what
-  will be saved and confirms; a typed value always beats an extracted one; the LLM never writes on its own.
+- **Preview before any LLM-driven write.** Both places where an LLM interprets free text — the
+  field-collection ask and the free-text reply to a question — show the person exactly what will change
+  and require an explicit Confirm; Cancel restores the original ask and nothing is written. A value the
+  person typed always beats one the model extracted. **The LLM never writes to Jira on its own.**
 - **Roll-out gates**: personal scope and pilot lists let a trigger run for one person or a few before it
   is opened to everyone matched.
 - **Time-boxed operations**: every lookup stage is capped at 5 seconds and every message ends in an
@@ -181,19 +183,18 @@ In rough priority order, each with the mitigation we propose.
 |---|---|---|---|
 | 1 | **Hosting on Render (free tier) with production secrets** | No SLA, instance sleeps, region not chosen by us; Slack/Jira/OAuth/Supabase/OpenAI secrets live in Render's environment; not reviewed by IT/Security | Decide with IT: company infrastructure, or an approved Render tier and region; secrets in a managed store |
 | 2 | **Azure OpenAI data flow** (F6) | Jira summaries, Notes previews and users' free text leave Jira and Slack | Data-processing approval: tenant, retention, no-training terms |
-| 3 | **LLM-driven writes on the free-text Reply path have no preview** | The reply "not yet, waiting on QA" is interpreted into a transition / field / comment / assignee and executed; Jira content in prompts is an injection surface | Preview-then-confirm as the field-collection ask already does; restrict the decision schema |
-| 4 | **Service-account permissions not minimised** (F1) | The account can do more in Jira than the bot needs | Least-privilege pass with IT |
-| 5 | **Jira triggers have no hourly cap; in-memory limits reset on restart** (F4) | A mis-scoped trigger can reach many people quickly | Per-trigger daily cap; "who would be asked" preview before saving |
-| 6 | **No second approver for triggers; scope grew SNS → PR without review** (F5) | Governance rests on two people | Trigger review checklist; quarterly review with Security |
-| 7 | **Customer-visible fields are written from Slack** | *Customer-friendly name* / *Customer value* appear on the certified roadmap | Preview is mandatory today; consider a second approver for certified Initiatives |
-| 8 | **Broader Slack scopes than March** | Six more bot scopes, incl. private-channel history | Needed for private-channel triggers; each scope is mapped to a feature in the spec (§9.1) |
-| 9 | **No CI checks** | No secrets or dependency scanning on the repository | Add GitHub Actions: tests, `npm audit`, secret scan |
-| 10 | **Audit trail lives in Slack** (F3) | Retention and immutability are Slack's | Immutable store for the audit events (post-pilot) |
+| 3 | **Service-account permissions not minimised** (F1) | The account can do more in Jira than the bot needs | Least-privilege pass with IT |
+| 4 | **Jira triggers have no hourly cap; in-memory limits reset on restart** (F4) | A mis-scoped trigger can reach many people quickly | Per-trigger daily cap; "who would be asked" preview before saving |
+| 5 | **No second approver for triggers; scope grew SNS → PR without review** (F5) | Governance rests on two people | Trigger review checklist; quarterly review with Security |
+| 6 | **Customer-visible fields are written from Slack** | *Customer-friendly name* / *Customer value* appear on the certified roadmap | Preview is mandatory today; consider a second approver for certified Initiatives |
+| 7 | **Broader Slack scopes than March** | Six more bot scopes, incl. private-channel history | Needed for private-channel triggers; each scope is mapped to a feature in the spec (§9.1) |
+| 8 | **No CI checks** | No secrets or dependency scanning on the repository | Add GitHub Actions: tests, `npm audit`, secret scan |
+| 9 | **Audit trail lives in Slack** (F3) | Retention and immutability are Slack's | Immutable store for the audit events (post-pilot) |
 
 ## 6. Decisions we need from Security
 
-1. **May the pilot continue** (about ten users, SNS + PR, every write as the user, no service-account
-   writes unless an admin enables it per trigger) while items 1–2 above are decided?
+1. **May the pilot continue** (about ten users, SNS + PR, every write as the user and confirmed by them,
+   no service-account writes unless an admin enables it per trigger) while items 1–2 above are decided?
 2. **Hosting**: is Render acceptable at all (paid tier, EU/US region), or must this move to company
    infrastructure before general availability?
 3. **Azure OpenAI data flow**: is the current tenant/contract acceptable for Jira summaries, Notes

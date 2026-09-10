@@ -110,4 +110,57 @@ async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, o
   return { channelId: dm.channel.id, messageTs: result.ts };
 }
 
-module.exports = { sendDmQuestion, buildYesNoBlocks, connectBlocks, yesNoHeadline };
+/**
+ * Human-readable list of what an LLM decision would do to the issue (nothing is executed here).
+ * @returns {string[]} mrkdwn lines; empty when the decision changes nothing
+ */
+function describeDecision(decision, context) {
+  const d = decision || {};
+  const lines = [];
+  if (d.action === 'transition') {
+    lines.push(`Move *${issueLink(context.issueKey)}* to *${d.transitionTo || context.transitionTo}*`);
+  } else if (d.action === 'update_field') {
+    if (context.transitionTo && !context.jiraFieldId) lines.push(`Move *${issueLink(context.issueKey)}* to *${context.transitionTo}*`);
+    else lines.push(`Set *${context.jiraFieldName || context.jiraFieldId}* = *${d.fieldValue ?? context.jiraFieldValue}*`);
+  }
+  if (d.comment) lines.push(`Add a comment: "${String(d.comment).slice(0, 300)}"`);
+  if (d.assignee) lines.push(`Assign to *${d.assignee}*`);
+  return lines;
+}
+
+/**
+ * Preview of an LLM-interpreted reply: what will happen, with Confirm / Edit reply / Cancel.
+ * Nothing is written until Confirm. The compact decision rides in the button values.
+ */
+function buildReplyPreviewBlocks(context, decision, userText, slackUserId) {
+  const lines = describeDecision(decision, context);
+  const compact = {
+    issueKey: context.issueKey,
+    question: (context.question || '').slice(0, 200),
+    transitionTo: context.transitionTo, jiraFieldId: context.jiraFieldId, jiraFieldName: context.jiraFieldName,
+    jiraFieldValue: context.jiraFieldValue, jiraFieldType: context.jiraFieldType,
+    slackUserId, allowFallback: !!context.allowFallback,
+    dmChannelId: context.dmChannelId, messageTs: context.messageTs, originalText: (context.originalText || '').slice(0, 300),
+    userText: (userText || '').slice(0, 400),
+    decision: {
+      action: decision.action, fieldValue: decision.fieldValue, transitionTo: decision.transitionTo,
+      comment: decision.comment ? String(decision.comment).slice(0, 300) : undefined,
+      assignee: decision.assignee, confirmationMessage: decision.confirmationMessage ? String(decision.confirmationMessage).slice(0, 200) : undefined,
+    },
+  };
+  const value = JSON.stringify(compact);
+  return [
+    { type: 'section', text: { type: 'mrkdwn', text: `🤖 *Here's what I understood — nothing is changed yet:*\n${lines.map((l) => `• ${l}`).join('\n')}` } },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: `Your reply: "${(userText || '').slice(0, 200)}"` }] },
+    {
+      type: 'actions',
+      elements: [
+        { type: 'button', style: 'primary', text: { type: 'plain_text', text: '✅ Confirm', emoji: true }, action_id: 'jira_reply_confirm', value },
+        { type: 'button', text: { type: 'plain_text', text: '✏️ Edit reply', emoji: true }, action_id: 'jira_reply_edit', value },
+        { type: 'button', text: { type: 'plain_text', text: 'Cancel', emoji: true }, action_id: 'jira_reply_cancel', value },
+      ],
+    },
+  ];
+}
+
+module.exports = { sendDmQuestion, buildYesNoBlocks, connectBlocks, yesNoHeadline, describeDecision, buildReplyPreviewBlocks };
