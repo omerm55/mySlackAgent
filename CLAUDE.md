@@ -33,5 +33,9 @@ Also keep the header line current: test count, suite count, deployment URL.
   only for conversations with the user (questions, results, OAuth nudge).
 - Never leave a progress message up: every long operation must end in an actionable state.
 - Field ids for PR/SNS come from the `pr-sns-knowledge` skill; reference them by id in JQL (`cf[NNNNN]`).
-- Deploys: pushing to `claude/slack-jira-integration-nRbia` auto-deploys to Render. Migrations are
+- Deploys: pushing to **`main` on GitLab** deploys, but indirectly — GitLab push-mirrors to GitHub and
+  Render deploys from there, because Render cannot reach `gitlab.rnd.sisense.com` (spec §11.4). Allow for
+  the mirror's lag, and never push to GitHub directly: the mirror force-updates its `main`. Migrations are
   run by hand in the Supabase SQL editor — say so explicitly whenever a change needs one.
+- One writer per branch: cloud sessions cannot reach GitLab, so work done there comes back as a
+  `git bundle`, never a push. Do not assume a branch you cannot see on GitLab does not exist.
