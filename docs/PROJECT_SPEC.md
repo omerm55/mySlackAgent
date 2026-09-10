@@ -1114,10 +1114,23 @@ app changes. State and remaining steps:
   16 April, pull request #11) because every commit since 3 Sept went to the session branch, so the work
   was merged into `main` on GitHub (`6c3fd70`) — the eleven commits `main` had that the branch lacked were
   merge commits carrying no file content, so nothing was lost.
-- **Outstanding:** GitLab's `main` is still at the imported April tip (`da9b260`) — the import is a
-  one-time copy, so the merge has to reach GitLab either by a merge request there (branch → `main`) or by
-  a mirror push; then the GitLab default branch and Render's branch move to `main` together; then the
-  session branch is deleted and the GitHub repository archived.
+- **Done:** GitLab's `main` brought up to date by a merge request there (branch → `main`). Its merge
+  commit differs from GitHub's `6c3fd70`; the trees are identical, so the two are interchangeable.
+- **⚠️ Render cannot deploy from this GitLab.** Render's builders are on the public internet;
+  `gitlab.rnd.sisense.com` resolves only inside the corporate network, and Render's Git integrations are
+  GitHub, GitLab.com and Bitbucket — a self-managed instance is not among them. "Repoint Render at GitLab"
+  is therefore **not possible**, which leaves two paths:
+  - **Interim:** GitLab is where people work; GitHub stays as a **deploy mirror**. GitLab → Settings →
+    Repository → *Mirroring repositories*, direction **Push**, target
+    `https://github.com/omerm55/mySlackAgent.git` with a GitHub personal-access token. Render keeps
+    deploying from GitHub. The first mirror push overwrites GitHub's `main` (different merge commit, same
+    tree — harmless). Then move the GitLab default branch and Render's branch to `main` together.
+  - **Proper fix:** move hosting inside the network, which is open item 1 of the security review
+    (`SECURITY_SUMMARY.md` §5) — a runner inside the network reaches both the code and the target, and the
+    Render questions (free tier, secrets, region) disappear with it. Fold this into that decision rather
+    than solving deployment twice.
+- **Outstanding after that:** delete the session branch once `main` deploys, and archive the GitHub
+  repository only if the deploy no longer depends on it.
 - **Namespace:** the project sits in a personal namespace (`Omer.Meshar/`). For a company-owned service
   under security review it belongs in the same group as Jira Manager — Settings → General → Advanced →
   Transfer project. Ownership then survives any change of role (see `SECURITY_SUMMARY.md` F2).
@@ -1133,14 +1146,14 @@ The original ordered steps, for reference:
    git push -u gitlab --all && git push gitlab --tags
    ```
    GitLab's *Import project → GitHub* achieves the same and brings issues and pull requests with it.
-3. **Point Render at GitLab**: Settings → Build & Deploy → disconnect the GitHub repository, connect the
-   GitLab one, keep the branch. Environment variables are unaffected. Confirm the first deploy and the
-   `🔑 Jira service identity` line in the ops channel.
+3. **Deployment** — see the ⚠️ above: Render cannot reach a self-managed GitLab. Either keep GitHub as a
+   push-mirror target (Render unchanged), or move hosting inside the network. Whatever changes, confirm
+   the first deploy and the `🔑 Jira service identity` line in the ops channel afterwards.
 4. **CI**: `.gitlab-ci.yml` already carries the four gates (§11.2a). Delete `.github/workflows/ci.yml`
    once GitHub is no longer used, and set the branch as protected in GitLab.
 5. **Update the references**: this spec (§11.1, §12.2), `SECURITY_SUMMARY.md` §7, and the Reference
    Materials field of the security-review ticket SNS-133715.
-6. **Archive the GitHub repository** (do not delete it until Render has deployed from GitLab twice).
+6. **Archive the GitHub repository** — only once nothing deploys from it (not while it is the mirror).
 
 Nothing secret is in the history — `scripts/scan-secrets.sh` passes over every tracked file, and all
 credentials live in the runtime environment (§10).
