@@ -10,7 +10,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "http://local_proxy@127.0.0.1:43397/git/omerm55/mySlackAgent"
+    "url": "https://gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot.git"
   },
   "keywords": [],
   "author": "",
@@ -19,6 +19,7 @@
     "@slack/bolt": "^4.6.0",
     "axios": "^1.13.6",
     "dotenv": "^17.3.1",
+    "pg": "^8.23.0",
     "pino": "^10.3.1"
   },
   "devDependencies": {

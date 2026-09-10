@@ -14,7 +14,7 @@ function registerPreferencesHandler(app, services) {
     const frequency = body.actions?.[0]?.selected_option?.value;
     if (!FREQUENCIES[frequency]) return;
     if (!services.db) {
-      await client.chat.postMessage({ channel: userId, text: '⚠️ Preferences need Supabase, which is not configured.' }).catch(() => {});
+      await client.chat.postMessage({ channel: userId, text: '⚠️ Preferences need the database, which is not configured.' }).catch(() => {});
       return;
     }
 

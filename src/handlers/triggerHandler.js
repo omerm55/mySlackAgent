@@ -250,7 +250,7 @@ function registerTriggerHandler(app, services) {
     // Save BEFORE acknowledging, so a failed write keeps the modal open with the reason
     // instead of closing and looking like a silent revert.
     try {
-      if (!services.db) throw new Error('Supabase is not configured');
+      if (!services.db) throw new Error('the database is not configured');
       if (editId) {
         await services.db.updateIntegration(editId, fields);
         logger.info(`[trigger] Updated integration "${name}" (${editId}) by ${userId}`);
@@ -402,7 +402,7 @@ function registerJiraTriggerHandler(app, services) {
 
     if (op === 'run') {
       if (!services.jiraPoller) {
-        await notifyOps(services, client, userId, '⚠️ The Jira poller is not running (Supabase not configured).');
+        await notifyOps(services, client, userId, '⚠️ The Jira poller is not running (database not configured).');
         return;
       }
       try {
@@ -532,7 +532,7 @@ function registerJiraTriggerHandler(app, services) {
     // Save BEFORE acknowledging: a failed write keeps the modal open with the reason.
     let savedId = editId;
     try {
-      if (!services.db) throw new Error('Supabase is not configured');
+      if (!services.db) throw new Error('the database is not configured');
       if (editId) {
         await services.db.updateJiraTrigger(editId, fields);
         logger.info(`[jiraTrigger] Updated "${name}" (${editId}) by ${userId}`);

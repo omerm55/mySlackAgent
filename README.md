@@ -18,7 +18,7 @@ Production: <https://myslackagent.onrender.com> · Tests: `npm test` (267 passin
 | **Channel triggers** (§2.1) | Watch a channel; a 👍 / ✅ reaction or a thread reply on a message containing a Jira key sets a configured field on that issue and confirms in the thread. Per-trigger field, value, scope, rate limit and allowlist. |
 | **Jira triggers** (§2.2) | Poll a JQL on a per-trigger cadence. Each newly matching issue resolves to a Slack user by email, who gets a DM asking to approve a transition or field change. Asked once per issue per trigger. New triggers default to `scope = personal` so a mis-typed JQL cannot surprise the company. |
 | **DM conversation** (§2.3) | **Yes** applies the action · **No** declines · **💬 Reply** takes free text ("yes but set it to Needs Review"), which an LLM turns into a structured action and shows back as a preview. Nothing reaches Jira until the person confirms — the LLM never writes on its own. |
-| **Per-user OAuth** (§2.5) | Atlassian 3LO, single-use `state`, tokens encrypted at rest (AES-256-GCM) in Supabase and auto-refreshed. Writes use the person's own token; reads and polling use the service account. |
+| **Per-user OAuth** (§2.5) | Atlassian 3LO, single-use `state`, tokens encrypted at rest (AES-256-GCM) in Postgres and auto-refreshed. Writes use the person's own token; reads and polling use the service account. |
 | **App Home** (§2.6) | OAuth status, notification preference, recent activity. Admins also get trigger management (create / edit / run now / re-ask / delete). |
 | **Digests** (§2.7) | Immediately (default), hourly, twice daily or daily, in the user's Slack time zone. |
 | **Risk review** (§2.9) | Reads the weekly `Latest notification` stamp on PR Initiatives and asks the Dev owner to re-flag risk, update Notes or move the target; FYIs the PM owner. |
@@ -53,10 +53,12 @@ automatically when a trigger is created; private channels need the invite.
   callback `https://<your-host>/oauth/callback`; **Distribution → Sharing** enabled so people other
   than the app owner can consent.
 
-### 3. Supabase and the LLM
+### 3. The database and the LLM
 
-Supabase holds triggers, OAuth tokens, prompts and the activity log (§6) — without it tokens are
-in-memory and triggers static. Run the SQL in [`supabase/`](supabase/) by hand in the SQL editor;
+Postgres holds triggers, OAuth tokens, prompts and the activity log (§6) — without `DATABASE_URL`
+tokens are in-memory and triggers static. The instance is Supabase today, but the app speaks plain
+Postgres, so any Postgres works (spec §12.7). Apply the schema with
+`node scripts/apply-schema.js "$DATABASE_URL"`, or run the SQL in [`supabase/`](supabase/) by hand;
 migrations are never applied automatically.
 
 One LLM provider is required for free-text interpretation: OpenAI / Azure OpenAI, Gemini or
@@ -75,7 +77,7 @@ cp .env.example .env   # fill in
 |---|---|
 | `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_TOKEN` | Slack Bolt (Socket Mode) |
 | `JIRA_BASE_URL`, `JIRA_USER_EMAIL`, `JIRA_API_TOKEN` | Jira service account; also builds issue links |
-| `SUPABASE_URL`, `SUPABASE_SECRET_KEY` | Persistence |
+| `DATABASE_URL` | Postgres connection string — persistence (tokens, triggers, prompts, audit) |
 | `TOKEN_ENCRYPTION_KEY` | 32 random bytes, base64 (`openssl rand -base64 32`) — encrypts OAuth tokens at rest. Once any encrypted row exists the bot refuses to start without it |
 | `JIRA_OAUTH_CLIENT_ID`, `JIRA_OAUTH_CLIENT_SECRET`, `OAUTH_REDIRECT_URI` | Per-user OAuth |
 | `OPS_CHANNEL_ID` | Channel for operational notifications |
@@ -111,7 +113,7 @@ src/
     jiraService.js            # Jira REST client
     jiraPoller.js             # JQL polling per Jira trigger
     oauthService.js           # Atlassian 3LO, token refresh
-    supabaseService.js        # Persistence
+    dbService.js              # Persistence (node-postgres)
     llmService.js             # Free-text → structured action, field extraction
     digestScheduler.js        # Queued question delivery
     fixVersionSuggester.js    # Fix Version suggestions on validator failure
@@ -138,7 +140,7 @@ push to GitLab main  →  GitLab push mirror  →  GitHub main  →  Render
 
 Allow for the mirror's lag, and never push to GitHub directly — the mirror force-updates its `main`.
 If a deploy does not start, check the mirror row in GitLab → Settings → Repository before suspecting
-Render. Database migrations are **run by hand** in the Supabase SQL editor.
+Render. Database migrations are **run by hand** — `node scripts/apply-schema.js` or the Supabase SQL editor.
 
 ## Documentation
 

@@ -39,7 +39,7 @@ const dayEnd = (s) => new Date(`${String(s).slice(0, 10)}T23:59:59Z`);
 
 /**
  * Build the release timeline: [{ version, start, end, source }] sorted by start.
- * Prefers the Supabase release_calendar (branch_out … branch_out_end window);
+ * Prefers the release_calendar table (branch_out … branch_out_end window);
  * falls back to Jira's version startDate, then releaseDate (single-day windows).
  */
 function buildTimeline(candidates, calendar) {

@@ -9,8 +9,8 @@
  * what is happening and resume.
  *
  * Two independent switches, either of which pauses:
- *   - `app_settings.paused` in Supabase — an admin toggles it from App Home, no deploy needed.
- *   - `BOT_PAUSED=true` in the environment — break-glass for when Supabase itself is the problem.
+ *   - `app_settings.paused` in the database — an admin toggles it from App Home, no deploy needed.
+ *   - `BOT_PAUSED=true` in the environment — break-glass for when the database itself is the problem.
  *
  * The DB value is cached for CACHE_MS so a paused bot does not query on every event; toggling from Home
  * calls `invalidate()`, so the switch is immediate for the person flipping it.
@@ -57,7 +57,7 @@ async function isPaused(db) {
 
 /** Flip the flag (App Home). `byUser` is a Slack user id, recorded for the audit trail. */
 async function setPaused(db, on, byUser = null) {
-  if (!db?.setSetting) throw new Error('Supabase is not configured — use the BOT_PAUSED environment variable');
+  if (!db?.setSetting) throw new Error('the database is not configured — use the BOT_PAUSED environment variable');
   await db.setSetting(KEY, { paused: !!on }, byUser);
   invalidate();
 }

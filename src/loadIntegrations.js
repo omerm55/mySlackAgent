@@ -20,7 +20,7 @@ function loadIntegrations(filePath) {
   if (!fs.existsSync(configPath)) {
     const jsonStr = process.env.INTEGRATIONS_JSON;
     if (!jsonStr) {
-      // No static config — integrations come from Supabase (created via App Home).
+      // No static config — integrations come from the database (created via App Home).
       return [];
     }
     try {

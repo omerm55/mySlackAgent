@@ -3,7 +3,7 @@
 // Every ops-channel line is also a durable row in audit_events, with enough structure to answer
 // "who changed what, when, and as whom" without reading Slack.
 const OpsNotifier = require('../src/utils/opsNotifier');
-const SupabaseService = require('../src/services/supabaseService');
+const DbService = require('../src/services/dbService');
 
 function setup() {
   const posted = [];
@@ -76,25 +76,34 @@ describe('audit events mirror the ops channel', () => {
   });
 });
 
-describe('SupabaseService audit_events', () => {
+describe('DbService audit_events', () => {
   function svc() {
-    const s = new SupabaseService({ url: 'https://x', secretKey: 'k' });
-    s.client = { post: jest.fn().mockResolvedValue({}), get: jest.fn().mockResolvedValue({ data: [{ id: 'a' }] }) };
+    const calls = [];
+    const pool = {
+      query: jest.fn(async (sql, params = []) => {
+        calls.push({ sql, params });
+        return { rows: [{ id: 'a' }], rowCount: 1 };
+      }),
+    };
+    const s = new DbService({ pool });
+    s.calls = calls;
     return s;
   }
-  test('insert truncates very long text and passes detail through as jsonb', async () => {
+  test('insert truncates very long text and sends detail as jsonb, not a Postgres literal', async () => {
     const s = svc();
     await s.insertAuditEvent({ kind: 'ops', slackUserId: 'U1', issueKey: 'SNS-1', ok: true, text: 'x'.repeat(5000), detail: { a: 1 } });
-    const body = s.client.post.mock.calls[0][1];
-    expect(body.text).toHaveLength(4000);
-    expect(body.detail).toEqual({ a: 1 });
-    expect(body.slack_user_id).toBe('U1');
+    const { sql, params } = s.calls[0];
+    expect(sql).toMatch(/insert into audit_events/);
+    expect(params[1]).toBe('U1');
+    expect(params[4]).toHaveLength(4000);
+    expect(JSON.parse(params[5])).toEqual({ a: 1 });
   });
   test('query filters by issue, user, kind and time, newest first', async () => {
     const s = svc();
     await s.getAuditEvents({ issueKey: 'SNS-1', slackUserId: 'U1', kind: 'dm_yes', since: '2026-09-01T00:00:00Z', limit: 10 });
-    expect(s.client.get).toHaveBeenCalledWith('/audit_events', {
-      params: expect.objectContaining({ issue_key: 'eq.SNS-1', slack_user_id: 'eq.U1', kind: 'eq.dm_yes', order: 'ts.desc', limit: 10, ts: 'gte.2026-09-01T00:00:00.000Z' }),
-    });
+    const { sql, params } = s.calls[0];
+    expect(sql).toMatch(/where issue_key = \$1 and slack_user_id = \$2 and kind = \$3 and ts >= \$4/);
+    expect(sql).toMatch(/order by ts desc limit \$5/);
+    expect(params).toEqual(['SNS-1', 'U1', 'dm_yes', new Date('2026-09-01T00:00:00Z'), 10]);
   });
 });

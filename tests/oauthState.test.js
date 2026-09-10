@@ -15,7 +15,7 @@ beforeEach(() => {
   axios.get.mockResolvedValue({ data: [{ id: 'cloud-1', url: 'https://x.atlassian.net' }] });
 });
 
-describe('OAuth state — memory mode (no Supabase)', () => {
+describe('OAuth state — memory mode (no database)', () => {
   test('URL carries a random state, not the user id; the state is accepted exactly once', async () => {
     const oauth = new OAuthService(opts);
     const url = await oauth.generateAuthUrl('U1');
@@ -46,7 +46,7 @@ describe('OAuth state — memory mode (no Supabase)', () => {
   });
 });
 
-describe('OAuth state — Supabase mode', () => {
+describe('OAuth state — database mode', () => {
   test('state is inserted, consumed atomically through the DB, and pruning is fire-and-forget', async () => {
     const rows = new Map();
     const db = {
@@ -59,7 +59,7 @@ describe('OAuth state — Supabase mode', () => {
       pruneOauthStates: jest.fn().mockResolvedValue(undefined),
       upsertToken: jest.fn().mockResolvedValue(undefined),
     };
-    const oauth = new OAuthService({ ...opts, supabaseService: db });
+    const oauth = new OAuthService({ ...opts, db });
     const state = stateOf(await oauth.generateAuthUrl('U9'));
     expect(db.insertOauthState).toHaveBeenCalledWith(expect.objectContaining({ state, slackUserId: 'U9' }));
     expect(oauth.states.size).toBe(0); // DB is the single source of truth

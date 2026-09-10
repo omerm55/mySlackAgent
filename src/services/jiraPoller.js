@@ -62,7 +62,7 @@ const MAX_NEW_PROMPTS_PER_TRIGGER_PER_DAY = Math.max(0, parseInt(process.env.JIR
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Polls Jira on an interval for each active "Jira trigger" stored in Supabase.
+ * Polls Jira on an interval for each active "Jira trigger" stored in the database.
  *
  * A Jira trigger = { jql, question, notify: 'reporter'|'assignee',
  *                    action_type: 'transition'|'field', transition_to | jira_field_* }
@@ -75,7 +75,7 @@ class JiraPoller {
   /**
    * @param {object} deps
    * @param {import('./jiraService')} deps.jiraService     service-account client (for JQL)
-   * @param {import('./supabaseService')} deps.db
+   * @param {import('./dbService')} deps.db
    * @param {import('@slack/bolt').App['client']} deps.slackClient
    * @param {import('../utils/opsNotifier')} [deps.opsNotifier]
    * @param {import('pino').Logger} deps.logger
@@ -96,7 +96,7 @@ class JiraPoller {
 
   start() {
     if (!this.db) {
-      this.logger.warn('[jiraPoller] Supabase not configured — Jira triggers disabled');
+      this.logger.warn('[jiraPoller] database not configured — Jira triggers disabled');
       return;
     }
     this.logger.info(`[jiraPoller] Started, ticking every ${Math.round(this.intervalMs / 1000)}s; each trigger runs on its own poll_interval_min`);

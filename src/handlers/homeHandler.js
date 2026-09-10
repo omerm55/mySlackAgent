@@ -51,7 +51,7 @@ async function buildHomeBlocks(userId, services, logger) {
     }
   }
 
-  // Persistent per-user history when Supabase is configured; in-memory otherwise
+  // Persistent per-user history when the database is configured; in-memory otherwise
   let userEntries = [];
   try {
     userEntries = auditLog?.recentFor

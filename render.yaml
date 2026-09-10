@@ -47,9 +47,11 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
-      - key: SUPABASE_URL
+      - key: DATABASE_URL
         sync: false
-      - key: SUPABASE_SECRET_KEY
+      - key: DATABASE_SSL
+        sync: false
+      - key: DATABASE_CA_CERT
         sync: false
       - key: TOKEN_ENCRYPTION_KEY
         sync: false

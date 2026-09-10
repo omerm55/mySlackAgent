@@ -2,7 +2,7 @@
 
 /**
  * Everything the operator sees, in one place: a line in the ops channel **and** a durable row in
- * `audit_events` (Supabase). The channel is where people look; the table is the record that outlives
+ * `audit_events` in Postgres. The channel is where people look; the table is the record that outlives
  * Slack retention and can be queried ("who changed what, when, as whom").
  *
  * Every method funnels through `post(text, meta)`. `meta` is what makes the row queryable:
@@ -17,7 +17,7 @@ class OpsNotifier {
   /**
    * @param {import('@slack/bolt').App['client']} client
    * @param {string} channelId
-   * @param {import('../services/supabaseService')} [db]  durable audit sink
+   * @param {import('../services/dbService')} [db]  durable audit sink
    */
   constructor(client, channelId, db = null) {
     this.client = client;
