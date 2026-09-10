@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (236 passing, 26 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (249 passing, 27 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -316,7 +316,7 @@ src/
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (236 tests, 26 suites)
+tests/                         Jest (249 tests, 27 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 .github/workflows/ci.yml       CI: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
 scripts/scan-secrets.sh        Secret scan over tracked files (Slack / Atlassian / Supabase / OpenAI / keys)
@@ -674,7 +674,7 @@ create index if not exists audit_events_user_idx  on public.audit_events (slack_
 create index if not exists audit_events_kind_idx  on public.audit_events (kind, ts desc);
 ```
 
-Written by `opsNotifier.post` for every operator message (§2.8). **Migration to run by hand**; it also
+Written by `opsNotifier.post` for every operator message (§2.8). Migration applied 10 Sept; it also
 enables RLS on itself, and `supabase/rls.sql` includes it for future re-runs.
 
 ### 6.7 `oauth_states` — pending Connect links (`supabase/oauth_states.sql`)
@@ -1227,7 +1227,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 236 tests in 26 suites:
+`npm test` → Jest, `tests/*.test.js`, 249 tests in 27 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1393,7 +1393,7 @@ Chronological, with rationale (see `git log` for commits):
     identity made the write, which is what makes the bot-account exception auditable. Chosen over a
     write-ahead log or an external SIEM because it reuses the store we already have and needs no new
     credential; it is durable and queryable, not immutable (the server key could still delete rows),
-    which the security summary says plainly. **Migration `supabase/audit_events.sql` must be run.**
+    which the security summary says plainly. Migration `supabase/audit_events.sql` applied 10 Sept.
 36. **Say which Jira identity we are running as.** The bot's Jira credential is still the owner's
     personal admin account, which the March review would rightly object to twice over (attribution and
     least privilege). Provisioning a real service account is IT's action, so the code contribution is
@@ -1409,8 +1409,10 @@ Chronological, with rationale (see `git log` for commits):
 
 - **Hosting:** Render free tier sleeps; self-ping mitigates but cannot revive a sleeping instance.
 - **Single workspace / single Jira site.** No multi-tenant config.
-- **In-memory dedup and rate limits** reset on restart (Supabase holds the durable state; per-user
-  activity is persisted in `activity_log`, the daily ops summary still uses the in-memory list).
+- **Dedup and the per-channel hourly rate limit are in memory** and reset on restart. The limit that
+  matters for blast radius is durable: the per-trigger 24-hour budget is counted in `jira_prompts`
+  (§5.3). Per-user activity is persisted in `activity_log` and every operator event in `audit_events`;
+  only the daily ops summary still uses the in-memory list.
 - **Email-based user mapping** depends on Atlassian profile visibility; no manual override table yet.
 - **Re-ask re-asks everyone**, including users who answered No; outcomes aren't stored per prompt.
 - **Slack rate limits** are not centrally managed (bursts capped by `JIRA_MAX_PROMPTS_PER_RUN` and the

@@ -117,28 +117,35 @@ other than deleting the trigger in App Home or suspending the Render service.
 
 **What remains.**
 - For plain Yes/No asks the *reason* exists only in the Slack thread and the audit table, not in Jira.
-- The audit table is durable and queryable but not immutable: the server's key could delete rows.
+- The audit table is durable and queryable, but not immutable: the server's own key could delete rows.
 
 ### F4 — Operational controls
 
-**What we did.** Per-channel-trigger hourly rate limit with an alert; error-threshold alerting in a
-rolling window; dedup of Slack redeliveries; at most 10 new asks per Jira trigger per run; 5-second
-caps on each LLM/Jira lookup stage so a message never hangs on a progress line; every failure ends in an
-actionable message; JQL validated against Jira before a trigger is saved; a keep-alive against Render's
-idle sleep.
+**What we did.**
+- **Two volume limits per trigger**: at most 10 new asks per run, and at most 50 in any rolling 24 hours.
+  The daily budget is counted in the database, so it survives restarts and spans manual "run now" clicks —
+  a mis-scoped or looping trigger cannot keep messaging people. Reaching either limit is reported to the
+  operator channel and the remaining matches are simply left for the next window, not dropped.
+- **A new trigger reaches only its author.** Both trigger forms default to *only me*, so the first run
+  cannot surprise anyone; a pilot list is the next step before it is opened to everyone matched.
+- Per-channel-trigger hourly rate limit with an alert; error-threshold alerting over a rolling window;
+  de-duplication of Slack's at-least-once redeliveries; 5-second caps on each lookup stage so a message
+  never hangs on a progress line; every failure ends in an actionable message; JQL validated against Jira
+  before a trigger can be saved; a keep-alive against the host's idle sleep.
 
-**What remains.** Jira triggers have no hourly cap beyond 10 asks per run (a 2-minute cadence allows
-300/hour). Rate limits and dedup are in memory and reset on restart. Slack API rate limits are not
-managed centrally. No external uptime monitor. No dry-run: on 8 September a trigger saved with the wrong
-scope DM'd many PMs before we were ready, which is what led to the personal-scope → pilot-list → global
-roll-out path; a "who would be asked" preview before saving would close this properly.
+**What remains.** An admin cannot see *who a JQL would ask* before saving the trigger — the audience is
+only visible once it runs (the volume caps and the personal-by-default rule keep the blast radius small,
+which is what the 8 September incident cost us). De-duplication and the hourly channel limit are still in
+memory and reset on restart. Slack's own API rate limits are not managed centrally. There is no external
+uptime monitor.
 
 ### F5 — Governance
 
 **What we did.** Scope is explicit per trigger (JQL, audience, action, identity) and visible to admins
-in App Home; creation/edit/delete is admin-only and reported to the ops channel; the spec is the change
-log (31 numbered design decisions); a catalog of 35 candidate asks is triaged in writing before anything
-is built, each with its Jira-side dependency named.
+in App Home; creation/edit/delete is admin-only and reported to the operator channel; the specification is
+the change log, with every design decision numbered and dated, and **an automated check refuses a change
+to the code or the database schema that does not update the specification with it**; a catalog of 35
+candidate asks is triaged in writing before anything is built, each with its Jira-side dependency named.
 
 **What remains.** There is no second pair of eyes: the same two admins design, build and approve
 triggers. The Jira scope grew from "SNS only" to SNS + PR without a review step. Proposal: a short
