@@ -174,6 +174,10 @@ question as Lauren's, one hop further.
   is opened to everyone matched.
 - **Time-boxed operations**: every lookup stage is capped at 5 seconds and every message ends in an
   actionable state.
+- **Automated checks on every change**: tests, a dependency audit that fails on high or critical
+  advisories, a secret scan over every tracked file, and a check that the specification was updated with
+  the code. The dependency gate immediately surfaced and fixed a high-severity advisory in our HTTP
+  client; the tree is currently clean.
 
 ## 5. What still remains, and the risks we see
 
@@ -188,8 +192,7 @@ In rough priority order, each with the mitigation we propose.
 | 5 | **No second approver for triggers; scope grew SNS → PR without review** (F5) | Governance rests on two people | Trigger review checklist; quarterly review with Security |
 | 6 | **Customer-visible fields are written from Slack** | *Customer-friendly name* / *Customer value* appear on the certified roadmap | Preview is mandatory today; consider a second approver for certified Initiatives |
 | 7 | **Broader Slack scopes than March** | Six more bot scopes, incl. private-channel history | Needed for private-channel triggers; each scope is mapped to a feature in the spec (§9.1) |
-| 8 | **No CI checks** | No secrets or dependency scanning on the repository | Add GitHub Actions: tests, `npm audit`, secret scan |
-| 9 | **Audit trail lives in Slack** (F3) | Retention and immutability are Slack's | Immutable store for the audit events (post-pilot) |
+| 8 | **Audit trail lives in Slack** (F3) | Retention and immutability are Slack's | Immutable store for the audit events (post-pilot) |
 
 ## 6. Decisions we need from Security
 

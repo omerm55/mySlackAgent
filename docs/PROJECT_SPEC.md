@@ -312,6 +312,8 @@ docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md,
 supabase/                      SQL for all tables and migrations (see §6)
 tests/                         Jest (236 tests, 26 suites)
 config/*.example.json          Local-dev config templates (legacy path)
+.github/workflows/ci.yml       CI: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
+scripts/scan-secrets.sh        Secret scan over tracked files (Slack / Atlassian / Supabase / OpenAI / keys)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
 
@@ -996,6 +998,20 @@ npm test
 The OAuth callback needs a public URL locally (tunnel) — corporate networks blocked ngrok, which is why
 Render was adopted early.
 
+### 11.2a Continuous integration (`.github/workflows/ci.yml`)
+
+Four jobs on every push and pull request (Node 22, `npm ci`):
+
+| Job | What it does | Fails when |
+|---|---|---|
+| Tests | `npm test` | any test fails |
+| Dependency audit | `npm audit --audit-level=high` | a high or critical advisory exists (low/moderate in dev dependencies do not block) |
+| Secret scan | `scripts/scan-secrets.sh` over every tracked file | anything matching a Slack (`xox…`), Atlassian (`ATATT3…`), Supabase (`sb_secret_…`, `sb_publishable_…`), JWT, OpenAI (`sk-…`), private-key or `TOKEN_ENCRYPTION_KEY=` pattern is committed. `.env.example` is exempt (placeholders); the script prints file and line only, never the value |
+| Spec updated | on PRs: compares changed paths against the base branch | `src/` or `supabase/` changed without `docs/PROJECT_SPEC.md` — the `CLAUDE.md` rule, enforced |
+
+Run the secret scan locally with `bash scripts/scan-secrets.sh`. Deployment stays Render's own
+auto-deploy on push; CI is a gate for review, not for the deploy.
+
 ### 11.3 Other artefacts
 
 `Dockerfile`, `docker-compose.yml`, `ecosystem.config.js` (pm2) and `deploy/slack-jira-bot.service`
@@ -1294,6 +1310,12 @@ Chronological, with rationale (see `git log` for commits):
     Edit reply / Cancel, reusing the shape the collect ask already had. `no_action` needs no confirmation;
     an LLM error leaves the Yes/No buttons; Cancel restores the ask. The ops channel now distinguishes
     *proposed* from *applied*. Closes the security summary's open item on unpreviewed LLM writes.
+33. **CI: tests, dependency audit, secret scan, spec-updated check.** The repository had no automated
+    checks, so the `CLAUDE.md` spec rule relied on memory and a committed credential would have gone
+    unnoticed. Four jobs now run on every push and PR (§11.2a). The audit gate is set at *high* so
+    low/moderate advisories in Jest's transitive tree do not block work; setting it up surfaced a real
+    high-severity axios advisory (credential theft via prototype pollution in config merge), fixed in
+    the same commit by moving to axios 1.20 — 0 vulnerabilities now.
 
 ---
 
@@ -1378,9 +1400,8 @@ all implemented; the Supabase secret key has been rotated (10 Sept); the remaini
 - LLM prompt/response logging with PII controls for evaluation.
 
 ### 16.8 Engineering hygiene
-- CI guard for the maintenance rule: fail a PR that changes `src/` or `supabase/` without touching
-  `docs/PROJECT_SPEC.md` (a `git diff --name-only` check in GitHub Actions is enough).
-- CI (GitHub Actions): lint, `npm test`, dependency audit, deploy on green.
+- ~~CI guard for the maintenance rule~~ and ~~CI (tests, dependency audit, secret scan)~~ — done, §11.2a.
+- Make Render's deploy wait for CI (deploy on green) instead of deploying on push.
 - ESLint/Prettier config; JSDoc → TypeScript migration or type-checking via `checkJs`.
 - Remove legacy paths (JSON config loaders) once confirmed unused; update README
   to point at this spec.
