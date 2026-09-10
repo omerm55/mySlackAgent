@@ -1124,10 +1124,15 @@ app changes. State and remaining steps:
     Repository → *Mirroring repositories*, direction **Push**. The form only offers username/password or
     an SSH key, which is expected — GitHub stopped accepting account passwords over Git in 2021, so the
     credential is a token or a deploy key, never a password:
-    - **SSH deploy key (preferred — does not expire).** URL `git@github.com:omerm55/mySlackAgent.git`,
-      authentication method *SSH public key*; save, then reopen the mirror row and copy the public key
-      GitLab generated into GitHub → the repository → Settings → *Deploy keys* → Add, with **Allow write
-      access** ticked.
+    - **SSH deploy key (preferred — does not expire).** The URL goes in *Git repository URL*, the single
+      field at the top of the *Mirroring repositories* section, and GitLab's mirror form validates it as a
+      URL, so it needs the scheme — `ssh://git@github.com/omerm55/mySlackAgent.git` (a slash after the
+      host, not GitHub's `git@github.com:owner/repo.git` copy-paste form, which is rejected). Direction
+      **Push**, authentication method *SSH public key*, then *Detect host keys* and check the fingerprint
+      against GitHub's published SSH key fingerprints. Leave *Mirror only protected branches* unchecked
+      while Render still deploys from the session branch. Only after **Mirror repository** is saved does
+      GitLab generate the key: reopen the row, copy the public key, and add it in GitHub → the repository
+      → Settings → *Deploy keys* → Add, with **Allow write access** ticked. Then *Update now*.
     - **HTTPS + token.** URL `https://omerm55@github.com/omerm55/mySlackAgent.git` (the account name goes
       in the URL), authentication method *Password*, and paste a GitHub personal-access token as the
       password — fine-grained, scoped to this one repository with *Contents: read and write*, or classic
