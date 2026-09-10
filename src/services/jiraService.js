@@ -44,6 +44,17 @@ class JiraService {
   }
 
   /**
+   * Who this client is authenticated as. Used at boot to show in the log and the ops channel which
+   * Jira identity the bot polls and (where allowed) writes with — a personal admin account is easy to
+   * leave in place by accident.
+   * @returns {Promise<{accountId: string, displayName: string, email: string|null}>}
+   */
+  async whoAmI() {
+    const res = await this.client.get('/rest/api/3/myself');
+    return { accountId: res.data?.accountId, displayName: res.data?.displayName, email: res.data?.emailAddress ?? null };
+  }
+
+  /**
    * Fetch a Jira issue.
    * @param {string} issueKey e.g. 'PROJ-123'
    */

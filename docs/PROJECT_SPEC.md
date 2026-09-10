@@ -314,7 +314,7 @@ src/
     opsNotifier.js (ops channel + audit_events)  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     tokenCrypto.js (AES-256-GCM for OAuth tokens at rest, key rotation)
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
-docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (Sept 2026 answer to the March security review), architecture.md (March design)
+docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6)
 tests/                         Jest (236 tests, 26 suites)
 config/*.example.json          Local-dev config templates (legacy path)
@@ -341,8 +341,9 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 5. Build a `services` bag (with getters for late-bound `alerting`, `opsNotifier`, `jiraPoller`,
    `digestScheduler`) and register **one** handler per concern.
 6. `await app.start()`; then create `Alerting`, `OpsNotifier`; `oauthService.loadFromDb()`; start
-   the callback HTTP server; start `JiraPoller` and `DigestScheduler` (if Supabase); start keep-alive;
-   schedule daily summary.
+   the callback HTTP server; report the Jira service identity to ops (`whoAmI`, warns on a
+   `JIRA_SERVICE_ACCOUNT_EMAIL` mismatch); start `JiraPoller` and `DigestScheduler` (if Supabase); start
+   keep-alive; schedule daily summary.
 
 ### 5.2 Handlers
 
@@ -364,6 +365,7 @@ carry it in `private_metadata`.
 **`jiraService.js`** — `getIssue`, `updateIssueField(key, fieldId, value, type)` (`select` → `{value}`,
 `text`, `array` → `[{name}]`, `raw`), `updateIssueFields(key, {fieldId: value})` (several fields, one PUT,
 values sent as given), `addComment` (ADF paragraphs), `findUser(ByEmail)`, `assignIssue`,
+`whoAmI()` (`/myself` — the identity reported at boot),
 `searchIssues(jql, fields, max=1000)` (POST `/rest/api/3/search/jql`, follows `nextPageToken`, flags
 `truncated`), `getTransitions` (with `expand=transitions.fields`), `transitionIssue(key, status)`
 (matches destination or transition name; auto-fills required Resolution; names unfillable required
@@ -941,7 +943,11 @@ automatically" note.
 ### 9.3 Jira
 
 - Service account API token (`JIRA_USER_EMAIL` + `JIRA_API_TOKEN`) used for polling/reads, and for
-  writes only on triggers an admin marked `allow_bot_fallback`. Reporter/assignee **email visibility** to this account is required for Jira triggers
+  writes only on triggers an admin marked `allow_bot_fallback`. **Until IT provisions a dedicated
+  account this is still the bot owner's personal admin account** — the exact permissions to request and
+  the switchover steps are in [`JIRA_SERVICE_ACCOUNT.md`](JIRA_SERVICE_ACCOUNT.md). At boot the bot calls
+  `myself` and posts its Jira identity to the ops channel, warning when it differs from
+  `JIRA_SERVICE_ACCOUNT_EMAIL` — that is how a personal account left in place gets noticed. Reporter/assignee **email visibility** to this account is required for Jira triggers
   to resolve Slack users (Atlassian profile privacy may hide it).
 - Existing Jira Automation for epics: when all children are Done → move epic to *Acceptance*.
   Its Slack-notification action should be removed once the bot asks instead.
@@ -966,6 +972,7 @@ style base with `OPENAI_DEPLOYMENT` = deployment name (GPT-5.1). Uses `api-key` 
 |---|---|---|
 | `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_TOKEN` | yes | Slack Bolt (Socket Mode) |
 | `JIRA_BASE_URL`, `JIRA_USER_EMAIL`, `JIRA_API_TOKEN` | yes | Jira service account; base URL also builds issue links |
+| `JIRA_SERVICE_ACCOUNT_EMAIL` | no | The account the bot is *expected* to be; a mismatch with the live identity is reported to ops at every start |
 | `OPS_CHANNEL_ID` | yes (cloud) | Ops channel for all notifications (when `config/settings.json` absent) |
 | `JIRA_OAUTH_CLIENT_ID`, `JIRA_OAUTH_CLIENT_SECRET`, `OAUTH_REDIRECT_URI` | for OAuth | Atlassian 3LO |
 | `OAUTH_PORT` | no | Local callback port (Render supplies `PORT`) |
@@ -1182,6 +1189,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | 👍 reaction answered with "I've DM'd you a link to connect Jira" and no update | Same, for channel triggers | Same |
 | Callback page says "This link has expired or was already used" | Connect link older than 24 h, clicked twice, or not issued by us (`oauth_states` has no live row) | Open the bot's Home tab and press Connect Jira again; Home issues a fresh link on every open |
 | Saving a Connect link fails / Home shows no Connect button after deploy | `oauth_states` table missing | Run `supabase/oauth_states.sql` |
+| Ops says "🔑 Jira service identity: <a person>" or warns about a mismatch | `JIRA_USER_EMAIL` / `JIRA_API_TOKEN` are not the intended service account (a personal account left in place) | Switch to the dedicated account per `JIRA_SERVICE_ACCOUNT.md`; set `JIRA_SERVICE_ACCOUNT_EMAIL` so a future mismatch is flagged |
 | Boot fails: "oauth_tokens are encrypted but TOKEN_ENCRYPTION_KEY is not set" | Key removed from Render (or wrong service) while encrypted rows exist | Restore the key in Render; never "fix" by deleting rows — users would have to reconnect |
 | Boot fails: "Could not decrypt token (wrong TOKEN_ENCRYPTION_KEY or tampered value)" | Key changed without keeping the old one | Put the old key in `TOKEN_ENCRYPTION_KEY_PREVIOUS`, deploy, then clear it (§12.5) |
 | Jira trigger matched but nobody DM'd | Reporter email hidden or no Slack user for email | Ops shows the reason; adjust profile visibility or map users |
@@ -1386,6 +1394,14 @@ Chronological, with rationale (see `git log` for commits):
     write-ahead log or an external SIEM because it reuses the store we already have and needs no new
     credential; it is durable and queryable, not immutable (the server key could still delete rows),
     which the security summary says plainly. **Migration `supabase/audit_events.sql` must be run.**
+36. **Say which Jira identity we are running as.** The bot's Jira credential is still the owner's
+    personal admin account, which the March review would rightly object to twice over (attribution and
+    least privilege). Provisioning a real service account is IT's action, so the code contribution is
+    visibility: `whoAmI` at boot, the identity posted to ops, and a loud warning when it differs from
+    `JIRA_SERVICE_ACCOUNT_EMAIL`. `JIRA_SERVICE_ACCOUNT.md` is the request for IT — the exact permission
+    list derived from what the code actually calls (browse + user lookup always; edit, transition,
+    comment, assign only for allowed-fallback triggers; explicitly *not* delete or administer), scoped to
+    SNS and PR, with the switchover steps and the e-mail-visibility caveat.
 
 ---
 

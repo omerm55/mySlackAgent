@@ -3,7 +3,8 @@
 > For the security review thread of 30 March – 15 April 2026 (Dennis Ong, Abhishek Rath, Jeffrey Kinum,
 > Lauren Bauman, Yael Lev). It answers two questions: **what we did about each point of the March
 > feedback, and what still remains.** Owner: Omer Meshar (PH Ops). Technical detail is in
-> [`PROJECT_SPEC.md`](PROJECT_SPEC.md); the March design is preserved in [`architecture.md`](architecture.md).
+> [`PROJECT_SPEC.md`](PROJECT_SPEC.md); the March design is preserved in [`architecture.md`](architecture.md);
+> the Jira service-account request for IT is in [`JIRA_SERVICE_ACCOUNT.md`](JIRA_SERVICE_ACCOUNT.md).
 
 ## 0. Status, stated plainly
 
@@ -79,7 +80,13 @@ Abhishek's five expectations, plus Lauren's question:
   connection, notification preference and activity in App Home; editing someone else's trigger is refused.
 
 **What remains.**
-- The service account's own Jira permissions have not been reduced to the minimum set (IT action).
+- **The Jira credential the bot uses is still the owner's personal admin account.** This is the one
+  March point we cannot close ourselves: it needs IT to provision a dedicated, non-admin service account.
+  We have written the request — the exact permission set derived from what the code calls, scoped to SNS
+  and PR, explicitly excluding delete and administer, with the switchover steps
+  ([`JIRA_SERVICE_ACCOUNT.md`](JIRA_SERVICE_ACCOUNT.md)). In the meantime the bot reports its Jira
+  identity to the operator channel at every start and warns when it is not the expected account, so this
+  cannot quietly persist.
 - The admin list is an environment variable with two names, not a managed group.
 - Whether the per-trigger bot-account exception should exist at all is a decision for Security (§6).
 
@@ -195,7 +202,7 @@ In rough priority order, each with the mitigation we propose.
 |---|---|---|---|
 | 1 | **Hosting on Render (free tier) with production secrets** | No SLA, instance sleeps, region not chosen by us; Slack/Jira/OAuth/Supabase/OpenAI secrets live in Render's environment; not reviewed by IT/Security | Decide with IT: company infrastructure, or an approved Render tier and region; secrets in a managed store |
 | 2 | **Azure OpenAI data flow** (F6) | Jira summaries, Notes previews and users' free text leave Jira and Slack | Data-processing approval: tenant, retention, no-training terms |
-| 3 | **Service-account permissions not minimised** (F1) | The account can do more in Jira than the bot needs | Least-privilege pass with IT |
+| 3 | **The bot's Jira account is a personal admin account** (F1) | Reads and any bot-account writes are attributed to a person who did not perform them, the credential carries admin rights the bot never needs, and it cannot be revoked without disrupting that person | IT provisions a dedicated non-admin service account with the permission list in `JIRA_SERVICE_ACCOUNT.md` (SNS + PR only); the bot already reports and flags its live identity |
 | 4 | **No "who would be asked" preview before a trigger is saved** (F4) | An admin cannot see the audience a JQL resolves to until it runs; volume is now capped and new triggers start as *only me*, so the blast radius is small, but the list is still not shown up front | Render the resolved audience in the trigger modal before saving |
 | 5 | **No second approver for triggers; scope grew SNS → PR without review** (F5) | Governance rests on two people | Trigger review checklist; quarterly review with Security |
 | 6 | **Customer-visible fields are written from Slack** | *Customer-friendly name* / *Customer value* appear on the certified roadmap | Preview is mandatory today; consider a second approver for certified Initiatives |

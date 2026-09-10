@@ -154,6 +154,24 @@ registerPreferencesHandler(app, services);
     logger.info({ redirectUri: process.env.OAUTH_REDIRECT_URI }, '[oauth] Impersonation enabled');
   }
 
+  // Which Jira identity are we polling (and, where a trigger allows it, writing) as? A personal admin
+  // account is easy to leave in Render by accident; say so plainly at boot and in the ops channel.
+  jiraService.whoAmI()
+    .then(async (me) => {
+      const expected = (process.env.JIRA_SERVICE_ACCOUNT_EMAIL || '').trim().toLowerCase();
+      const actual = (me.email || '').toLowerCase();
+      const mismatch = expected && actual && expected !== actual;
+      logger.info({ jiraAccount: me.displayName, jiraAccountId: me.accountId }, '[jira] Service identity');
+      if (mismatch || !expected) {
+        await opsNotifier?.post(
+          `🔑 Jira service identity: *${me.displayName}*${me.email ? ` (${me.email})` : ''}` +
+          (mismatch ? ` — ⚠️ expected *${expected}* (JIRA_SERVICE_ACCOUNT_EMAIL). Reads and any bot-account writes are made as this user.` : ' — set `JIRA_SERVICE_ACCOUNT_EMAIL` to the intended service account and I will flag a mismatch here.'),
+          { kind: 'service_identity', detail: { displayName: me.displayName, accountId: me.accountId, expected: expected || null, mismatch: !!mismatch } },
+        );
+      }
+    })
+    .catch((err) => logger.warn(`[jira] Could not read the service identity: ${err.message}`));
+
   // Keep the (free-tier) Render instance from spinning down between Slack events.
   startKeepAlive({ logger });
 
