@@ -1713,6 +1713,15 @@ all implemented; the Supabase secret key has been rotated (10 Sept); the remaini
 - Migration tooling for Supabase (numbered SQL files, applied via CI) instead of hand-run scripts.
 
 ### 16.9 Compliance & rollout
+- **Security review SNS-133715** set three preconditions (10 Sept). The *repository* one is met
+  (§11.4). The *Supabase* one is in progress: Supabase is not an approved third-party processor, so a
+  vendor due-diligence ticket is open with Procurement — service desk **Unthread #2759**
+  (`servicedesk.sisense.com/tickets/8b73a220-25d2-4fc2-8d0b-3e9043f6dc64`), filed via the *Software POV
+  & Free Tools* intake, VP budget approver Moti Granovsky. Two conditions are **not** satisfied by that
+  ticket existing: if Supabase stays it must move to a procured **paid tier** (a free tier lacks the
+  contractual data-handling terms), and the review asked for a **target date for the AWS migration**.
+  The review also holds *no new data into Supabase* until it clears or the migration lands, and requires
+  the build to be re-ratified every 90 days.
 - Privacy policy/ToS already published for the Atlassian app; add a data-retention policy for
   `jira_prompts`/audit data and a deletion path when a user leaves.
 - Rollout guide: pilot group via `scope=personal`/allowlists → team → org; announcement template (used
