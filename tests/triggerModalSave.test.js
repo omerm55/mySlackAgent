@@ -57,6 +57,13 @@ describe('Jira trigger modal save', () => {
     expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/✅ Jira trigger .*Pilot: only <@UYEHUDA>/));
   });
 
+  test('a new trigger with no scope choice defaults to personal (safe first run)', async () => {
+    const { handlers, db, client, logger } = setup();
+    const { jt_scope, ...noScope } = values;
+    await handlers.create_jira_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: noScope } }, client, logger });
+    expect(db.insertJiraTrigger).toHaveBeenCalledWith(expect.objectContaining({ scope: 'personal' }));
+  });
+
   test('Jira identity checkbox: unchecked → allow_bot_fallback false (default); checked → true', async () => {
     const { handlers, db, client, logger } = setup();
     await handlers.create_jira_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values } }, client, logger });

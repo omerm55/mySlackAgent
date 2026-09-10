@@ -59,6 +59,8 @@ services:
         sync: false
       - key: JIRA_MAX_PROMPTS_PER_RUN
         value: "10"
+      - key: JIRA_MAX_PROMPTS_PER_DAY
+        value: "50"
       - key: RISK_NOTIFICATION_MAX_AGE_DAYS
         value: "8"
       - key: RISK_NOTIFICATION_MATCH

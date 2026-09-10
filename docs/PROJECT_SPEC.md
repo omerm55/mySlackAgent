@@ -91,8 +91,10 @@ re-asked automatically if the Yes fails.
 Flagship use-case: *epics in Acceptance* — a Jira Automation moves an epic to Acceptance when all
 children are Done; the bot asks the reporting PM to approve and move it to Done.
 
-**Rolling out safely.** Two controls: `scope` (`personal` = only the creator is ever DM'd; `global` =
-anyone matched) and an optional **pilot list** of Slack users. While a pilot list is set, only those
+**Rolling out safely.** **New triggers default to `scope = personal`** — the first run reaches only the
+creator, so a mis-typed JQL cannot surprise the company (that is exactly what happened on 8 Sept). Two
+controls: `scope` (`personal` = only the creator is ever DM'd; `global` = anyone matched) and an optional
+**pilot list** of Slack users. While a pilot list is set, only those
 people are asked (and FYI'd); everyone else the JQL matches is skipped *without* being recorded, so
 clearing the list later asks them normally. `scope=personal` is checked first and wins: a pilot list
 only has an effect together with `scope=global`. Typical path: personal → global + pilot list → global.
@@ -385,7 +387,7 @@ integrations (`getActiveIntegrations`, `upsertIntegration`, `updateIntegration`,
 jira_triggers (`getActiveJiraTriggers`, `insertJiraTrigger`, `updateJiraTrigger`, `deactivateJiraTrigger`),
 jira_prompts (`getPromptedIssueKeys`, `getPromptsForTrigger`, `recordPrompt(…, {payload, delivered})`,
 `updatePromptPayload`, `markPromptAnswered`, `deletePromptsForIssue`, `deletePromptsForTrigger`,
-`getPendingPrompts`, `markPromptsDelivered`), release_calendar (`getReleaseCalendar`), user_preferences
+`getPendingPrompts`, `markPromptsDelivered`, `countPromptsSince` — PostgREST `count=exact` header), release_calendar (`getReleaseCalendar`), user_preferences
 (`getUserPreference`, `getDigestUsers`, `upsertUserPreference`), activity_log (`insertActivity`,
 `getRecentActivity`).
 
@@ -398,7 +400,7 @@ are new (see below), for each resolve the person via `resolvePerson` — `report
 `user_field` (`notify_field_id`, first user of an array; fallback assignee → reporter) — → email →
 Slack id (`users.lookupByEmail`, cached), honour `scope=personal`, honour the **pilot list**
 (`pilot_slack_user_ids`: others are skipped and not recorded; FYIs only to listed users), honour the
-user's digest preference (queue vs send), cap `JIRA_MAX_PROMPTS_PER_RUN` (10) per trigger per run, record prompt, stamp
+user's digest preference (queue vs send), cap `JIRA_MAX_PROMPTS_PER_RUN` (10) per trigger per run **and `JIRA_MAX_PROMPTS_PER_DAY` (50) per trigger per rolling 24 h** (counted from `jira_prompts` via `countPromptsSince`, so it survives restarts and spans Run-now clicks; hitting it posts to ops and leaves the matches for later; a failed count falls back to the per-run cap rather than blocking), record prompt, stamp
 `last_polled_at` even on failure. **Watch field:** when `trigger.watch_field` is set, the poller stores
 the field's value in `jira_prompts.payload.watchedValue`; on later runs an issue whose current value
 differs is deleted from prompts and asked again (rows predating the feature are backfilled, not re-asked).
@@ -409,7 +411,7 @@ current values ride along); all carry `allowFallback` (= `trigger.allow_bot_fall
 (explicit `fyi_field_id`, else PM owner for risk reviews) → first user → Slack id; if different from the
 person asked, `sendFyi` posts an informational DM right away and the id rides in the payload/button
 context so `dmHandler` can echo actions to them. Returns per-trigger stats `{matched, fresh, sent, queued,
-fyi, pilotSkipped, skipped[], sentTo[], queuedFor[]}`. `runOnce({force, onlyId})` is used by Run now / Re-ask / save.
+fyi, pilotSkipped, stale, offTopic, dayCapped, skipped[], sentTo[], queuedFor[]}`. `runOnce({force, onlyId})` is used by Run now / Re-ask / save.
 
 **`riskReviewMessage.js`** (utils) — builds the `risk_review` DM (`buildRiskReviewBlocks`,
 `sendRiskReview`, `afterStatusBlocks` = Update Notes + Skip), the buttonless `sendFyi` (risk-review and
@@ -946,6 +948,7 @@ style base with `OPENAI_DEPLOYMENT` = deployment name (GPT-5.1). Uses `api-key` 
 | `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` | alt providers | Fallback providers |
 | `JIRA_POLL_INTERVAL_SEC` | no (60) | Poller tick; floor for per-trigger cadence |
 | `JIRA_MAX_PROMPTS_PER_RUN` | no (10) | Max DMs one trigger sends per run |
+| `JIRA_MAX_PROMPTS_PER_DAY` | no (50) | Max DMs one trigger sends per rolling 24 h, counted in the database (0 = no cap) |
 | `CURRENT_RELEASE_VERSION` | no | Override "current release" for Fix Version suggestions |
 | `KEEP_ALIVE_URL`, `KEEP_ALIVE_INTERVAL_SEC`, `KEEP_ALIVE_DISABLED` | no | Self-ping (defaults from `RENDER_EXTERNAL_URL`, 300 s) |
 | `PR_LATEST_NOTIFICATION_FIELD`, `PR_NOTES_FIELD`, `PR_TARGET_FIELD`, `PR_DEV_OWNER_FIELD`, `PR_PM_OWNER_FIELD` | no | PR field ids for the risk review (defaults `customfield_15525` / `12958` / `11818` / `11962` / `11909`) |
@@ -1040,6 +1043,8 @@ architecture note superseded by this document.
 | 🔁 Re-ask open matches | `deletePromptsForTrigger` then force run — re-DMs everyone still matching (including those who answered No) |
 | 🗑 Delete | `active = false` |
 
+Both trigger modals default a **new** trigger to *Only me*; open it up by editing after a Run now.
+
 Both trigger modals (admins): **Jira identity** checkbox — *Allow the bot account to act for people who
 haven't connected Jira*. Off by default and for every existing trigger; Home rows show 🤖 when on. Leave
 it off for anything that writes PR fields (the risk review and A1 triggers).
@@ -1123,6 +1128,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | Reaction ignored, log "no integration matches (known channels: …)" | Bot not in channel / wrong channel id | `/invite @bot`; check channel id in trigger |
 | Slack shows ⚠️ on a click, nothing happens | App not connected (Render asleep or redeploying) | Wait for deploy / keep-alive; retry |
 | "You don't have access to this app" on Atlassian consent | OAuth app not shared | Distribution → Sharing |
+| Ops says "hit its daily cap (50 asks / 24 h)" and matches are left unasked | The trigger has already recorded 50 prompts in the last 24 h (`JIRA_MAX_PROMPTS_PER_DAY`) | Expected safety valve. The matches are asked as the window rolls; raise the variable in Render if a trigger legitimately needs more |
 | Someone pressed Yes / High Risk / Save and got "🔐 Connect Jira first, then press the button again" | They have no Jira connection and the trigger does not allow the bot account to act for them (the default) | Expected: they connect (10 s) and press the same button; nothing was written. If the bot *should* act for unconnected people on this trigger, an admin ticks the Jira identity checkbox |
 | 👍 reaction answered with "I've DM'd you a link to connect Jira" and no update | Same, for channel triggers | Same |
 | Callback page says "This link has expired or was already used" | Connect link older than 24 h, clicked twice, or not issued by us (`oauth_states` has no live row) | Open the bot's Home tab and press Connect Jira again; Home issues a fresh link on every open |
@@ -1176,11 +1182,11 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `dmFixVersionOffer` | Offer rendering, unique action_ids, progress lines, fallback when Slack rejects blocks |
 | `dmQuestionFormat` | Template rendering (`{key} ({summary})` → one link, pipe-safety), headline dedup, button context |
 | `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change; `parseNotificationDate` / `notificationAge` (current year, year roll-back, unparseable = fresh, 8-day cutoff); `notificationMatches` (case-insensitive regex, empty = all, invalid regex = substring) |
-| `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; stale `Latest notification` stamps (older than `RISK_NOTIFICATION_MAX_AGE_DAYS`) are skipped without recording and counted in the Run-now summary; stamps that don't match `RISK_NOTIFICATION_MATCH` (orange, Overdue, Status mismatch…) are skipped the same way; collect trigger requests its field ids and DMs the PM owner an Answer/Skip ask with current values in the payload; every payload carries `allowFallback` |
+| `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; stale `Latest notification` stamps (older than `RISK_NOTIFICATION_MAX_AGE_DAYS`) are skipped without recording and counted in the Run-now summary; stamps that don't match `RISK_NOTIFICATION_MATCH` (orange, Overdue, Status mismatch…) are skipped the same way; collect trigger requests its field ids and DMs the PM owner an Answer/Skip ask with current values in the payload; every payload carries `allowFallback`; durable daily cap: budget spent → nothing sent or recorded + ops warning, partial budget → only that many asked, counting failure → per-run cap still applies |
 | `collect` | Trigger field list parse/format round-trip + errors; `collectContextFor` current values + certified/timing; `visibilityLine`; certified line in DM and modal, absent otherwise; ask blocks (Answer/Skip, unique ids, ctx < 2000 chars); preview Save/Edit/Cancel vs missing-required (no Save); `mergeValues` precedence + 255 cap; modal prefill + slim metadata; `readCollectModal`; `sendDmQuestion` delegation; handlers: Answer opens modal with DM location, empty submit → inline error, explicit-only → no LLM, free text → LLM with typed field winning, LLM partial → "Almost there", LLM failure → note, Save → ONE `updateIssueFields` PUT + ✅ + answered + ops + FYI, save failure → ❌ + re-ask, Edit prefilled, Cancel restores ask, Skip |
 | `dmReplyPreview` | Modal submit previews and writes nothing (ops "proposed", not "decision"); Confirm applies transition + comment + assignee and reports to ops; Cancel restores the Yes/No/Reply ask; Edit reply reopens the modal prefilled; `no_action` finalises without buttons; LLM failure keeps the ask actionable; the preview button value stays under Slack's 2000-char cap; `describeDecision` renders each change kind |
 | `dmRequireOauth` | Yes without token/fallback → nothing written, ask restored with its buttons + Connect, prompt kept, ops told; with fallback → bot writes + nudge; with token → user writes; a second nudge does not stack; Reply / Update Notes / Answer without token → modal not opened; Notes modal submitted without token → ask rebuilt from ctx; risk status with fallback / token; No and Handled still work; all three ctx builders carry `allowFallback` |
-| `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; save-time run posts the Run-now summary with queued matches called out; Jira identity checkbox → `allow_bot_fallback` on both trigger kinds (default false; ops line says OAuth required / bot may act) |
+| `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; a new trigger with no scope choice defaults to `personal`; save-time run posts the Run-now summary with queued matches called out; Jira identity checkbox → `allow_bot_fallback` on both trigger kinds (default false; ops line says OAuth required / bot may act) |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), Connect (async URL) vs Disconnect by connection state, persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
 | `callbackServer` | Public HTTP surface is exactly `/health` (200) and `/oauth/callback` (400 without code/state, else `handleCallback(code, state)`; `invalid_state` → 400 "expired or already used" page, not 500); `/send-dm` and unknown paths → 404 |
 | `tokenCrypto` | Round trip, prefixed random ciphertext, legacy plaintext passthrough, wrong key / tampering / malformed detected, rotation (previous key decrypts, `isCurrent` distinguishes), `fromEnv` |
@@ -1316,6 +1322,13 @@ Chronological, with rationale (see `git log` for commits):
     low/moderate advisories in Jest's transitive tree do not block work; setting it up surfaced a real
     high-severity axios advisory (credential theft via prototype pollution in config merge), fixed in
     the same commit by moving to axios 1.20 — 0 vulnerabilities now.
+34. **Durable daily cap, and new triggers start personal.** The per-run cap of 10 was the only brake, and
+    a 2-minute cadence made that 300 asks an hour; the in-memory rate limits also reset on every restart.
+    A trigger now also has a 24-hour budget counted in `jira_prompts` (`JIRA_MAX_PROMPTS_PER_DAY`, 50),
+    which survives restarts and spans Run-now clicks; hitting it posts to ops and leaves the matches for
+    the next window rather than dropping them. Counting failures fall back to the per-run cap instead of
+    blocking a trigger. Separately, both modals now default a **new** trigger to *Only me* — the 8 Sept
+    surprise was a trigger saved as global on the first try. Closes two security-summary open items.
 
 ---
 
@@ -1327,7 +1340,8 @@ Chronological, with rationale (see `git log` for commits):
   activity is persisted in `activity_log`, the daily ops summary still uses the in-memory list).
 - **Email-based user mapping** depends on Atlassian profile visibility; no manual override table yet.
 - **Re-ask re-asks everyone**, including users who answered No; outcomes aren't stored per prompt.
-- **Slack rate limits** are not centrally managed (bursts capped only by `JIRA_MAX_PROMPTS_PER_RUN`).
+- **Slack rate limits** are not centrally managed (bursts capped by `JIRA_MAX_PROMPTS_PER_RUN` and the
+  daily `JIRA_MAX_PROMPTS_PER_DAY`).
 - **PR workflow validators** ("Planned release" and "PR PM owner" must be set for any status change)
   are surfaced as Jira's error text on the risk-review buttons but not yet offered a fix-up picker.
 - **Risk review re-asks track the field, not the outcome:** a Dev owner who clicks Handled is asked

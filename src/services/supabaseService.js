@@ -199,6 +199,20 @@ class SupabaseService {
     return res.data ?? [];
   }
 
+  /**
+   * How many prompts this trigger recorded since `since` — the durable daily cap (a restart used to
+   * reset the in-memory limits). PostgREST returns the count in the Content-Range header.
+   */
+  async countPromptsSince(triggerId, since) {
+    const res = await this.client.get('/jira_prompts', {
+      params: { trigger_id: `eq.${triggerId}`, prompted_at: `gte.${new Date(since).toISOString()}`, select: 'id' },
+      headers: { Prefer: 'count=exact', Range: '0-0', 'Range-Unit': 'items' },
+    });
+    const range = res.headers?.['content-range'] || '';           // e.g. "0-0/37" or "*/0"
+    const total = parseInt(String(range).split('/')[1] ?? '', 10);
+    return Number.isFinite(total) ? total : (res.data?.length ?? 0);
+  }
+
   async updatePromptPayload(id, payload) {
     await this.client.patch('/jira_prompts', { payload }, {
       params: { id: `eq.${id}` },

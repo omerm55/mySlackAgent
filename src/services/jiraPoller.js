@@ -55,6 +55,10 @@ function fieldsFor(trigger) {
 
 // How many people one trigger may DM per run (env JIRA_MAX_PROMPTS_PER_RUN, default 10).
 const MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN = Math.max(1, parseInt(process.env.JIRA_MAX_PROMPTS_PER_RUN || '10', 10) || 10);
+// …and per rolling 24 hours (env JIRA_MAX_PROMPTS_PER_DAY, default 50; 0 disables). Counted from
+// jira_prompts, so unlike the in-memory limits it survives restarts and applies across Run-now clicks.
+const MAX_NEW_PROMPTS_PER_TRIGGER_PER_DAY = Math.max(0, parseInt(process.env.JIRA_MAX_PROMPTS_PER_DAY ?? '50', 10) || 0);
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Polls Jira on an interval for each active "Jira trigger" stored in Supabase.
@@ -159,7 +163,7 @@ class JiraPoller {
 
   async _evaluateTrigger(trigger) {
     const tag = `[jiraPoller/${trigger.name}]`;
-    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, fyi: 0, pilotSkipped: 0, stale: 0, offTopic: 0, skipped: [], sentTo: [], queuedFor: [] };
+    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, fyi: 0, pilotSkipped: 0, stale: 0, offTopic: 0, dayCapped: 0, skipped: [], sentTo: [], queuedFor: [] };
     const prefCache = new Map();
     // Pilot list: only these Slack users are asked / FYI'd while it is set
     const pilot = Array.isArray(trigger.pilot_slack_user_ids) && trigger.pilot_slack_user_ids.length
@@ -208,8 +212,34 @@ class JiraPoller {
 
     this.logger.info(`${tag} ${issues.length} match, ${fresh.length} new`);
 
+    // Durable 24-hour budget: how many asks this trigger has already recorded today
+    let dayBudget = Infinity;
+    if (MAX_NEW_PROMPTS_PER_TRIGGER_PER_DAY && this.db.countPromptsSince) {
+      try {
+        const already = await this.db.countPromptsSince(trigger.id, Date.now() - DAY_MS);
+        dayBudget = Math.max(0, MAX_NEW_PROMPTS_PER_TRIGGER_PER_DAY - already);
+        if (dayBudget === 0) {
+          this.logger.warn(`${tag} Daily cap reached (${already}/${MAX_NEW_PROMPTS_PER_TRIGGER_PER_DAY} in the last 24 h) — nothing sent`);
+          stats.dayCapped = fresh.length;
+          stats.skipped.push(`daily cap reached (${already}/${MAX_NEW_PROMPTS_PER_TRIGGER_PER_DAY} in the last 24 h) — ${fresh.length} not asked, will be picked up once the window rolls`);
+          await this.ops?.post?.(`⛔ Jira trigger *${trigger.name}* hit its daily cap (${MAX_NEW_PROMPTS_PER_TRIGGER_PER_DAY} asks / 24 h) — ${fresh.length} match(es) left for later`);
+          return stats;
+        }
+      } catch (err) {
+        // Counting failed — fall back to the per-run cap rather than blocking the trigger
+        this.logger.warn(`${tag} Could not read the daily prompt count: ${err.message}`);
+      }
+    }
+
     let sent = 0;
     for (const issue of fresh) {
+      if (sent >= dayBudget) {
+        this.logger.warn(`${tag} Daily cap reached mid-run (${MAX_NEW_PROMPTS_PER_TRIGGER_PER_DAY}/24 h) — rest deferred`);
+        stats.dayCapped = fresh.length - sent;
+        stats.skipped.push(`${fresh.length - sent} deferred: daily cap ${MAX_NEW_PROMPTS_PER_TRIGGER_PER_DAY}/24 h reached`);
+        await this.ops?.post?.(`⛔ Jira trigger *${trigger.name}* hit its daily cap (${MAX_NEW_PROMPTS_PER_TRIGGER_PER_DAY} asks / 24 h) — ${fresh.length - sent} match(es) left for later`);
+        break;
+      }
       if (sent >= MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN) {
         this.logger.warn(`${tag} Reached ${MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN} prompts this run — rest deferred to next run`);
         stats.skipped.push(`${fresh.length - sent} more deferred to the next run (cap ${MAX_NEW_PROMPTS_PER_TRIGGER_PER_RUN}/run)`);

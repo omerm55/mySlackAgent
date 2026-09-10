@@ -170,8 +170,11 @@ question as Lauren's, one hop further.
   field-collection ask and the free-text reply to a question — show the person exactly what will change
   and require an explicit Confirm; Cancel restores the original ask and nothing is written. A value the
   person typed always beats one the model extracted. **The LLM never writes to Jira on its own.**
-- **Roll-out gates**: personal scope and pilot lists let a trigger run for one person or a few before it
-  is opened to everyone matched.
+- **Roll-out gates**: a new trigger is created as *only me* by default, so its first run reaches only its
+  author; a pilot list then limits it to a few named people before it is opened to everyone matched.
+- **Volume caps that survive restarts**: besides the per-run limit, each trigger has a 24-hour budget
+  counted in the database, so a mis-scoped or looping trigger cannot keep messaging people; reaching it
+  is reported to the ops channel.
 - **Time-boxed operations**: every lookup stage is capped at 5 seconds and every message ends in an
   actionable state.
 - **Automated checks on every change**: tests, a dependency audit that fails on high or critical
@@ -188,7 +191,7 @@ In rough priority order, each with the mitigation we propose.
 | 1 | **Hosting on Render (free tier) with production secrets** | No SLA, instance sleeps, region not chosen by us; Slack/Jira/OAuth/Supabase/OpenAI secrets live in Render's environment; not reviewed by IT/Security | Decide with IT: company infrastructure, or an approved Render tier and region; secrets in a managed store |
 | 2 | **Azure OpenAI data flow** (F6) | Jira summaries, Notes previews and users' free text leave Jira and Slack | Data-processing approval: tenant, retention, no-training terms |
 | 3 | **Service-account permissions not minimised** (F1) | The account can do more in Jira than the bot needs | Least-privilege pass with IT |
-| 4 | **Jira triggers have no hourly cap; in-memory limits reset on restart** (F4) | A mis-scoped trigger can reach many people quickly | Per-trigger daily cap; "who would be asked" preview before saving |
+| 4 | **No "who would be asked" preview before a trigger is saved** (F4) | An admin cannot see the audience a JQL resolves to until it runs; volume is now capped and new triggers start as *only me*, so the blast radius is small, but the list is still not shown up front | Render the resolved audience in the trigger modal before saving |
 | 5 | **No second approver for triggers; scope grew SNS → PR without review** (F5) | Governance rests on two people | Trigger review checklist; quarterly review with Security |
 | 6 | **Customer-visible fields are written from Slack** | *Customer-friendly name* / *Customer value* appear on the certified roadmap | Preview is mandatory today; consider a second approver for certified Initiatives |
 | 7 | **Broader Slack scopes than March** | Six more bot scopes, incl. private-channel history | Needed for private-channel triggers; each scope is mapped to a feature in the spec (§9.1) |

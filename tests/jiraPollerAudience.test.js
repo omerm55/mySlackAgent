@@ -325,3 +325,62 @@ describe('poller: stale notifications are skipped', () => {
     expect(db.recordPrompt).toHaveBeenCalledWith('t4', 'PR-1', 'UDEV', expect.anything());
   });
 });
+
+describe('poller: durable daily cap per trigger', () => {
+  const trigger = {
+    id: 't6', name: 'Epic acceptance', jql: 'x', question: 'Approve {key}?', scope: 'global',
+    notify: 'reporter', ask_type: 'yes_no', action_type: 'transition', transition_to: 'Done',
+    poll_interval_min: 2, last_polled_at: null,
+  };
+  const issues = (n) => Array.from({ length: n }, (_, i) => ({
+    key: `SNS-${i + 1}`, fields: { summary: `s${i}`, status: { name: 'Acceptance' }, reporter: person(`r${i}@x.com`, `R${i}`) },
+  }));
+  function setup(count, already) {
+    const jira = { searchIssues: jest.fn().mockResolvedValue(issues(count)) };
+    const db = {
+      getActiveJiraTriggers: jest.fn().mockResolvedValue([trigger]),
+      getPromptedIssueKeys: jest.fn().mockResolvedValue(new Set()),
+      countPromptsSince: jest.fn().mockResolvedValue(already),
+      recordPrompt: jest.fn().mockResolvedValue(undefined),
+      updateJiraTrigger: jest.fn().mockResolvedValue(undefined),
+      getUserPreference: jest.fn().mockResolvedValue(null),
+    };
+    const slack = {
+      users: { lookupByEmail: jest.fn(async ({ email }) => ({ user: { id: `U${email[1]}` } })) },
+      chat: { postMessage: jest.fn().mockResolvedValue({ ts: '1' }) },
+      conversations: { open: jest.fn().mockResolvedValue({ channel: { id: 'D' } }) },
+    };
+    const ops = { post: jest.fn().mockResolvedValue(undefined), dmQuestionSent: jest.fn() };
+    const poller = new JiraPoller({ jiraService: jira, db, slackClient: slack, opsNotifier: ops, logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } });
+    return { poller, db, slack, ops };
+  }
+
+  test('budget already spent → nothing sent, nothing recorded, ops warned', async () => {
+    const { poller, db, slack, ops } = setup(3, 50);
+    const [stats] = await poller.runOnce({ force: true });
+    expect(db.countPromptsSince).toHaveBeenCalledWith('t6', expect.any(Number));
+    expect(stats.sent).toBe(0);
+    expect(stats.dayCapped).toBe(3);
+    expect(slack.chat.postMessage).not.toHaveBeenCalled();
+    expect(db.recordPrompt).not.toHaveBeenCalled();
+    expect(stats.skipped).toEqual(expect.arrayContaining([expect.stringMatching(/daily cap reached \(50\/50/)]));
+    expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/hit its daily cap/));
+  });
+
+  test('partial budget → only that many are asked, the rest deferred', async () => {
+    const { poller, db, stats: _s, slack, ops } = setup(5, 48);
+    const [stats] = await poller.runOnce({ force: true });
+    expect(stats.sent).toBe(2);
+    expect(stats.dayCapped).toBe(3);
+    expect(db.recordPrompt).toHaveBeenCalledTimes(2);
+    expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/3 match\(es\) left for later/));
+  });
+
+  test('counting fails → the per-run cap still applies, the trigger is not blocked', async () => {
+    const { poller, db } = setup(3, 0);
+    db.countPromptsSince.mockRejectedValueOnce(new Error('PostgREST down'));
+    const [stats] = await poller.runOnce({ force: true });
+    expect(stats.sent).toBe(3);
+    expect(stats.dayCapped).toBe(0);
+  });
+});

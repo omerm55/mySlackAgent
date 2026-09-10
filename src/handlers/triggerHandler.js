@@ -129,9 +129,9 @@ function buildChannelTriggerModal(admin, existing = null) {
   ];
   if (admin) {
     blocks.push(input('scope_block', 'Who does this trigger apply to?', radios(
-      [['global', 'Everyone in the channel'], ['personal', 'Only me']],
-      existing?.scope ?? 'global',
-    )));
+      [['personal', 'Only me (start here — test it on yourself)'], ['global', 'Everyone in the channel']],
+      existing?.scope ?? 'personal',
+    ), { hint: plain('New triggers start as "Only me" on purpose: try it, then edit to open it up.') }));
     blocks.push(input('fallback_block', 'Jira identity', checkboxes(
       [['allow', 'Allow the bot account to act for people who haven\'t connected Jira (an attribution comment is added)']],
       existing?.allowBotFallback ? ['allow'] : [],
@@ -229,7 +229,7 @@ function registerTriggerHandler(app, services) {
       return;
     }
     const scope = admin
-      ? (v.scope_block?.value?.selected_option?.value ?? existing?.scope ?? 'global')
+      ? (v.scope_block?.value?.selected_option?.value ?? existing?.scope ?? 'personal')
       : (existing?.scope ?? 'personal');
     const allowBotFallback = admin
       ? (v.fallback_block?.value?.selected_options || []).some((o) => o.value === 'allow')
@@ -346,9 +346,9 @@ function buildJiraTriggerModal(admin, existing = null) {
   ];
   if (admin) {
     blocks.push(input('jt_scope', 'Who does this apply to?', radios(
-      [['global', 'Anyone matched by the JQL (narrow with the pilot list above)'], ['personal', 'Only me (DM me only — ignores the pilot list)']],
-      existing?.scope ?? 'global',
-    )));
+      [['personal', 'Only me (start here — DMs me only, ignores the pilot list)'], ['global', 'Anyone matched by the JQL (narrow with the pilot list above)']],
+      existing?.scope ?? 'personal',
+    ), { hint: plain('New triggers start as "Only me" on purpose: run it, see the DM, then edit to open it up (a pilot list is the next step).') }));
     blocks.push(input('jt_fallback', 'Jira identity', checkboxes(
       [['allow', 'Allow the bot account to act for people who haven\'t connected Jira (an attribution comment is added)']],
       existing?.allow_bot_fallback ? ['allow'] : [],
@@ -503,7 +503,7 @@ function registerJiraTriggerHandler(app, services) {
       return;
     }
     const scope = admin
-      ? (v.jt_scope?.value?.selected_option?.value ?? existing?.scope ?? 'global')
+      ? (v.jt_scope?.value?.selected_option?.value ?? existing?.scope ?? 'personal')
       : (existing?.scope ?? 'personal');
     const allowBotFallback = admin
       ? (v.jt_fallback?.value?.selected_options || []).some((o) => o.value === 'allow')
