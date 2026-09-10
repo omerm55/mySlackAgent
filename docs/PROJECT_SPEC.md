@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (199 passing, 21 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (203 passing, 22 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -115,8 +115,10 @@ versions). Required *Resolution* is auto-filled (Done → Fixed → Resolved).
 
 ### 2.5 Per-user OAuth (Atlassian 3LO)
 
-Users connect once (App Home → Connect Jira, or the button in a DM). Tokens persist in Supabase,
-refresh automatically, and survive restarts. Without OAuth the bot acts as a service account and posts
+Users connect once (App Home → Connect Jira, or the button in a DM). Every Connect link carries a
+**random, single-use `state`** that maps to the Slack user server-side and expires after 24 hours; a
+reused, stale or forged link gets a "This link has expired or was already used" page and nothing is
+stored. Tokens persist in Supabase, refresh automatically, and survive restarts. Without OAuth the bot acts as a service account and posts
 an attribution comment naming the Slack user.
 
 ### 2.6 App Home
@@ -277,7 +279,7 @@ src/
     preferencesHandler.js      Notification frequency select
   services/
     jiraService.js             Jira REST: issues, fields, comments, transitions, search (paginated), versions, changelog
-    oauthService.js            Atlassian 3LO: auth URL, code exchange, refresh, per-user JiraService; Supabase-backed
+    oauthService.js            Atlassian 3LO: random single-use state, auth URL, code exchange, refresh, per-user JiraService; Supabase-backed
     supabaseService.js         Thin axios client over Supabase REST (PostgREST)
     integrationCache.js        Static + DB channel triggers, 60 s TTL
     jiraPoller.js              Evaluates Jira triggers on their cadence; sends or queues DMs
@@ -291,7 +293,7 @@ src/
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (Sept 2026 answer to the March security review), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (199 tests, 21 suites)
+tests/                         Jest (203 tests, 22 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -343,14 +345,18 @@ values sent as given), `addComment` (ADF paragraphs), `findUser(ByEmail)`, `assi
 fields), `getProjectVersions`, `getStatusEnteredAt(key, status)` (changelog walk, ≤500 entries),
 `static fromOAuthToken(token, cloudId)`. Errors include Jira's `errorMessages`/`errors`.
 
-**`oauthService.js`** — `generateAuthUrl(slackUserId)` (state = Slack user id; scopes
+**`oauthService.js`** — `async generateAuthUrl(slackUserId)` (creates a 256-bit random `state`
+stored in `oauth_states` with a 24 h expiry — memory Map when there is no DB; scopes
 `read:jira-user write:jira-work read:jira-work offline_access`; `prompt=consent`),
-`handleCallback(code, state)` (exchange, resolve cloudId matching `JIRA_BASE_URL`, persist),
-`hasToken`, `getJiraService(slackUserId)` (refresh if <5 min to expiry), `loadFromDb()`.
-In-memory Map is a cache over the `oauth_tokens` table.
+`handleCallback(code, state)` (`_consumeState` burns the state atomically → Slack user id, else throws
+`OAuthStateError` with `code: 'invalid_state'`; then exchange, resolve cloudId matching `JIRA_BASE_URL`,
+persist; prunes old states fire-and-forget), `hasToken`, `getJiraService(slackUserId)` (refresh if
+<5 min to expiry), `loadFromDb()`. In-memory Map is a cache over the `oauth_tokens` table. Exports
+`OAuthStateError` and `STATE_TTL_MS`.
 
 **`supabaseService.js`** — PostgREST via axios with `apikey` + `Authorization: Bearer <secret>`.
 Methods per table (see §6): tokens (`upsertToken`, `getToken`, `getAllTokens`, `deleteToken`),
+oauth_states (`insertOauthState`, `consumeOauthState` — conditional PATCH `used_at is null and expires_at > now()` with `return=representation`, so single-use is atomic — `pruneOauthStates`),
 integrations (`getActiveIntegrations`, `upsertIntegration`, `updateIntegration`, `deactivateIntegration`),
 jira_triggers (`getActiveJiraTriggers`, `insertJiraTrigger`, `updateJiraTrigger`, `deactivateJiraTrigger`),
 jira_prompts (`getPromptedIssueKeys`, `getPromptsForTrigger`, `recordPrompt(…, {payload, delivered})`,
@@ -603,6 +609,22 @@ create table if not exists public.user_preferences (
 );
 ```
 
+### 6.7 `oauth_states` — pending Connect links (`supabase/oauth_states.sql`)
+
+```sql
+create table if not exists public.oauth_states (
+  state          text primary key,          -- 32 random bytes, base64url
+  slack_user_id  text not null,
+  created_at     timestamptz not null default now(),
+  expires_at     timestamptz not null,      -- created_at + 24 h
+  used_at        timestamptz null           -- set atomically by the callback; a used row is never reused
+);
+create index if not exists oauth_states_expires_idx on public.oauth_states (expires_at);
+```
+
+Rows older than a day past expiry are pruned on each callback. Without Supabase the same map lives in
+process memory (lost on restart — the user simply presses Connect again).
+
 ---
 
 ## 7. End-to-end flows
@@ -642,9 +664,11 @@ Switching preference to immediate ─► deliverTo(user) flushes the queue now.
 ### 7.4 OAuth connect
 
 ```
-Home "Connect Jira" / DM "🔗 Connect Jira" (URL button) ─► auth.atlassian.com/authorize?state=<slackUserId>
-  ─► Atlassian consent ─► GET /oauth/callback?code&state ─► exchange ─► accessible-resources → cloudId
-  ─► oauth_tokens upsert ─► HTML "You can close this tab" ─► next Home open shows ✅ connected
+Home "Connect Jira" / DM "🔗 Connect Jira" (URL button) ─► generateAuthUrl: random state → oauth_states (24 h)
+  ─► auth.atlassian.com/authorize?state=<random> ─► Atlassian consent ─► GET /oauth/callback?code&state
+  ─► consumeOauthState (atomic; unknown / expired / used → 400 "expired or already used" page, nothing stored)
+  ─► exchange ─► accessible-resources → cloudId ─► oauth_tokens upsert for the mapped Slack user
+  ─► HTML "You can close this tab" ─► next Home open shows ✅ connected
 ```
 
 ### 7.5 Trigger management (App Home)
@@ -1028,6 +1052,8 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | Reaction ignored, log "no integration matches (known channels: …)" | Bot not in channel / wrong channel id | `/invite @bot`; check channel id in trigger |
 | Slack shows ⚠️ on a click, nothing happens | App not connected (Render asleep or redeploying) | Wait for deploy / keep-alive; retry |
 | "You don't have access to this app" on Atlassian consent | OAuth app not shared | Distribution → Sharing |
+| Callback page says "This link has expired or was already used" | Connect link older than 24 h, clicked twice, or not issued by us (`oauth_states` has no live row) | Open the bot's Home tab and press Connect Jira again; Home issues a fresh link on every open |
+| Saving a Connect link fails / Home shows no Connect button after deploy | `oauth_states` table missing | Run `supabase/oauth_states.sql` |
 | Jira trigger matched but nobody DM'd | Reporter email hidden or no Slack user for email | Ops shows the reason; adjust profile visibility or map users |
 | Transition fails "A Fix Version is required" | Workflow validator | Bot offers suggestion + picker automatically |
 | Only 50 issues found | (fixed) pagination | Now follows `nextPageToken` |
@@ -1044,7 +1070,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 199 tests in 21 suites:
+`npm test` → Jest, `tests/*.test.js`, 203 tests in 22 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1060,7 +1086,8 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `collect` | Trigger field list parse/format round-trip + errors; `collectContextFor` current values + certified/timing; `visibilityLine`; certified line in DM and modal, absent otherwise; ask blocks (Answer/Skip, unique ids, ctx < 2000 chars); preview Save/Edit/Cancel vs missing-required (no Save); `mergeValues` precedence + 255 cap; modal prefill + slim metadata; `readCollectModal`; `sendDmQuestion` delegation; handlers: Answer opens modal with DM location, empty submit → inline error, explicit-only → no LLM, free text → LLM with typed field winning, LLM partial → "Almost there", LLM failure → note, Save → ONE `updateIssueFields` PUT + ✅ + answered + ops + FYI, save failure → ❌ + re-ask, Edit prefilled, Cancel restores ask, Skip |
 | `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; save-time run posts the Run-now summary with queued matches called out |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
-| `callbackServer` | Public HTTP surface is exactly `/health` (200) and `/oauth/callback` (400 without code/state, else `handleCallback(code, state)`); `/send-dm` and unknown paths → 404 |
+| `callbackServer` | Public HTTP surface is exactly `/health` (200) and `/oauth/callback` (400 without code/state, else `handleCallback(code, state)`; `invalid_state` → 400 "expired or already used" page, not 500); `/send-dm` and unknown paths → 404 |
+| `oauthState` | Memory mode: URL carries a random state (never the user id), fresh per call, accepted once, replay / unknown / malformed / expired rejected before any token exchange; Supabase mode: state inserted, consumed atomically through the DB, tokens persisted for the mapped user, prune called |
 | `noContentLogging` | A sentinel typed into the reply modal / collect modal reaches the ops channel but never any pino log call |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
 
@@ -1154,6 +1181,13 @@ Chronological, with rationale (see `git log` for commits):
     `pendingQuestions` store; the HTTP surface is now `/health` + `/oauth/callback` only, locked by a
     test. Same commit: pino log lines no longer include what people typed or what the LLM extracted
     (the ops channel keeps that as the audit trail). See `SECURITY_SUMMARY.md` R1, R4, R7.
+29. **Security P0 (2/5): OAuth `state` is random, single-use and expiring.** It used to be the Slack
+    user id, so a consent flow could be bound to the wrong Slack account. Now a 256-bit random token
+    stored in `oauth_states` (24 h TTL — links sit in Home and in asks and are clicked later; single-use
+    closes the replay window) is consumed atomically on the callback; anything else gets a clear
+    "expired or already used" page. `generateAuthUrl` became async; all six call sites await it.
+    **Migration `supabase/oauth_states.sql` must be run before this deploys**, otherwise Connect links
+    cannot be issued. See `SECURITY_SUMMARY.md` R3.
 
 ---
 
@@ -1198,7 +1232,7 @@ Ordered by value ÷ effort; each item is independently shippable.
 audit, operational controls, governance, data) to what the rebuild did and what is still open, and lists
 the risks the rebuild introduced (unauthenticated `/send-dm`, plaintext OAuth tokens, predictable OAuth
 `state`, public HTTP surface, PaaS hosting, LLM writes without preview on the Yes/No path, user text in
-logs). Its P0 list, in order: ~~remove `/send-dm`~~ (done, #28); random single-use `state`; encrypt tokens
+logs). Its P0 list, in order: ~~remove `/send-dm`~~ (done, #28); ~~random single-use `state`~~ (done, #29); encrypt tokens
 + RLS + key rotation + Disconnect; ~~stop logging user text~~ (done, #28); `require_oauth` per trigger
 (default on for PR).
 

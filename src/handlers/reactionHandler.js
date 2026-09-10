@@ -58,7 +58,7 @@ function registerReactionHandler(app, jiraService, attributionService, services)
             effectiveJira = jiraService;
           }
         } else {
-          const authUrl = oauthService.generateAuthUrl(event.user);
+          const authUrl = await oauthService.generateAuthUrl(event.user);
           client.conversations.open({ users: event.user })
             .then((dm) => client.chat.postMessage({
               channel: dm.channel.id,

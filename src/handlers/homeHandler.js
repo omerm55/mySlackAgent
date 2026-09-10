@@ -31,7 +31,7 @@ async function buildHomeBlocks(userId, services, logger) {
   const admin = isAdmin(userId);
 
   const hasOAuth = oauthService?.hasToken(userId) ?? false;
-  const authUrl = oauthService?.generateAuthUrl(userId);
+  const authUrl = (!hasOAuth && oauthService) ? await oauthService.generateAuthUrl(userId) : null;
 
   let visibleIntegrations = [];
   let jiraTriggers = [];

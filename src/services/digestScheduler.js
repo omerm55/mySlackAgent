@@ -136,7 +136,7 @@ class DigestScheduler {
     await this.slack.chat.postMessage({ channel: slackUserId, text: header }).catch((e) =>
       this.logger.warn(`[digest] header DM failed for ${slackUserId}: ${e.data?.error || e.message}`));
 
-    const authUrl = this.oauth && !this.oauth.hasToken(slackUserId) ? this.oauth.generateAuthUrl(slackUserId) : null;
+    const authUrl = this.oauth && !this.oauth.hasToken(slackUserId) ? await this.oauth.generateAuthUrl(slackUserId) : null;
     const deliveredIds = [];
     for (const row of pending) {
       const context = { ...(row.payload || {}), issueKey: row.issue_key, ...(authUrl ? { authUrl } : {}) };

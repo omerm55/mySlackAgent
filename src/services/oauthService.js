@@ -1,19 +1,35 @@
 'use strict';
 
+const crypto = require('crypto');
 const axios = require('axios');
 const { logger } = require('../utils/logger');
 const JiraService = require('./jiraService');
+
+// Connect links live in App Home and inside asks and are clicked later — a day, not the usual
+// ten minutes. Single-use closes the replay window regardless of the TTL.
+const STATE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Thrown by handleCallback when the `state` is unknown, expired or already used. */
+class OAuthStateError extends Error {
+  constructor(reason) {
+    super(`OAuth state ${reason}`);
+    this.code = 'invalid_state';
+    this.reason = reason;
+  }
+}
 
 /**
  * Manages Atlassian OAuth 2.0 3LO tokens on a per-Slack-user basis.
  *
  * Flow:
- *   1. generateAuthUrl(slackUserId) → send link to user via DM
- *   2. User consents → Atlassian redirects to OAUTH_REDIRECT_URI?code=...&state=slackUserId
- *   3. handleCallback(code, slackUserId) → exchanges code for tokens + resolves cloudId
+ *   1. generateAuthUrl(slackUserId) → random single-use `state` stored (Supabase `oauth_states`, or
+ *      memory when there is no DB) → link shown in Home / DM
+ *   2. User consents → Atlassian redirects to OAUTH_REDIRECT_URI?code=...&state=<random>
+ *   3. handleCallback(code, state) → state consumed (unknown / expired / used → OAuthStateError)
+ *      → exchanges code for tokens + resolves cloudId → stored for the mapped Slack user
  *   4. getJiraService(slackUserId) → returns a JiraService instance authed as that user
  *
- * Tokens are kept in memory. A process restart requires users to re-authorise once.
+ * Tokens are cached in memory and persisted in Supabase (see loadFromDb).
  */
 class OAuthService {
   /**
@@ -31,6 +47,8 @@ class OAuthService {
     this.db = supabaseService;
     // In-memory cache — populated from Supabase at startup and on each write
     this.tokens = new Map();
+    // Pending OAuth states when there is no DB (single process, lost on restart)
+    this.states = new Map();
   }
 
   /**
@@ -56,17 +74,25 @@ class OAuthService {
   }
 
   /**
-   * Build the Atlassian authorization URL to send to a user.
-   * @param {string} slackUserId  used as the OAuth `state` parameter
-   * @returns {string}
+   * Build the Atlassian consent URL for a Slack user. The `state` is a fresh 256-bit random token
+   * that maps to the user server-side, is single-use and expires after STATE_TTL_MS.
+   * @param {string} slackUserId
+   * @returns {Promise<string>}
    */
-  generateAuthUrl(slackUserId) {
+  async generateAuthUrl(slackUserId) {
+    const state = crypto.randomBytes(32).toString('base64url');
+    const expiresAt = Date.now() + STATE_TTL_MS;
+    if (this.db?.insertOauthState) {
+      await this.db.insertOauthState({ state, slackUserId, expiresAt });
+    } else {
+      this.states.set(state, { slackUserId, expiresAt });
+    }
     const params = new URLSearchParams({
       audience: 'api.atlassian.com',
       client_id: this.clientId,
       scope: 'read:jira-user write:jira-work read:jira-work offline_access',
       redirect_uri: this.redirectUri,
-      state: slackUserId,
+      state,
       response_type: 'code',
       prompt: 'consent',
     });
@@ -74,12 +100,33 @@ class OAuthService {
   }
 
   /**
-   * Exchange an authorization code for tokens and store them.
-   * Called by the callback HTTP server.
-   * @param {string} code         authorization code from Atlassian
-   * @param {string} slackUserId  the `state` value echoed back by Atlassian
+   * Resolve and burn a `state`. Returns the Slack user id, or throws OAuthStateError.
+   * With a DB the row is consumed atomically (conditional UPDATE); otherwise the memory map is used.
    */
-  async handleCallback(code, slackUserId) {
+  async _consumeState(state) {
+    if (!state || typeof state !== 'string' || state.length > 200) throw new OAuthStateError('malformed');
+    if (this.db?.consumeOauthState) {
+      const row = await this.db.consumeOauthState(state);
+      this.db.pruneOauthStates?.().catch(() => {});
+      if (!row) throw new OAuthStateError('unknown, expired or already used');
+      return row.slack_user_id;
+    }
+    const entry = this.states.get(state);
+    this.states.delete(state);
+    if (!entry) throw new OAuthStateError('unknown or already used');
+    if (entry.expiresAt < Date.now()) throw new OAuthStateError('expired');
+    return entry.slackUserId;
+  }
+
+  /**
+   * Exchange an authorization code for tokens and store them.
+   * Called by the callback HTTP server. The `state` is consumed first (OAuthStateError if it is
+   * unknown, expired or already used) and tells us which Slack user the tokens belong to.
+   * @param {string} code   authorization code from Atlassian
+   * @param {string} state  the random `state` echoed back by Atlassian
+   */
+  async handleCallback(code, state) {
+    const slackUserId = await this._consumeState(state);
     const tokenRes = await axios.post('https://auth.atlassian.com/oauth/token', {
       grant_type: 'authorization_code',
       client_id: this.clientId,
@@ -181,3 +228,5 @@ class OAuthService {
 }
 
 module.exports = OAuthService;
+module.exports.OAuthStateError = OAuthStateError;
+module.exports.STATE_TTL_MS = STATE_TTL_MS;

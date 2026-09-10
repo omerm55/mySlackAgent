@@ -337,7 +337,7 @@ class JiraPoller {
 
       // Not connected yet? Put a Connect button right in the question DM.
       const authUrl = this.oauth && !this.oauth.hasToken(slackUserId)
-        ? this.oauth.generateAuthUrl(slackUserId)
+        ? await this.oauth.generateAuthUrl(slackUserId)
         : null;
       const context = { ...payload, ...(authUrl ? { authUrl } : {}) };
 

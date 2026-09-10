@@ -49,4 +49,11 @@ describe('callback server surface', () => {
     expect(ok.status).toBe(200);
     expect(oauth.handleCallback).toHaveBeenCalledWith('abc', 'xyz');
   });
+
+  test('/oauth/callback with a used/expired state → 400 "expired or already used" page, not a 500', async () => {
+    oauth.handleCallback.mockRejectedValueOnce(Object.assign(new Error('OAuth state expired'), { code: 'invalid_state', reason: 'expired' }));
+    const res = await get(port, '/oauth/callback?code=abc&state=old');
+    expect(res.status).toBe(400);
+    expect(res.body).toMatch(/expired or was already used/);
+  });
 });

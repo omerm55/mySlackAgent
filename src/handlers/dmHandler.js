@@ -37,7 +37,7 @@ function registerDmHandler(app, jiraService, services) {
       try { return await oauthService.getJiraService(slackUserId); } catch { /* fall through */ }
     } else if (client) {
       // First time — DM the user an auth link (fire and forget)
-      const authUrl = oauthService.generateAuthUrl(slackUserId);
+      const authUrl = await oauthService.generateAuthUrl(slackUserId);
       client.chat.postMessage({
         channel: slackUserId,
         text: `👋 To make your Jira changes appear as *you* (not the bot), <${authUrl}|connect your Jira account>. This change was made by the bot account.`,

@@ -65,6 +65,33 @@ class SupabaseService {
     });
   }
 
+  // ── oauth_states (pending Connect links: random, single-use, expiring) ──
+
+  async insertOauthState({ state, slackUserId, expiresAt }) {
+    await this.client.post('/oauth_states', {
+      state, slack_user_id: slackUserId, expires_at: new Date(expiresAt).toISOString(),
+    }, { headers: { Prefer: 'return=minimal' } });
+  }
+
+  /**
+   * Mark a state used and return its row — atomically, so a second call with the same state (or an
+   * expired one) returns null. PostgREST: conditional UPDATE with return=representation.
+   */
+  async consumeOauthState(state) {
+    const now = new Date().toISOString();
+    const res = await this.client.patch('/oauth_states', { used_at: now }, {
+      params: { state: `eq.${state}`, used_at: 'is.null', expires_at: `gt.${now}` },
+      headers: { Prefer: 'return=representation' },
+    });
+    return res.data?.[0] ?? null;
+  }
+
+  /** Delete states that expired more than a day ago (used or not). */
+  async pruneOauthStates() {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    await this.client.delete('/oauth_states', { params: { expires_at: `lt.${cutoff}` } });
+  }
+
   // ── integrations ─────────────────────────────────────────────────
 
   async getActiveIntegrations() {

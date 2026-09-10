@@ -36,22 +36,29 @@ function startCallbackServer(oauthService, oauthPort, logger) {
     }
 
     const code = url.searchParams.get('code');
-    const slackUserId = url.searchParams.get('state');
+    const state = url.searchParams.get('state');
 
-    if (!code || !slackUserId) {
+    if (!code || !state) {
       res.writeHead(400, { 'Content-Type': 'text/html' });
       res.end(page('400 Bad Request', 'Missing <code>code</code> or <code>state</code> parameter.'));
       return;
     }
 
     try {
-      await oauthService.handleCallback(code, slackUserId);
+      await oauthService.handleCallback(code, state);
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(page(
         '✅ Jira connected!',
         'You can close this tab. Future Jira changes you trigger will appear as your own account.',
       ));
     } catch (err) {
+      if (err.code === 'invalid_state') {
+        // Not an error on our side: a reused, stale or forged link. Say so and point at the fix.
+        logger.warn(`[oauth] Callback with ${err.reason} state`);
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end(page('⏳ This link has expired or was already used', 'Open the bot\'s Home tab in Slack and press <b>Connect Jira</b> again to get a fresh link.'));
+        return;
+      }
       logger.error({ err: err.message }, '[oauth] Callback error');
       res.writeHead(500, { 'Content-Type': 'text/html' });
       res.end(page('❌ Authorization failed', 'Something went wrong. Please try connecting again.'));
