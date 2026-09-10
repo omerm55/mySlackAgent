@@ -49,30 +49,34 @@ function registerReactionHandler(app, jiraService, attributionService, services)
       let effectiveJira = jiraService;
       let usingOAuth = false;
       const { oauthService } = services;
+      let hasToken = false;
+      let authUrl = null;
       if (oauthService) {
         if (oauthService.hasToken(event.user)) {
           try {
             effectiveJira = await oauthService.getJiraService(event.user);
             usingOAuth = true;
+            hasToken = true;
           } catch {
             effectiveJira = jiraService;
           }
-        } else {
-          const authUrl = await oauthService.generateAuthUrl(event.user);
-          client.conversations.open({ users: event.user })
-            .then((dm) => client.chat.postMessage({
-              channel: dm.channel.id,
-              text: `👋 To make your Jira changes appear as you (not the bot), <${authUrl}|connect your Jira account>. This change was made by the bot account.`,
-            }))
-            .catch((err) => logger.warn(`[reaction] Failed to send auth DM to ${event.user}: ${err.message}`));
         }
+        if (!hasToken) authUrl = await oauthService.generateAuthUrl(event.user).catch(() => null);
       }
+      let authDmSent = false;
+      const sendAuthDm = (text) => {
+        if (authDmSent || !authUrl) return;
+        authDmSent = true;
+        client.conversations.open({ users: event.user })
+          .then((dm) => client.chat.postMessage({ channel: dm.channel.id, text }))
+          .catch((err) => logger.warn(`[reaction] Failed to send auth DM to ${event.user}: ${err.message}`));
+      };
 
       for (const integration of matching) {
         const {
           name, allowedSlackUserIds, rateLimitPerHour,
           jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType = 'select',
-          scope, createdBy,
+          scope, createdBy, allowBotFallback = false,
         } = integration;
         const tag = `[${name}/reaction]`;
 
@@ -84,6 +88,18 @@ function registerReactionHandler(app, jiraService, attributionService, services)
           logger.info(`${tag} User ${event.user} not in allowlist — ignoring`);
           await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: `not in allowlist for *${name}*`, integration: name });
           continue;
+        }
+
+        // OAuth required: no token and this trigger does not allow the bot account → ask to connect, write nothing
+        if (oauthService && !hasToken && !allowBotFallback) {
+          logger.info(`${tag} ${event.user} not connected to Jira and bot fallback not allowed — asking to connect`);
+          sendAuthDm(`🔐 To apply your 👍 on ${issueKeys.map(issueLink).join(', ')} I need your Jira connection: <${authUrl}|connect your Jira account> (10 seconds), then react again.`);
+          await client.chat.postMessage({ channel: event.item.channel, thread_ts: event.item.ts, text: `🔐 <@${event.user}> — I've DM'd you a link to connect Jira. Connect once, then react again and I'll make the change under your name.` }).catch(() => {});
+          await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: `not connected to Jira (OAuth required) for *${name}*`, integration: name });
+          continue;
+        }
+        if (oauthService && !hasToken && allowBotFallback) {
+          sendAuthDm(`👋 To make your Jira changes appear as you (not the bot), <${authUrl}|connect your Jira account>. This change was made by the bot account.`);
         }
 
         // Rate limiting

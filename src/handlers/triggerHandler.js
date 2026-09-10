@@ -132,6 +132,10 @@ function buildChannelTriggerModal(admin, existing = null) {
       [['global', 'Everyone in the channel'], ['personal', 'Only me']],
       existing?.scope ?? 'global',
     )));
+    blocks.push(input('fallback_block', 'Jira identity', checkboxes(
+      [['allow', 'Allow the bot account to act for people who haven\'t connected Jira (an attribution comment is added)']],
+      existing?.allowBotFallback ? ['allow'] : [],
+    ), { optional: true, hint: plain('Default: OAuth required — someone without a connection is asked to connect and react again; nothing is written for them.') }));
   }
   return {
     type: 'modal',
@@ -227,9 +231,13 @@ function registerTriggerHandler(app, services) {
     const scope = admin
       ? (v.scope_block?.value?.selected_option?.value ?? existing?.scope ?? 'global')
       : (existing?.scope ?? 'personal');
+    const allowBotFallback = admin
+      ? (v.fallback_block?.value?.selected_options || []).some((o) => o.value === 'allow')
+      : (existing?.allowBotFallback ?? false);
 
     const fields = {
       name,
+      allow_bot_fallback: allowBotFallback,
       channel_id: channelId,
       triggers,
       jira_field_id: jiraFieldId,
@@ -276,7 +284,8 @@ function registerTriggerHandler(app, services) {
       await publishHome(client, userId, services, logger);
 
       const when = triggers.map((t) => (t === 'reaction' ? '👍 reactions' : '💬 thread replies')).join(' and ');
-      await notifyOps(services, client, userId, `✅ Trigger *${name}* ${editId ? 'updated' : 'created'}! It fires on ${when} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${joinNote}`);
+      const identity = allowBotFallback ? ' 🤖 The bot account may act for people who haven\'t connected Jira.' : ' 🔐 OAuth required: people who haven\'t connected are asked to connect first.';
+      await notifyOps(services, client, userId, `✅ Trigger *${name}* ${editId ? 'updated' : 'created'}! It fires on ${when} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${identity}${joinNote}`);
     } catch (err) {
       // Saved fine; only the follow-ups (join / Home refresh / ops) hiccuped
       logger.warn(`[trigger] Post-save step failed for "${name}": ${errDetail(err)}`);
@@ -340,6 +349,10 @@ function buildJiraTriggerModal(admin, existing = null) {
       [['global', 'Anyone matched by the JQL (narrow with the pilot list above)'], ['personal', 'Only me (DM me only — ignores the pilot list)']],
       existing?.scope ?? 'global',
     )));
+    blocks.push(input('jt_fallback', 'Jira identity', checkboxes(
+      [['allow', 'Allow the bot account to act for people who haven\'t connected Jira (an attribution comment is added)']],
+      existing?.allow_bot_fallback ? ['allow'] : [],
+    ), { optional: true, hint: plain('Default: OAuth required — a person without a connection sees "Connect Jira first, then press the button again"; the ask stays open, nothing is written for them.') }));
   }
   return {
     type: 'modal',
@@ -492,9 +505,13 @@ function registerJiraTriggerHandler(app, services) {
     const scope = admin
       ? (v.jt_scope?.value?.selected_option?.value ?? existing?.scope ?? 'global')
       : (existing?.scope ?? 'personal');
+    const allowBotFallback = admin
+      ? (v.jt_fallback?.value?.selected_options || []).some((o) => o.value === 'allow')
+      : (existing?.allow_bot_fallback ?? false);
 
     const fields = {
       name, jql, notify, scope,
+      allow_bot_fallback: allowBotFallback,
       question: question || (askType === 'risk_review' ? '{link} was flagged by the weekly R&D Initiative Notifier.'
         : askType === 'collect' ? `{link} needs: ${describeCollectFields(collectParsed.fields)}.` : ''),
       ask_type: askType,
@@ -545,7 +562,8 @@ function registerJiraTriggerHandler(app, services) {
       const fyiField = fyiFieldId || (askType === 'risk_review' ? 'customfield_11909' : null);
       const fyi = fyiField ? ` FYI DM to the user in \`${fyiField}\`.` : '';
       const pilotNote = pilotUsers.length ? ` 🧪 Pilot: only ${pilotUsers.map((u) => `<@${u}>`).join(', ')} will be asked.` : '';
-      await notifyOps(services, client, userId, `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${who}* of any new match. ${outcome}${watch}${fyi}${pilotNote}`);
+      const identity = allowBotFallback ? ' 🤖 The bot account may act for people who haven\'t connected Jira.' : ' 🔐 OAuth required for every action.';
+      await notifyOps(services, client, userId, `✅ Jira trigger *${name}* ${editId ? 'updated' : 'created'}. I'll check \`${jql}\` ${describeInterval(pollIntervalMin)} and DM the *${who}* of any new match. ${outcome}${watch}${fyi}${pilotNote}${identity}`);
       // Evaluate this trigger right away regardless of its cadence, and report like Run now does
       // (a queued-for-digest match is otherwise invisible)
       if (services.jiraPoller && savedId) {

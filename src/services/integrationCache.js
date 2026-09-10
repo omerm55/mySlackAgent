@@ -18,6 +18,7 @@ function normalizeRow(row) {
     rateLimitPerHour: row.rate_limit_per_hour || 20,
     scope: row.scope || 'global',
     createdBy: row.created_by,
+    allowBotFallback: row.allow_bot_fallback === true,
   };
 }
 

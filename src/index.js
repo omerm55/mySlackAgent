@@ -94,6 +94,7 @@ const normalizedStatic = staticIntegrations.map((i) => ({
   jiraFieldType: i.jiraFieldType || 'select',
   allowedSlackUserIds: i.allowedSlackUserIds || [],
   rateLimitPerHour: i.rateLimitPerHour ?? settings.rateLimiting.defaultPerHour,
+  allowBotFallback: i.allowBotFallback === true,
   scope: 'global',
   createdBy: null,
 }));

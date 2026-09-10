@@ -154,6 +154,7 @@ function buttonCtx(context, slackUserId, extra = {}) {
     slackUserId,
     question: (context.question || '').slice(0, 300),
     fyiSlackUserId: context.fyiSlackUserId || null,
+    allowFallback: !!context.allowFallback,
     risk: {
       notification: (r.notification || '').slice(0, 255),
       status: r.status || '',
@@ -304,5 +305,5 @@ module.exports = {
   FIELDS, RISK_STATUSES, AT_RISK, ON_TRACK, STATUS_BUTTON,
   parseInterval, riskContextFor, statusChoices, buildRiskReviewBlocks, actionBlocks, afterStatusBlocks,
   sendRiskReview, sendFyi, notesEntry, prependNotes, issueLink, plainText, notesPreview, notesBlock,
-  parseNotificationDate, notificationAge, notificationMatches,
+  parseNotificationDate, notificationAge, notificationMatches, connectBlocks,
 };

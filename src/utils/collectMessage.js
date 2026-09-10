@@ -100,6 +100,7 @@ function buttonCtx(context, slackUserId, extra = {}) {
     issueKey: context.issueKey,
     slackUserId,
     question: (context.question || '').slice(0, 300),
+    allowFallback: !!context.allowFallback,
     collect: {
       summary: (c.summary || '').slice(0, 120),
       certified: !!c.certified,
@@ -278,5 +279,5 @@ module.exports = {
   CF, MAX_VALUE, ROADMAP_FIELDS, visibilityLine,
   parseCollectFields, formatCollectFields, describeCollectFields, collectContextFor, currentValue,
   buttonCtx, buildCollectBlocks, previewBlocks, sendCollect, buildCollectModal, readCollectModal, mergeValues,
-  fieldLines,
+  fieldLines, connectBlocks,
 };

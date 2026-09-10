@@ -57,6 +57,14 @@ describe('Jira trigger modal save', () => {
     expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/✅ Jira trigger .*Pilot: only <@UYEHUDA>/));
   });
 
+  test('Jira identity checkbox: unchecked → allow_bot_fallback false (default); checked → true', async () => {
+    const { handlers, db, client, logger } = setup();
+    await handlers.create_jira_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values } }, client, logger });
+    expect(db.insertJiraTrigger).toHaveBeenCalledWith(expect.objectContaining({ allow_bot_fallback: false }));
+    await handlers.create_jira_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: { ...values, jt_fallback: { value: { selected_options: [{ value: 'allow' }] } } } } }, client, logger });
+    expect(db.insertJiraTrigger).toHaveBeenLastCalledWith(expect.objectContaining({ allow_bot_fallback: true }));
+  });
+
   test('editing someone else\'s trigger → inline error, no write', async () => {
     const { handlers, db, client, logger } = setup({ getActiveJiraTriggers: jest.fn().mockResolvedValue([{ id: 't9', created_by: 'USOMEONE' }]) });
     const ack = jest.fn();
@@ -138,6 +146,21 @@ describe('Channel trigger modal save', () => {
     field_name_block: { value: txt('PM reviewed') },
     field_value_block: { value: txt('Yes') },
   };
+  test('channel trigger: Jira identity checkbox persisted; default false', async () => {
+    const { app, handlers } = fakeApp();
+    const db = { upsertIntegration: jest.fn().mockResolvedValue({}) };
+    const ops = { channelId: 'COPS', post: jest.fn().mockResolvedValue(undefined) };
+    registerTriggerHandler(app, { db, opsNotifier: ops, integrationCache: { getAll: jest.fn().mockResolvedValue([]), invalidate: jest.fn() } });
+    const client = { views: { publish: jest.fn().mockResolvedValue({}) }, conversations: { join: jest.fn().mockResolvedValue({}) }, chat: { postMessage: jest.fn().mockResolvedValue({}) } };
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    await handlers.create_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values } }, client, logger });
+    expect(db.upsertIntegration).toHaveBeenCalledWith(expect.objectContaining({ allow_bot_fallback: false }));
+    expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/OAuth required/));
+    await handlers.create_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: { ...values, fallback_block: { value: { selected_options: [{ value: 'allow' }] } } } } }, client, logger });
+    expect(db.upsertIntegration).toHaveBeenLastCalledWith(expect.objectContaining({ allow_bot_fallback: true }));
+    expect(ops.post).toHaveBeenLastCalledWith(expect.stringMatching(/bot account may act/));
+  });
+
   test('DB rejects → modal stays open with the reason', async () => {
     const { app, handlers } = fakeApp();
     const db = { upsertIntegration: jest.fn().mockRejectedValue(new Error('boom')) };

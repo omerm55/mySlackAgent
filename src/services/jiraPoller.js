@@ -297,6 +297,8 @@ class JiraPoller {
             }),
         };
       if (watchedValue !== undefined) payload.watchedValue = watchedValue;
+      // Per-trigger admin setting: may the bot account act for someone who hasn't connected Jira? Default no.
+      payload.allowFallback = trigger.allow_bot_fallback === true;
 
       // Optional FYI to a second person (e.g. the PM owner): informational, sent right away,
       // skipped when it's the same person we're asking. Carried in the payload so the

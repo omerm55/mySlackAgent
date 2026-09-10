@@ -131,7 +131,7 @@ describe('poller: collect ask type', () => {
     expect(msg.blocks.some((b) => b.type === 'actions' && b.elements.some((e) => e.action_id === 'collect_answer'))).toBe(true);
     expect(JSON.stringify(msg.blocks)).toContain('Customer value:* _empty_');
     expect(db.recordPrompt).toHaveBeenCalledWith('t5', 'PR-7', 'UPM', expect.objectContaining({
-      payload: expect.objectContaining({ askType: 'collect', collect: expect.objectContaining({ summary: 'Smart Alerts', fields: [expect.objectContaining({ id: NAME, current: 'Smart Alerts' }), expect.objectContaining({ id: VALUE, current: '' })] }) }),
+      payload: expect.objectContaining({ askType: 'collect', allowFallback: false, collect: expect.objectContaining({ summary: 'Smart Alerts', fields: [expect.objectContaining({ id: NAME, current: 'Smart Alerts' }), expect.objectContaining({ id: VALUE, current: '' })] }) }),
     }));
   });
 });

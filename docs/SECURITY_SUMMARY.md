@@ -42,7 +42,7 @@ Abhishek's five expectations, plus Lauren's question:
 
 | Area | March | September |
 |---|---|---|
-| Identity for Jira writes | One service account (`JIRA_API_TOKEN`) | **Per-user Atlassian OAuth 2.0 (3LO)**; service account only as read/poll identity and as an explicit, labelled fallback |
+| Identity for Jira writes | One service account (`JIRA_API_TOKEN`) | **Per-user Atlassian OAuth 2.0 (3LO), required for writes**; service account for reads/polling, and for writes only on triggers an admin explicitly marked (labelled, attribution comment) |
 | Trigger sources | Slack reactions / replies | + **Jira triggers**: JQL polled on a cadence → DM the reporter / assignee / a user field → Yes/No/Reply, risk review, or collect fields |
 | Configuration | JSON files in git / on the server | **App Home modals** (admins only) → **Supabase** tables |
 | Hosting | systemd / Docker on a company host (design) | **Render** (free tier, PaaS) with a public HTTPS endpoint for the OAuth callback |
@@ -75,12 +75,12 @@ Abhishek's five expectations, plus Lauren's question:
   refused.
 
 **Still open.**
-- **The service-account fallback still exists.** A user who has not connected Jira gets a "🔐 Connect
-  Jira" nudge, but if they click Yes anyway the write is made by the service account with an
-  attribution comment and an ops line "no OAuth — acting as bot". That is precisely the RBAC bypass
-  the March review objected to, now opt-in and labelled rather than default. **Recommendation: make
-  OAuth mandatory for writes** (`require_oauth`, planned in spec §16.10) — at minimum for the PR project
-  and for any field that Jira guards by role. Reads/polling would still use the service account.
+- ~~The service-account fallback still exists.~~ **Closed 2026-09-10.** OAuth is required for every
+  write: a person without a connection is asked to connect and press the same button again; the ask stays
+  open and nothing is written for them. The service account acts for unconnected people only on triggers
+  where an admin ticked *Allow the bot account…* (`allow_bot_fallback`, off by default and for all existing
+  triggers, shown as 🤖 in App Home, attribution comment + "acting as bot" in ops when used). Reads and
+  polling still use the service account. Migration `supabase/require_oauth.sql`.
 - The service account's own Jira permissions have not been reduced to the minimum set (IT action).
 - The list of admins is an environment variable with two names, not a managed group.
 
@@ -179,7 +179,7 @@ Ranked by what an attacker could do with them.
 2. ~~Random single-use `state` with expiry for OAuth (R3).~~ ✅ Done 2026-09-10 (run `supabase/oauth_states.sql`).
 3. ~~Encrypt OAuth tokens at rest, enable RLS, add Disconnect (R2).~~ ✅ Done 2026-09-10. **Operator steps still to do:** set `TOKEN_ENCRYPTION_KEY` in Render, run `supabase/rls.sql`, rotate the Supabase secret key (spec §12.5).
 4. ~~Stop logging user free text and extracted values (R7).~~ ✅ Done 2026-09-10.
-5. `require_oauth` per trigger, on by default for PR; the service-account fallback becomes an explicit exception (F1). One day.
+5. ~~OAuth required for writes; service-account fallback becomes an explicit per-trigger exception (F1).~~ ✅ Done 2026-09-10 (run `supabase/require_oauth.sql`).
 
 **P1 — before general availability**
 6. Hosting decision with IT/Security: company infrastructure or approved PaaS tier and region; secrets in a managed store (R5).

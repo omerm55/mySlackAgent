@@ -151,7 +151,7 @@ async function buildHomeBlocks(userId, services, logger) {
       const triggerLabels = [];
       if (i.triggers?.includes('reaction')) triggerLabels.push('👍 reaction');
       if (i.triggers?.includes('reply')) triggerLabels.push('💬 thread reply');
-      const scopeLabel = i.scope === 'personal' ? ' _(personal)_' : '';
+      const scopeLabel = (i.scope === 'personal' ? ' _(personal)_' : '') + (i.allowBotFallback ? ' 🤖' : '');
       const block = {
         type: 'section',
         text: {
@@ -189,7 +189,7 @@ async function buildHomeBlocks(userId, services, logger) {
           : `on Yes: set *${t.jira_field_name || t.jira_field_id}* = *${t.jira_field_value}*`);
       const pilot = Array.isArray(t.pilot_slack_user_ids) && t.pilot_slack_user_ids.length
         ? ` _(🧪 pilot: ${t.pilot_slack_user_ids.map((u) => `<@${u}>`).join(', ')})_` : '';
-      const scopeLabel = (t.scope === 'personal' ? ' _(personal)_' : '') + pilot;
+      const scopeLabel = (t.scope === 'personal' ? ' _(personal)_' : '') + pilot + (t.allow_bot_fallback ? ' 🤖' : '');
       const every = (() => {
         const m = Number(t.poll_interval_min) || 2;
         if (m >= 1440) return 'daily';
