@@ -42,7 +42,7 @@ Abhishek's five expectations, plus Lauren's question:
 
 | Area | March | Today |
 |---|---|---|
-| Identity for Jira writes | One service account (`JIRA_API_TOKEN`) | **Per-user Atlassian OAuth 2.0 (3LO), required for writes.** The service account reads and polls; it writes only on triggers an admin has explicitly marked, with an attribution comment |
+| Identity for Jira writes | One service account (`JIRA_API_TOKEN`) | **Per-user Atlassian OAuth 2.0 (3LO), required for writes.** The service account reads and polls; it writes only on triggers an admin has explicitly marked, and every such write is commented on the issue naming the person who asked |
 | Trigger sources | Slack reactions / replies | + **Jira triggers**: a JQL condition polled on a cadence → DM the reporter / assignee / a named owner field → Yes/No/Reply, a risk review, or a "fill these fields" ask |
 | Configuration | JSON files in git / on the server | **App Home modals** (admins only) → **Supabase** tables |
 | Hosting | systemd / Docker on a company host (design) | **Render** (PaaS, free tier) with a public HTTPS endpoint for the OAuth callback |
@@ -68,8 +68,9 @@ Abhishek's five expectations, plus Lauren's question:
   press the button again"; the ask stays open and nothing is written for them. Channel reactions get a
   thread reply asking them to connect and react again. The service account acts for unconnected people
   only on triggers where an admin ticked *Allow the bot account to act for people who haven't connected*
-  — off by default and for every existing trigger, shown as 🤖 in App Home, and always with an
-  attribution comment on the issue and an "acting as bot" line in the ops channel.
+  — off by default and for every existing trigger, shown as 🤖 in App Home. Whenever the bot account does
+  act for someone, **a comment on the issue names that person** and what they asked for, whichever
+  surface the request came from, and the operator channel records it as an "acting as bot" write.
 - **Audience is a property of the trigger, not "anyone in Slack".** Channel triggers: channel membership
   plus an optional allowlist of Slack users. Jira triggers: the DM goes only to the reporter, assignee,
   or the person named in a specific Jira user field (e.g. PR Dev Owner, PR PM Owner) of that issue;
@@ -92,12 +93,23 @@ Abhishek's five expectations, plus Lauren's question:
 
 ### F2 — Ownership & accountability
 
-**What we did.** Owner: Omer Meshar / PH Ops, named in the spec header and here. The spec carries a
-runbook (setup, SQL, symptoms, key rotation) and the repository rule that every behaviour change updates
-the spec in the same commit. Each trigger records who created it.
+**What we did.**
+- Owner: Omer Meshar / PH Ops, named in the specification and here. Each trigger records who created it.
+- **An emergency stop.** One switch in the app stops the bot acting — no trigger evaluated, no message
+  sent, every action refused — while it keeps listening, so an administrator can still see what is
+  happening and resume. Asks already in people's inboxes are untouched and work again afterwards, so
+  stopping costs nothing but time. It takes effect in seconds without a deployment, names who stopped it,
+  and both transitions are recorded. A second, independent switch in the environment covers the case
+  where the database itself is the problem.
+- **A written incident procedure**: who responds, and three playbooks — a credential that may have leaked,
+  an unintended burst of writes, and a misbehaving trigger. Each begins with stopping the bot and includes
+  the query that answers what actually happened.
+- A runbook for setup, common symptoms and key rotation, and a repository rule that the specification is
+  updated in the same change as the behaviour.
 
-**What remains.** No on-call or incident procedure beyond "the ops channel alerts Omer"; no kill switch
-other than deleting the trigger in App Home or suspending the Render service.
+**What remains.** No formal on-call: an incident found outside working hours is handled at the next
+opportunity. We consider that acceptable while the blast radius stays bounded by the stop switch, the
+volume caps and the rule that writes need the person's own authorisation.
 
 ### F3 — Audit & traceability
 
@@ -115,9 +127,14 @@ other than deleting the trigger in App Home or suspending the Render service.
   Initiative's Notes; the field-collection ask writes the values themselves.
 - **Application logs carry no user content** — issue key, action and text length only.
 
+- **Retention is written down** per table (operator events, per-user history and the record of who was
+  asked: twelve months; pending connect links: automatic; tokens: until the person disconnects), with the
+  statements to apply it.
+
 **What remains.**
 - For plain Yes/No asks the *reason* exists only in the Slack thread and the audit table, not in Jira.
 - The audit table is durable and queryable, but not immutable: the server's own key could delete rows.
+- Applying the retention policy is a quarterly manual step, not yet scheduled.
 
 ### F4 — Operational controls
 
@@ -190,6 +207,8 @@ question as Lauren's, one hop further.
 - **Volume caps that survive restarts**: besides the per-run limit, each trigger has a 24-hour budget
   counted in the database, so a mis-scoped or looping trigger cannot keep messaging people; reaching it
   is reported to the ops channel.
+- **An emergency stop** that an administrator can use in seconds without a deployment, plus an
+  independent environment switch; refusing an action never loses it.
 - **Time-boxed operations**: every lookup stage is capped at 5 seconds and every message ends in an
   actionable state.
 - **A durable audit record**: every line the bot posts to the operator channel is also written to a

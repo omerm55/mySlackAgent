@@ -2,6 +2,7 @@
 
 const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 const { issueLink } = require('../utils/jiraLink');
+const { pauseState, describePause } = require('../utils/pauseState');
 
 const THUMBS_UP_EMOJIS = new Set(['+1', 'thumbsup', 'thumbs_up', 'white_check_mark']);
 const isThumbsUp = (r) => THUMBS_UP_EMOJIS.has(r) || THUMBS_UP_EMOJIS.has(r.split('::')[0]);
@@ -40,6 +41,15 @@ function registerReactionHandler(app, jiraService, attributionService, services)
         for (const i of matching) {
           await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: 'no Jira issue keys in message', integration: i.name });
         }
+        return;
+      }
+
+      // Global pause: say so once in the thread, write nothing.
+      const pause = await pauseState(services.db);
+      if (pause.paused) {
+        logger.info('[reaction] Paused — no Jira update');
+        await client.chat.postMessage({ channel: event.item.channel, thread_ts: event.item.ts, text: `⏸ <@${event.user}> — I'm paused by an admin, so I haven't changed anything. React again once I'm back.` }).catch(() => {});
+        await services.opsNotifier?.post?.(`⏸ <@${event.user}> reacted while paused — nothing written. ${describePause(pause)}`, { kind: 'paused_refusal', user: event.user });
         return;
       }
 

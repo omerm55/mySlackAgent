@@ -9,7 +9,7 @@ declare t text;
 begin
   foreach t in array array[
     'oauth_tokens', 'oauth_states', 'integrations', 'jira_triggers', 'jira_prompts',
-    'release_calendar', 'user_preferences', 'activity_log', 'audit_events'
+    'release_calendar', 'user_preferences', 'activity_log', 'audit_events', 'app_settings'
   ] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('revoke all on table public.%I from anon, authenticated', t);

@@ -23,6 +23,8 @@ services:
         sync: false
       - key: JIRA_SERVICE_ACCOUNT_EMAIL
         sync: false
+      - key: BOT_PAUSED
+        sync: false
       - key: JIRA_OAUTH_CLIENT_ID
         sync: false
       - key: JIRA_OAUTH_CLIENT_SECRET

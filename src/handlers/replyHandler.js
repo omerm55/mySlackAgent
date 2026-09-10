@@ -2,6 +2,7 @@
 
 const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 const { issueLink } = require('../utils/jiraLink');
+const { pauseState, describePause } = require('../utils/pauseState');
 
 function registerReplyHandler(app, jiraService, attributionService, services) {
   const { dedupCache, rateLimiter, auditLog, userCache, integrationCache } = services;
@@ -28,6 +29,15 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
 
       const issueKeys = extractJiraIssueKeys(rootMessage.text);
       if (issueKeys.length === 0) return;
+
+      // Global pause: say so once in the thread, write nothing.
+      const pause = await pauseState(services.db);
+      if (pause.paused) {
+        logger.info('[reply] Paused — no Jira update');
+        await client.chat.postMessage({ channel: message.channel, thread_ts: message.thread_ts, text: `⏸ <@${message.user}> — I'm paused by an admin, so I haven't changed anything. Reply again once I'm back.` }).catch(() => {});
+        await services.opsNotifier?.post?.(`⏸ <@${message.user}> replied while paused — nothing written. ${describePause(pause)}`, { kind: 'paused_refusal', user: message.user });
+        return;
+      }
 
       const actorName = await userCache.getName(client, message.user);
 

@@ -308,6 +308,19 @@ class SupabaseService {
     }, { headers: { Prefer: 'return=minimal' } });
   }
 
+  // ── app_settings (small key/value operational state, e.g. the global pause) ──
+
+  async getSetting(key) {
+    const res = await this.client.get('/app_settings', { params: { key: `eq.${key}`, select: '*', limit: 1 } });
+    return res.data?.[0] ?? null;
+  }
+
+  async setSetting(key, value, byUser = null) {
+    await this.client.post('/app_settings', {
+      key, value, updated_at: new Date().toISOString(), updated_by: byUser,
+    }, { params: { on_conflict: 'key' }, headers: { Prefer: 'resolution=merge-duplicates,return=minimal' } });
+  }
+
   // ── audit_events (durable operator record; mirrors every ops-channel line) ──
 
   async insertAuditEvent({ kind, slackUserId, issueKey, ok, text, detail }) {

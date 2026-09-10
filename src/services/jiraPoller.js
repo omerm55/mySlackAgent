@@ -4,6 +4,7 @@ const { sendDmQuestion } = require('../utils/dmQuestion');
 const { issueLink, issueLinkLabelled } = require('../utils/jiraLink');
 const { FIELDS: RISK_FIELDS, riskContextFor, sendFyi, notificationAge, notificationMatches } = require('../utils/riskReviewMessage');
 const { collectContextFor, ROADMAP_FIELDS } = require('../utils/collectMessage');
+const { pauseState, describePause } = require('../utils/pauseState');
 
 // Risk reviews only act on a notification from the latest weekly notifier run; older stamps are
 // leftovers the notifier never clears (env RISK_NOTIFICATION_MAX_AGE_DAYS, default 8).
@@ -120,6 +121,19 @@ class JiraPoller {
    */
   async runOnce({ force = false, onlyId = null } = {}) {
     if (this._running) return []; // skip overlapping runs
+    // Global pause (kill switch): evaluate nothing, send nothing. Reported to ops at most hourly so a
+    // long pause does not fill the channel; a manual Run now always says why nothing happened.
+    const pause = await pauseState(this.db);
+    if (pause.paused) {
+      const quiet = Date.now() - (this._pauseNoticeAt || 0) < 60 * 60 * 1000;
+      if (!quiet || force) {
+        this._pauseNoticeAt = Date.now();
+        await this.ops?.post?.(`⏸ Jira triggers were not evaluated — the bot is paused. ${describePause(pause)}`,
+          { kind: 'paused_skip', detail: { source: pause.source, by: pause.by } });
+      }
+      this.logger.info('[jiraPoller] Paused — no triggers evaluated');
+      return [];
+    }
     this._running = true;
     const results = [];
     try {

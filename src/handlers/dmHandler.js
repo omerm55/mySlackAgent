@@ -7,6 +7,7 @@ const collect = require('../utils/collectMessage');
 const { buildYesNoBlocks, connectBlocks, buildReplyPreviewBlocks, describeDecision, yesNoHeadline } = require('../utils/dmQuestion');
 const { logger: baseLogger } = require('../utils/logger');
 const { withTimeout } = require('../utils/withTimeout');
+const { pauseState, describePause } = require('../utils/pauseState');
 
 // Each suggestion stage is capped at 5s inside the suggester; this is the
 // belt-and-braces ceiling for the whole thing (4 sequential stage groups).
@@ -54,6 +55,29 @@ function registerDmHandler(app, jiraService, services) {
       }).catch(() => {});
     }
     return jiraService;
+  }
+
+  /**
+   * Global pause: refuse the write, leave the ask (and its prompt row) exactly as it was so the person
+   * can press the same button once an admin resumes. Returns true when it handled the click.
+   */
+  async function refusedWhilePaused(client, ctx, body, logger) {
+    const state = await pauseState(services.db);
+    if (!state.paused) return false;
+    const channelId = body?.channel?.id || ctx.dmChannelId;
+    const messageTs = body?.message?.ts || ctx.messageTs;
+    const own = Array.isArray(body?.message?.blocks) && body.message.blocks.length
+      ? body.message.blocks
+      : rebuildAsk(ctx, ctx.slackUserId);
+    const note = { type: 'section', text: { type: 'mrkdwn', text: `⏸ *The bot is paused by an admin — nothing was changed.* Press the button again once it resumes.` } };
+    if (channelId && messageTs) {
+      await client.chat.update({ channel: channelId, ts: messageTs, text: '⏸ Paused — nothing was changed', blocks: [...own, note] })
+        .catch((err) => baseLogger.warn(`[dm] paused notice failed: ${err.data?.error || err.message}`));
+    }
+    logger?.info(`[dm] ${ctx.slackUserId} clicked on ${ctx.issueKey} while paused — nothing written`);
+    await services.opsNotifier?.post?.(`⏸ <@${ctx.slackUserId}> tried to act on *${ctx.issueKey}* while paused — nothing written. ${describePause(state)}`,
+      { kind: 'paused_refusal', user: ctx.slackUserId, issue: ctx.issueKey });
+    return true;
   }
 
   /** Can this person's write go ahead right now (own token, or the trigger allows the bot account)? */
@@ -318,6 +342,8 @@ function registerDmHandler(app, jiraService, services) {
     const fieldName = transitionTo ? 'status' : jiraFieldName;
     const fieldValue = transitionTo || jiraFieldValue;
 
+    if (await refusedWhilePaused(client, { ...context, dmChannelId: channelId, messageTs }, body, logger)) return;
+
     if (channelId && messageTs) {
       await replaceButtons(client, channelId, messageTs, originalText, '_Processing…_');
     }
@@ -401,6 +427,7 @@ function registerDmHandler(app, jiraService, services) {
     const ctx = parseCtx(body, logger, 'risk status'); if (!ctx) return;
     const channelId = body.channel?.id; const messageTs = body.message?.ts; const originalText = body.message?.text || '';
     const { issueKey, slackUserId, status } = ctx;
+    if (await refusedWhilePaused(client, { ...ctx, dmChannelId: channelId, messageTs }, body, logger)) return;
     if (channelId && messageTs) await replaceButtons(client, channelId, messageTs, originalText, `_Moving to ${status}…_`);
     try {
       const usingOAuth = services.oauthService?.hasToken(slackUserId) ?? false;
@@ -427,6 +454,7 @@ function registerDmHandler(app, jiraService, services) {
   app.action('risk_update_notes', async ({ ack, body, client, logger }) => {
     await ack();
     const ctx = parseCtx(body, logger, 'notes'); if (!ctx) return;
+    if (await refusedWhilePaused(client, ctx, body, logger)) return;
     if (!canWrite(ctx)) { await needsConnect(client, ctx, body, 'update Notes', logger); return; }
     const metadata = JSON.stringify({ ...ctx, dmChannelId: body.channel?.id, messageTs: body.message?.ts, originalText: (body.message?.text || '').slice(0, 600) });
     // Show the current Notes so the author knows what they're adding to (quick read; skipped if slow)
@@ -467,6 +495,7 @@ function registerDmHandler(app, jiraService, services) {
     const { issueKey, slackUserId, dmChannelId, messageTs, originalText = '' } = ctx;
     const raw = view.state.values.note_block?.note?.value?.trim() || '';
     if (!raw) return;
+    if (await refusedWhilePaused(client, ctx, null, logger)) return;
     if (dmChannelId && messageTs) await replaceButtons(client, dmChannelId, messageTs, originalText, '_Saving to Notes…_');
     try {
       let note = raw;
@@ -501,6 +530,7 @@ function registerDmHandler(app, jiraService, services) {
   app.action('risk_move_target', async ({ ack, body, client, logger }) => {
     await ack();
     const ctx = parseCtx(body, logger, 'target'); if (!ctx) return;
+    if (await refusedWhilePaused(client, ctx, body, logger)) return;
     if (!canWrite(ctx)) { await needsConnect(client, ctx, body, 'change the target', logger); return; }
     const metadata = JSON.stringify({ ...ctx, dmChannelId: body.channel?.id, messageTs: body.message?.ts, originalText: (body.message?.text || '').slice(0, 600) });
     const today = new Date().toISOString().slice(0, 10);
@@ -631,6 +661,7 @@ function registerDmHandler(app, jiraService, services) {
   app.action('collect_answer', async ({ ack, body, client, logger }) => {
     await ack();
     const ctx = parseCtx(body, logger, 'collect answer'); if (!ctx) return;
+    if (await refusedWhilePaused(client, ctx, body, logger)) return;
     if (!canWrite(ctx)) { await needsConnect(client, ctx, body, 'fill in the fields', logger); return; }
     await openCollectModal(client, body, { ...ctx, ...collectLoc(body) }, {}, '', logger);
   });
@@ -697,6 +728,7 @@ function registerDmHandler(app, jiraService, services) {
     const values = ctx.values || {};
     const toWrite = Object.fromEntries(fields.filter((f) => values[f.id]).map((f) => [f.id, values[f.id]]));
     if (!Object.keys(toWrite).length) return;
+    if (await refusedWhilePaused(client, full, body, logger)) return;
     if (dmChannelId && messageTs) await replaceButtons(client, dmChannelId, messageTs, originalText, '_Saving to Jira…_');
     try {
       const usingOAuth = services.oauthService?.hasToken(slackUserId) ?? false;
@@ -913,6 +945,7 @@ function registerDmHandler(app, jiraService, services) {
       logger.error('[dm] Could not parse button context for Reply');
       return;
     }
+    if (await refusedWhilePaused(client, context, body, logger)) return;
     if (!canWrite(context)) { await needsConnect(client, context, body, 'reply', logger); return; }
 
     // Embed channel + message ts so the view handler can update the original msg
@@ -1066,6 +1099,7 @@ function registerDmHandler(app, jiraService, services) {
     const ctx = parseCtx(body, logger, 'reply confirm'); if (!ctx) return;
     const { decision, userText, ...context } = ctx;
     if (!decision) { logger.error('[dm] reply confirm without a decision'); return; }
+    if (await refusedWhilePaused(client, context, body, logger)) return;
     const loc = { dmChannelId: context.dmChannelId || body.channel?.id, messageTs: context.messageTs || body.message?.ts };
     if (loc.dmChannelId && loc.messageTs) await replaceButtons(client, loc.dmChannelId, loc.messageTs, context.originalText || '', '_Applying…_');
     await executeDecision(client, { ...context, ...loc }, decision, userText || '', logger);

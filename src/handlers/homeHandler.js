@@ -1,6 +1,7 @@
 'use strict';
 
 const { canManage, isAdmin } = require('../utils/admins');
+const { pauseState, setPaused, describePause } = require('../utils/pauseState');
 const { FREQUENCIES } = require('../services/digestScheduler');
 
 /**
@@ -30,6 +31,8 @@ async function buildHomeBlocks(userId, services, logger) {
   // Trigger management is an admin surface; everyone else gets connection, notifications, activity.
   const admin = isAdmin(userId);
 
+  // Kill switch: everyone sees when the bot is paused (their buttons will not act); admins can toggle.
+  const pause = await pauseState(services.db);
   const hasOAuth = oauthService?.hasToken(userId) ?? false;
   const authUrl = (!hasOAuth && oauthService) ? await oauthService.generateAuthUrl(userId) : null;
 
@@ -86,6 +89,15 @@ async function buildHomeBlocks(userId, services, logger) {
     },
     { type: 'divider' },
 
+    // ── Paused banner (only when paused) ─────────────────────
+    ...(pause.paused ? [{
+      type: 'section',
+      text: { type: 'mrkdwn', text: `${describePause(pause)}\nAsks already in your DMs stay put and work again once it resumes.` },
+      ...(admin && pause.source !== 'env' ? {
+        accessory: { type: 'button', text: { type: 'plain_text', text: '▶️ Resume', emoji: true }, style: 'primary', action_id: 'home_resume_bot' },
+      } : {}),
+    }, { type: 'divider' }] : []),
+
     // ── Jira connection status ────────────────────────────────
     {
       type: 'section',
@@ -136,6 +148,12 @@ async function buildHomeBlocks(userId, services, logger) {
     { type: 'divider' },
 
     // ── Admin only: trigger management ───────────────────────
+    ...(admin && !pause.paused ? [{
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*Emergency stop*\n_Stops every trigger and refuses every action, without a deploy. Asks already sent stay put and work again after resuming._' },
+      accessory: { type: 'button', text: { type: 'plain_text', text: '⏸ Pause everything', emoji: true }, style: 'danger', action_id: 'home_pause_bot' },
+    }, { type: 'divider' }] : []),
+
     ...(admin ? [
     // ── Channel triggers ─────────────────────────────────────
     {
@@ -269,6 +287,32 @@ function registerHomeHandler(app, jiraService, services) {
     if (event.tab !== 'home') return;
     await publishHome(client, event.user, services, logger);
   });
+
+  // Emergency stop: admins only, either direction, both transitions audited.
+  for (const [actionId, on] of [['home_pause_bot', true], ['home_resume_bot', false]]) {
+    app.action(actionId, async ({ ack, body, client, logger }) => {
+      await ack();
+      const userId = body.user.id;
+      if (!isAdmin(userId)) {
+        await client.chat.postMessage({ channel: userId, text: '🚫 Only an admin can pause or resume the bot.' }).catch(() => {});
+        return;
+      }
+      try {
+        await setPaused(services.db, on, userId);
+        logger.info(`[home] ${userId} ${on ? 'paused' : 'resumed'} the bot`);
+        await services.opsNotifier?.post?.(
+          on
+            ? `⏸ *<@${userId}> paused the bot.* No trigger will be evaluated and no action applied until it is resumed.`
+            : `▶️ *<@${userId}> resumed the bot.* Triggers are evaluated again.`,
+          { kind: on ? 'paused' : 'resumed', user: userId },
+        );
+      } catch (err) {
+        logger.error(`[home] Could not ${on ? 'pause' : 'resume'}: ${err.message}`);
+        await client.chat.postMessage({ channel: userId, text: `❌ Couldn't ${on ? 'pause' : 'resume'}: ${err.message}` }).catch(() => {});
+      }
+      await publishHome(client, userId, services, logger);
+    });
+  }
 
   // Disconnect Jira: confirm, then forget the user's tokens (they can reconnect any time).
   app.action('home_disconnect_jira', async ({ ack, body, client, logger }) => {

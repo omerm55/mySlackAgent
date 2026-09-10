@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (253 passing, 27 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (267 passing, 28 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -234,6 +234,23 @@ Generic: a trigger's field list (`collect_fields`, one per line in the modal —
 PM-owner audience, pilot list, digests, Connect nudge and ops reporting are the shared machinery.
 Text fields only for now (§15).
 
+### 2.11 Emergency stop (global pause)
+
+One switch stops the bot **acting** without stopping it **listening**: no trigger is evaluated, no ask is
+sent, and every write path refuses and writes nothing. Asks already in people's DMs are left exactly as
+they were — the buttons work again after resuming, and no prompt row is consumed, so nothing is lost.
+App Home, Slack events and the ops channel keep working so an admin can see what is happening.
+
+Two independent switches, either of which pauses:
+
+- **App Home → ⏸ Pause everything** (admins only; ▶️ Resume while paused). Stored in `app_settings`, so
+  it takes effect within 30 seconds and needs no deploy. Everyone's Home shows a banner naming who paused
+  it and when; both transitions go to the ops channel and to `audit_events` (`paused` / `resumed`).
+- **`BOT_PAUSED=true`** in the environment — break-glass for when Supabase itself is the problem. It
+  cannot be undone from Home (the banner says so); clear the variable and redeploy.
+
+A database failure never pauses the bot by itself: an unreadable flag reads as "running".
+
 ### 2.8 Operator visibility
 
 Every trigger firing, filtered event, DM sent, button click, LLM proposal and decision, digest, trigger
@@ -311,12 +328,12 @@ src/
     attributionService.js      Comment on Jira naming the human, whenever the service account acts for them
   server/callbackServer.js     HTTP: /oauth/callback, /health (and nothing else)
   utils/
-    opsNotifier.js (ops channel + audit_events)  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
+    pauseState.js (global kill switch)  opsNotifier.js (ops channel + audit_events)  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     tokenCrypto.js (AES-256-GCM for OAuth tokens at rest, key rotation)
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (253 tests, 27 suites)
+tests/                         Jest (267 tests, 28 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 .github/workflows/ci.yml       CI: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
 scripts/scan-secrets.sh        Secret scan over tracked files (Slack / Atlassian / Supabase / OpenAI / keys)
@@ -352,7 +369,7 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 | `reactionHandler.js` | `reaction_added` | Match channel triggers by channel; fetch message; extract issue keys; per-trigger scope/allowlist/**OAuth gate** (no token and `allowBotFallback` false → thread reply "connect, then react again" + auth DM + ops `reactionFiltered`, nothing written)/rate/dedup; update field via user OAuth (or the service account when the trigger allows it, with attribution comment); thread confirmation; audit + ops. |
 | `replyHandler.js` | `message` (thread replies, non-bot) | Same for thread replies (root message holds the issue key), including the OAuth gate. |
 | `dmHandler.js` | **`attributeIfBot`** adds the attribution comment after any successful write made by the bot account (never when the user's own token was used; a failed comment never fails the action) · actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_reply_confirm`, `jira_reply_edit`, `jira_reply_cancel`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text is **preview-then-confirm** (`buildReplyPreviewBlocks` → `executeDecision`; the LLM never writes unconfirmed); Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); **`resolveJira(user, client, ctx)`** returns the user's client, the service account only when `ctx.allowFallback`, else `null` → **`needsConnect`** re-renders the ask (the message's own blocks, or rebuilt from ctx) with a Connect nudge and leaves `jira_prompts` alone; modal openers check `canWrite` before opening; clears `jira_prompts` on failure so the poller re-asks. Pino logs carry issue keys, actions and text *lengths* only — never the user's text or extracted values (those go to the ops channel). |
-| `homeHandler.js` | `app_home_opened`; action `home_disconnect_jira`; view `home_disconnect_jira_modal` | Builds the Home view (connection with Connect / Disconnect, notifications, how it works, persistent recent activity; trigger sections **admin-only**); Disconnect → confirm modal → `oauthService.disconnect` → DM + ops line + Home refresh; exports `publishHome` for other handlers to refresh it. |
+| `homeHandler.js` | `app_home_opened`; actions `home_disconnect_jira`, `home_pause_bot`, `home_resume_bot`; view `home_disconnect_jira_modal` | Builds the Home view (connection with Connect / Disconnect, notifications, how it works, persistent recent activity; trigger sections **admin-only**); Disconnect → confirm modal → `oauthService.disconnect` → DM + ops line + Home refresh; exports `publishHome` for other handlers to refresh it. |
 | `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (both modals: admin-only **Jira identity** checkbox `allow_bot_fallback`, default off; Jira-trigger modal: ask type yes/no / risk review / collect (+ field list, one per line), notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; runs the trigger once right after saving and posts the same summary as Run now (`runSummaryLines`: matched · not yet asked · already asked or waiting in a digest · sent · queued, with 🔔 lines for matches held for a digest); Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
 
@@ -465,7 +482,9 @@ Returns `{pick, reason, alternative, acceptedAt, statusName, candidates, childre
 
 ### 5.4 Utils
 
-`opsNotifier` funnels every message through `post(text, meta)`; `meta` (`kind`, `user`, `issue`, `ok`,
+`pauseState` (`isPaused(db)` / `pauseState(db)` → `{paused, by, at, source}` with a 30 s cache,
+`setPaused(db, on, byUser)`, `invalidate()`, `describePause(state)`; `BOT_PAUSED` or the `app_settings`
+row pauses; a DB error reads as running), `opsNotifier` funnels every message through `post(text, meta)`; `meta` (`kind`, `user`, `issue`, `ok`,
 `detail`) becomes the `audit_events` row, and `setDb` attaches the sink after construction.
 `tokenCrypto.TokenCrypto` (`encrypt` → `enc:v1:<iv>:<tag>:<data>` base64url, `decrypt` with legacy plaintext passthrough and previous-key fallback, `isEncrypted`, `isCurrent`, `fromEnv`), `opsNotifier` (all ops messages, incl. `riskReviewAction` and `collectAction`), `dmQuestion` (`sendDmQuestion`, `buildYesNoBlocks`, `connectBlocks`, `describeDecision` → human-readable list of an LLM decision's effects, `buildReplyPreviewBlocks` → preview + Confirm/Edit/Cancel with a compacted decision in the button value) (builds
 the Yes/No/Reply message, optional Connect block, no key prefix if the question already names the
@@ -660,6 +679,19 @@ create table if not exists public.user_preferences (
 );
 ```
 
+### 6.9 `app_settings` — operational state changeable without a deploy (`supabase/app_settings.sql`)
+
+```sql
+create table if not exists public.app_settings (
+  key         text primary key,      -- today only 'paused'
+  value       jsonb not null,        -- {"paused": true|false}
+  updated_at  timestamptz not null default now(),
+  updated_by  text null              -- Slack user id
+);
+```
+
+**Migration to run by hand.** RLS on, anon revoked; included in `supabase/rls.sql`.
+
 ### 6.8 `audit_events` — durable operator record (`supabase/audit_events.sql`)
 
 ```sql
@@ -719,7 +751,8 @@ reaction_added ─► isThumbsUp? ─► integrationCache.getAll() filter channe
 ### 7.2 Jira trigger → DM → action
 
 ```
-JiraPoller tick ─► trigger due? ─► searchIssues(jql) (paginated) ─► minus jira_prompts
+JiraPoller tick ─► paused? ─► ops line (≤1/h) + stop
+  ─► trigger due? ─► searchIssues(jql) (paginated) ─► minus jira_prompts
   ─► for each new issue (≤ cap): reporter/assignee email ─► users.lookupByEmail ─► scope check
   ─► preference: digest? recordPrompt(queued, payload) : sendDmQuestion(+Connect if no OAuth) + recordPrompt(delivered)
 User clicks Yes ─► dmHandler.resolveJira(user, ctx): own token → as user · no token & ctx.allowFallback → bot · else null
@@ -980,6 +1013,7 @@ style base with `OPENAI_DEPLOYMENT` = deployment name (GPT-5.1). Uses `api-key` 
 | `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_TOKEN` | yes | Slack Bolt (Socket Mode) |
 | `JIRA_BASE_URL`, `JIRA_USER_EMAIL`, `JIRA_API_TOKEN` | yes | Jira service account; base URL also builds issue links |
 | `JIRA_SERVICE_ACCOUNT_EMAIL` | no | The account the bot is *expected* to be; a mismatch with the live identity is reported to ops at every start |
+| `BOT_PAUSED` | no | `true` stops the bot acting (independent of the App Home switch; needs a redeploy to change) |
 | `OPS_CHANNEL_ID` | yes (cloud) | Ops channel for all notifications (when `config/settings.json` absent) |
 | `JIRA_OAUTH_CLIENT_ID`, `JIRA_OAUTH_CLIENT_SECRET`, `OAUTH_REDIRECT_URI` | for OAuth | Atlassian 3LO |
 | `OAUTH_PORT` | no | Local callback port (Render supplies `PORT`) |
@@ -1086,6 +1120,8 @@ architecture note superseded by this document.
 | ▶️ Run now | `runOnce({force, onlyId})`; respects `jira_prompts`; summary → ops |
 | 🔁 Re-ask open matches | `deletePromptsForTrigger` then force run — re-DMs everyone still matching (including those who answered No) |
 | 🗑 Delete | `active = false` |
+
+**⏸ Pause everything / ▶️ Resume** sits above the trigger sections (§2.11) — the answer to "stop it now".
 
 Both trigger modals default a **new** trigger to *Only me*; open it up by editing after a Run now.
 
@@ -1196,6 +1232,8 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | 👍 reaction answered with "I've DM'd you a link to connect Jira" and no update | Same, for channel triggers | Same |
 | Callback page says "This link has expired or was already used" | Connect link older than 24 h, clicked twice, or not issued by us (`oauth_states` has no live row) | Open the bot's Home tab and press Connect Jira again; Home issues a fresh link on every open |
 | Saving a Connect link fails / Home shows no Connect button after deploy | `oauth_states` table missing | Run `supabase/oauth_states.sql` |
+| Nothing fires and ops says "not evaluated — the bot is paused" | Someone pressed ⏸ Pause everything, or `BOT_PAUSED=true` is set | App Home → ▶️ Resume (the banner names who paused it). If it was the environment variable, clear it in Render and redeploy |
+| A button answers "the bot is paused by an admin" | Same | Same; the ask is intact and the same button works after resuming |
 | Ops says "🔑 Jira service identity: <a person>" or warns about a mismatch | `JIRA_USER_EMAIL` / `JIRA_API_TOKEN` are not the intended service account (a personal account left in place) | Switch to the dedicated account per `JIRA_SERVICE_ACCOUNT.md`; set `JIRA_SERVICE_ACCOUNT_EMAIL` so a future mismatch is flagged |
 | Boot fails: "oauth_tokens are encrypted but TOKEN_ENCRYPTION_KEY is not set" | Key removed from Render (or wrong service) while encrypted rows exist | Restore the key in Render; never "fix" by deleting rows — users would have to reconnect |
 | Boot fails: "Could not decrypt token (wrong TOKEN_ENCRYPTION_KEY or tampered value)" | Key changed without keeping the old one | Put the old key in `TOKEN_ENCRYPTION_KEY_PREVIOUS`, deploy, then clear it (§12.5) |
@@ -1232,9 +1270,59 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 **Offboarding a user**: they press Disconnect, or an admin runs
 `delete from public.oauth_tokens where slack_user_id = 'U…';` (Table Editor works too).
 
+### 12.6 Incident response and data retention
+
+**Who.** Owner: Omer Meshar / PH Ops. The **ops channel** is the alarm (every action, every failure,
+alerting above the error threshold). There is no formal on-call: an incident found outside working hours
+is handled at the next opportunity, which is acceptable because the blast radius is bounded by §2.11
+(pause), the per-trigger caps (§5.3) and OAuth-required writes (§2.5).
+
+**First move in every case: pause.** App Home → ⏸ Pause everything (or `BOT_PAUSED=true` if Supabase is
+implicated). Nothing is lost — asks stay put and work after resuming.
+
+**A credential may have leaked.** Pause. Rotate what leaked: Supabase secret key or
+`TOKEN_ENCRYPTION_KEY` per §12.5; Slack tokens in the Slack app (Basic Information → regenerate);
+Atlassian OAuth client secret in the developer console; the Jira service-account API token in Atlassian.
+Then check what was done with it: `select * from audit_events where ts > '<window start>' order by ts;`
+and Jira's own issue history for the projects in §9.3. Update the environment, resume, and post the
+timeline in the ops channel.
+
+**An unintended burst of writes.** Pause. List exactly what changed and by whom:
+
+```sql
+select ts, kind, slack_user_id, issue_key, detail->>'identity' as identity, text
+from public.audit_events where ts > now() - interval '2 hours' and ok order by ts;
+```
+
+Revert in Jira (the changelog gives the previous value per field), then remove the cause: deactivate the
+trigger in App Home, and `delete from public.jira_prompts where trigger_id = '<id>';` only if those
+issues should be asked about again. Resume once the trigger is off.
+
+**A trigger misbehaves (wrong audience, wrong field, loops).** Deactivate it (App Home → 🗑, which sets
+`active = false`) rather than deleting the row, so the audit trail keeps its configuration. Fix it on a
+copy with `scope = personal`, verify with ▶️ Run now, then open it up again.
+
+**Retention.** Nothing is deleted automatically today except expired OAuth states. Intended policy, to be
+applied quarterly by hand until it is scheduled:
+
+| Table | Holds | Keep |
+|---|---|---|
+| `audit_events` | Every operator event, incl. who acted and as whom | 12 months |
+| `activity_log` | Per-user history shown in App Home | 12 months |
+| `jira_prompts` | Who was asked about which issue, and when they answered | 12 months |
+| `oauth_states` | Pending Connect links | Pruned automatically (24 h) |
+| `oauth_tokens` | Encrypted Atlassian tokens | Until the user disconnects or is offboarded |
+| `integrations`, `jira_triggers`, `user_preferences`, `release_calendar`, `app_settings` | Configuration | Life of the service |
+
+```sql
+delete from public.audit_events where ts < now() - interval '12 months';
+delete from public.activity_log where ts < now() - interval '12 months';
+delete from public.jira_prompts where prompted_at < now() - interval '12 months';
+```
+
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 253 tests in 27 suites:
+`npm test` → Jest, `tests/*.test.js`, 267 tests in 28 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1251,6 +1339,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `dmReplyPreview` | Modal submit previews and writes nothing (ops "proposed", not "decision"); Confirm applies transition + comment + assignee and reports to ops; Cancel restores the Yes/No/Reply ask; Edit reply reopens the modal prefilled; `no_action` finalises without buttons; LLM failure keeps the ask actionable; the preview button value stays under Slack's 2000-char cap; `describeDecision` renders each change kind |
 | `dmRequireOauth` | Attribution: a bot-account write from a DM ask comments naming the person and the change (Yes, risk status, collect save), a write as the user does not, and a failing comment never breaks the write; Yes without token/fallback → nothing written, ask restored with its buttons + Connect, prompt kept, ops told; with fallback → bot writes + nudge; with token → user writes; a second nudge does not stack; Reply / Update Notes / Answer without token → modal not opened; Notes modal submitted without token → ask rebuilt from ctx; risk status with fallback / token; No and Handled still work; all three ctx builders carry `allowFallback` |
 | `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; a new trigger with no scope choice defaults to `personal`; save-time run posts the Run-now summary with queued matches called out; Jira identity checkbox → `allow_bot_fallback` on both trigger kinds (default false; ops line says OAuth required / bot may act) |
+| `pauseSwitch` | `pauseState`: DB flag, `BOT_PAUSED` override, DB failure reads as running, 30 s cache + `invalidate`, `setPaused` records who, `describePause` wording; poller evaluates nothing and warns ops once; DM paths (Yes, risk status, collect Save, Reply modal) write nothing and keep the ask and prompt; reaction answers in-thread; Home banner and admin-only Pause / Resume, both audited; not paused → the same click goes through |
 | `auditEvents` | Every notifier method writes a row mirroring the ops line (kind, user, issue, identity, structured detail); failures recorded with `ok:false` and the error; bot-account identity captured; proposed vs applied LLM decisions are distinct kinds; a plain `post` is kind `ops`; a failing sink never breaks the message; rows are written even with no ops channel; insert truncates long text; the query filters by issue / user / kind / time |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), Connect (async URL) vs Disconnect by connection state, persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
 | `callbackServer` | Public HTTP surface is exactly `/health` (200) and `/oauth/callback` (400 without code/state, else `handleCallback(code, state)`; `invalid_state` → 400 "expired or already used" page, not 500); `/send-dm` and unknown paths → 404 |
@@ -1416,11 +1505,24 @@ Chronological, with rationale (see `git log` for commits):
     off everywhere), but the summary asserted it as a property. `attributeIfBot` now covers all seven DM
     write paths; a write with the person's own token adds no comment because the changelog already names
     them, and a failed comment is logged without failing the action.
+38. **Emergency stop.** "How do you stop it right now?" had no good answer: delete triggers one by one or
+    suspend the host. A global pause now stops the bot *acting* while it keeps *listening*, so an admin
+    can still see and resume. Two switches on purpose: an App Home toggle in `app_settings` (no deploy,
+    names who paused it, audited) and `BOT_PAUSED` for when the database is the problem. Refusals leave
+    the ask and its prompt row untouched, so a pause costs nothing but time. A database error deliberately
+    reads as "running" — the switch must not be able to take the bot down on its own.
+    **Migration `supabase/app_settings.sql` must be run.**
+39. **Incident response and retention written down (§12.6).** The security summary had to admit there was
+    no procedure and no retention statement. Three playbooks (leaked credential, unintended write burst,
+    misbehaving trigger), each starting with "pause", each with the `audit_events` query that answers what
+    happened; and a retention table with the prune SQL, honest that it is quarterly by hand for now.
 
 ---
 
 ## 15. Known limitations
 
+- **Retention is manual:** the prune SQL in §12.6 is run by hand; `audit_events`, `activity_log` and
+  `jira_prompts` grow until then.
 - **Hosting:** Render free tier sleeps; self-ping mitigates but cannot revive a sleeping instance.
 - **Single workspace / single Jira site.** No multi-tenant config.
 - **Dedup and the per-channel hourly rate limit are in memory** and reset on restart. The limit that
