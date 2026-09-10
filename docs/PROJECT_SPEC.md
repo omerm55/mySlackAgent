@@ -1314,14 +1314,14 @@ Ordered by value ÷ effort; each item is independently shippable.
 
 ### 16.2 Security
 
-[`SECURITY_SUMMARY.md`](SECURITY_SUMMARY.md) maps the March 2026 security review (authorization, ownership,
-audit, operational controls, governance, data) to what the rebuild did and what is still open, and lists
-the risks the rebuild introduced (unauthenticated `/send-dm`, plaintext OAuth tokens, predictable OAuth
-`state`, public HTTP surface, PaaS hosting, LLM writes without preview on the Yes/No path, user text in
-logs). Its P0 list, in order: ~~remove `/send-dm`~~ (done, #28); ~~random single-use `state`~~ (done, #29); ~~encrypt tokens
-+ RLS + key rotation + Disconnect~~ (done, #30); ~~stop logging user text~~ (done, #28); ~~`require_oauth` per trigger~~ (done, #31 — OAuth required everywhere; per-trigger `allow_bot_fallback` is the exception).
-
-**All five P0 items are implemented.** Operator steps outstanding are listed in `SECURITY_SUMMARY.md` §5.
+[`SECURITY_SUMMARY.md`](SECURITY_SUMMARY.md) is the document shared with the security team: the March
+2026 feedback (authorization, ownership, audit, operational controls, governance, data) → what the system
+does today about each point → what still remains, plus the precautions taken on our own initiative and
+the decisions we need from Security. It deliberately does not use our internal "P0" labels (those live
+in §14 #28–#31). The five internal P0 items — remove `/send-dm`, random single-use OAuth `state`,
+encrypted tokens + RLS + rotation + Disconnect, no user text in logs, OAuth required for writes — are
+all implemented; the operator steps (migrations, encryption key in Render, Supabase key rotation) are
+in §12.5 and the summary's "what remains" table.
 
 - ~~Encrypt OAuth tokens at rest and rotate the Supabase secret key~~ (done, #30; rotation is a runbook, §12.5).
 - ~~Enable RLS~~ (done, #30); audit table access; least-privilege Slack scopes review.
