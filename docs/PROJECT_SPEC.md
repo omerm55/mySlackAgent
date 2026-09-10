@@ -1121,10 +1121,23 @@ app changes. State and remaining steps:
   GitHub, GitLab.com and Bitbucket — a self-managed instance is not among them. "Repoint Render at GitLab"
   is therefore **not possible**, which leaves two paths:
   - **Interim:** GitLab is where people work; GitHub stays as a **deploy mirror**. GitLab → Settings →
-    Repository → *Mirroring repositories*, direction **Push**, target
-    `https://github.com/omerm55/mySlackAgent.git` with a GitHub personal-access token. Render keeps
-    deploying from GitHub. The first mirror push overwrites GitHub's `main` (different merge commit, same
-    tree — harmless). Then move the GitLab default branch and Render's branch to `main` together.
+    Repository → *Mirroring repositories*, direction **Push**. The form only offers username/password or
+    an SSH key, which is expected — GitHub stopped accepting account passwords over Git in 2021, so the
+    credential is a token or a deploy key, never a password:
+    - **SSH deploy key (preferred — does not expire).** URL `git@github.com:omerm55/mySlackAgent.git`,
+      authentication method *SSH public key*; save, then reopen the mirror row and copy the public key
+      GitLab generated into GitHub → the repository → Settings → *Deploy keys* → Add, with **Allow write
+      access** ticked.
+    - **HTTPS + token.** URL `https://omerm55@github.com/omerm55/mySlackAgent.git` (the account name goes
+      in the URL), authentication method *Password*, and paste a GitHub personal-access token as the
+      password — fine-grained, scoped to this one repository with *Contents: read and write*, or classic
+      with `repo`. Fine-grained tokens expire (one year maximum) and the mirror then fails silently apart
+      from the error shown on the mirror row, so diary the renewal.
+
+    Render keeps deploying from GitHub. The mirror force-pushes, so GitHub branch protection on `main`
+    must allow it (or stay off), and the first push replaces GitHub's `main` with GitLab's merge commit
+    (same tree — harmless) and triggers a deploy. Then move the GitLab default branch and Render's branch
+    to `main` together.
   - **Proper fix:** move hosting inside the network, which is open item 1 of the security review
     (`SECURITY_SUMMARY.md` §5) — a runner inside the network reaches both the code and the target, and the
     Render questions (free tier, secrets, region) disappear with it. Fold this into that decision rather
