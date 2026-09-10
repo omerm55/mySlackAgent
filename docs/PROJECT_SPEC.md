@@ -1027,8 +1027,10 @@ automatically" note.
 
 Project created manually; tables per §6, applied by `node scripts/apply-schema.js` or by hand in the SQL
 editor. The app connects with `DATABASE_URL` over TLS — the Postgres protocol, so **the secret
-(service-role) API key is no longer part of the deployment** (§14.41); revoke it once nothing else uses
-it. **RLS enabled on all tables, no policies** (`supabase/rls.sql`) so Supabase's anon and publishable
+(service-role) API key is no longer part of the deployment** (§14.41). It was **revoked on 11 Sept
+2026**, together with the legacy `anon` / `service_role` JWT pair, after the PostgREST logs showed no
+requests since the cutover. Nothing in Supabase now holds a credential that can read this data over
+HTTP; the only way in is the database login. **RLS enabled on all tables, no policies** (`supabase/rls.sql`) so Supabase's anon and publishable
 keys can read nothing. OAuth tokens are ciphertext in the table (§6.1); Dashboard → Table Editor is the
 operator UI for ad-hoc inspection/deletes, and token values are not readable there — by design.
 Credential rotation: §12.5. Moving to a Postgres outside Supabase: §12.7.
@@ -1379,8 +1381,8 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 2. Render → Environment → `DATABASE_URL` = the new connection string → save (Render redeploys).
 3. Watch `/health` and the ops channel for the boot line; anything else is a paste error.
 
-The Supabase *secret (service-role) API key* is no longer used by the app (§14.41). Rotating it changes
-nothing here; revoke it once nothing else depends on it.
+The Supabase *secret (service-role) API key* was revoked on 11 Sept 2026 and is not part of any runbook
+any more (§14.41). The credential that matters is now the database password above.
 
 **`TOKEN_ENCRYPTION_KEY`** (tokens stay valid throughout):
 1. `openssl rand -base64 32` → new key.
@@ -1725,6 +1727,15 @@ Chronological, with rationale (see `git log` for commits):
     repository could not create its own database; and `integrations.triggers` is a `text[]`, not jsonb,
     which a naive rewrite would have written as a JSON string. Both are pinned by tests that run the real
     SQL against a real Postgres in CI (§13), which nothing did before.
+    **Deployed 10 Sept 2026, 21:20 UTC** against Supabase's own session-pooler endpoint — the same
+    database, a new client, so the deploy was reversible by redeploying the previous commit. The boot
+    proved each layer in turn: `Loaded 8 token(s) from the database` (connection, TLS, query,
+    decryption), `2 integration(s) … 0 static, 2 from DB` with `triggers: ["reaction"]` intact (the
+    `text[]` distinction, in production), and the poller and digest scheduler starting at all — they
+    only start when a database is configured, so there was no silent fall back to in-memory mode.
+    `SUPABASE_URL` and `SUPABASE_SECRET_KEY` were then deleted from Render and the key revoked
+    (§9.4). The store is now portable: what remains for the security review's migration condition is
+    choosing the destination, not changing the code.
 
 ---
 
@@ -1754,6 +1765,11 @@ Chronological, with rationale (see `git log` for commits):
   `jira_triggers.notification_match` column + modal input — deferred until a second trigger exists.
 - **LLM output** is validated structurally, not semantically; reasons are shown to users as-is. Every
   LLM-derived change is confirmed by the person before it is written (reply preview, collect preview).
+- **Database TLS is `require`, not verified:** traffic to Postgres is encrypted, but the server's
+  certificate chain is not checked, so it defends against eavesdropping and not against an active
+  man-in-the-middle. `DATABASE_CA_CERT` (§10) turns on full verification; it is deliberately unset
+  because the certificate is specific to the current provider and would be replaced by whatever the
+  store moves to (§12.7). Worth doing once the destination is settled, not twice.
 - **Legacy code paths:** `config/*.json` loaders, Docker/pm2 files are kept but not exercised in production.
 
 ---
@@ -1764,8 +1780,11 @@ Ordered by value ÷ effort; each item is independently shippable.
 
 ### 16.1 Reliability & hosting
 - Move to a non-sleeping host (Render Starter or equivalent) and add an external uptime monitor on `/health`.
-- Graceful shutdown (drain in-flight handlers on SIGTERM) and a startup self-check (Slack auth test,
-  Jira `/myself`, database ping) posted to ops.
+- Graceful shutdown (drain in-flight handlers on SIGTERM — `DbService.close()` already exists for it)
+  and a startup self-check (Slack auth test, Jira `/myself`, database ping) posted to ops. The
+  database line matters more since §14.41: without `DATABASE_URL` the bot boots healthy but degraded
+  (in-memory tokens, static triggers, no poller), and today the only evidence is
+  `Loaded N token(s) from the database` in the host's logs rather than a line in the ops channel.
 - Persist `auditLog`, dedup and rate-limit state (or accept reset and document it).
 - Retries with backoff for Jira/Slack 429/5xx; central Slack rate-limit queue.
 
@@ -1821,6 +1840,10 @@ all implemented; the Supabase secret key has been rotated (10 Sept); the remaini
   to point at this spec.
 - ~~Migration tooling~~ — `scripts/apply-schema.js` applies every file in dependency order to any
   Postgres (§12.7). Still not numbered migrations, and still not applied by CI.
+- Wait for the `postgres` service to accept connections before the tests job runs (§11.2a). The first
+  pipeline of the `pg` rewrite failed in `tests` and the same commit passed on a retry, which points
+  at a start-up race rather than the code — and a gate that fails at random is a gate people learn to
+  ignore.
 
 ### 16.9 Compliance & rollout
 - **Security review SNS-133715** set three preconditions (10 Sept). The *repository* one is met
