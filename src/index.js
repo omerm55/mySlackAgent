@@ -139,7 +139,15 @@ registerPreferencesHandler(app, services);
   opsNotifier = new OpsNotifier(app.client, settings.opsChannelId);
 
   if (oauthService) {
-    await oauthService.loadFromDb();
+    try {
+      await oauthService.loadFromDb();
+    } catch (err) {
+      if (err.code === 'encryption_key_missing') {
+        logger.error('oauth_tokens are encrypted but TOKEN_ENCRYPTION_KEY is not set — refusing to start (see PROJECT_SPEC §12.5)');
+        process.exit(1);
+      }
+      throw err;
+    }
     const oauthPort = parseInt(process.env.OAUTH_PORT || '3000', 10);
     startCallbackServer(oauthService, oauthPort, logger);
     logger.info({ redirectUri: process.env.OAUTH_REDIRECT_URI }, '[oauth] Impersonation enabled');

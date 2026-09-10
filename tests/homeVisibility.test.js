@@ -38,6 +38,8 @@ describe('App Home visibility', () => {
     expect(t).not.toContain('home_create_trigger');
     expect(t).not.toContain('home_create_jira_trigger');
     expect(t).toContain('Jira account connected');
+    expect(t).toContain('home_disconnect_jira');      // connected → Disconnect offered
+    expect(t).not.toContain('home_connect_jira');
     expect(t).toContain('home_set_digest');
     expect(t).toContain('*How it works*');
     expect(t).toContain('*Your recent activity*');
@@ -45,6 +47,15 @@ describe('App Home visibility', () => {
     expect(svc.integrationCache.getAll).not.toHaveBeenCalled();
     expect(db.getActiveJiraTriggers).not.toHaveBeenCalled();
   });
+});
+
+test('not connected → Connect button (async auth URL), no Disconnect', async () => {
+  const db = { getActiveJiraTriggers: jest.fn(), getUserPreference: jest.fn().mockResolvedValue(null), getPendingPrompts: jest.fn().mockResolvedValue([]) };
+  const svc = { ...services({ db }), oauthService: { hasToken: () => false, generateAuthUrl: jest.fn().mockResolvedValue('https://auth?state=r4nd0m') } };
+  const t = text(await buildHomeBlocks('UREGULAR', svc));
+  expect(t).toContain('home_connect_jira'); expect(t).toContain('https://auth?state=r4nd0m');
+  expect(t).not.toContain('home_disconnect_jira');
+  expect(svc.oauthService.generateAuthUrl).toHaveBeenCalledWith('UREGULAR');
 });
 
 describe('recent activity', () => {

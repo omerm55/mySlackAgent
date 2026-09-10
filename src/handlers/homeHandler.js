@@ -104,6 +104,14 @@ async function buildHomeBlocks(userId, services, logger) {
           action_id: 'home_connect_jira',
         },
       } : {}),
+      ...((hasOAuth && oauthService) ? {
+        accessory: {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Disconnect', emoji: true },
+          action_id: 'home_disconnect_jira',
+          value: userId,
+        },
+      } : {}),
     },
     { type: 'divider' },
 
@@ -260,6 +268,42 @@ function registerHomeHandler(app, jiraService, services) {
   app.event('app_home_opened', async ({ event, client, logger }) => {
     if (event.tab !== 'home') return;
     await publishHome(client, event.user, services, logger);
+  });
+
+  // Disconnect Jira: confirm, then forget the user's tokens (they can reconnect any time).
+  app.action('home_disconnect_jira', async ({ ack, body, client, logger }) => {
+    await ack();
+    try {
+      await client.views.open({
+        trigger_id: body.trigger_id,
+        view: {
+          type: 'modal', callback_id: 'home_disconnect_jira_modal',
+          title: { type: 'plain_text', text: 'Disconnect Jira?' },
+          submit: { type: 'plain_text', text: 'Disconnect' },
+          close: { type: 'plain_text', text: 'Cancel' },
+          blocks: [
+            { type: 'section', text: { type: 'mrkdwn', text: 'I will forget your Jira connection. Until you connect again, actions you take here cannot be made under your name.\n\nTo also revoke the app on Atlassian\'s side, open <https://id.atlassian.com/manage-profile/apps|id.atlassian.com → Connected apps>.' } },
+          ],
+        },
+      });
+    } catch (err) {
+      logger.error(`[home] Failed to open disconnect modal: ${err.data?.error || err.message}`);
+    }
+  });
+
+  app.view('home_disconnect_jira_modal', async ({ ack, body, client, logger }) => {
+    await ack();
+    const userId = body.user.id;
+    try {
+      await services.oauthService?.disconnect(userId);
+      await client.chat.postMessage({ channel: userId, text: '🔌 Jira disconnected. Press *Connect Jira* in my Home tab whenever you want to reconnect. To revoke the app on Atlassian\'s side too: https://id.atlassian.com/manage-profile/apps' }).catch(() => {});
+      await services.opsNotifier?.post?.(`🔌 <@${userId}> disconnected their Jira account`);
+      logger.info(`[home] ${userId} disconnected Jira`);
+    } catch (err) {
+      logger.error(`[home] Disconnect failed for ${userId}: ${err.message}`);
+      await client.chat.postMessage({ channel: userId, text: `❌ Couldn't disconnect: ${err.message}` }).catch(() => {});
+    }
+    await publishHome(client, userId, services, logger);
   });
 }
 

@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (203 passing, 22 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (215 passing, 24 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -118,12 +118,14 @@ versions). Required *Resolution* is auto-filled (Done → Fixed → Resolved).
 Users connect once (App Home → Connect Jira, or the button in a DM). Every Connect link carries a
 **random, single-use `state`** that maps to the Slack user server-side and expires after 24 hours; a
 reused, stale or forged link gets a "This link has expired or was already used" page and nothing is
-stored. Tokens persist in Supabase, refresh automatically, and survive restarts. Without OAuth the bot acts as a service account and posts
+stored. Tokens persist in Supabase **encrypted at rest** (AES-256-GCM, key only in the runtime
+environment — `TOKEN_ENCRYPTION_KEY`), refresh automatically, and survive restarts. **Disconnect** in
+App Home forgets the tokens at any time (Atlassian-side revocation is a link in the confirmation). Without OAuth the bot acts as a service account and posts
 an attribution comment naming the Slack user.
 
 ### 2.6 App Home
 
-Everyone sees: OAuth status + Connect button; notification preference; how it works; **their recent
+Everyone sees: OAuth status + Connect button (or **Disconnect** when connected, with a confirm modal); notification preference; how it works; **their recent
 activity** (last 5 Jira changes the bot made on their behalf — reactions, replies, DM Yes / free-text,
 risk-review actions — read from the persistent `activity_log` table, so it survives restarts).
 **Admins only** (`ADMIN_SLACK_USER_IDS`) additionally see channel triggers and Jira triggers with
@@ -290,10 +292,11 @@ src/
   server/callbackServer.js     HTTP: /oauth/callback, /health (and nothing else)
   utils/
     opsNotifier.js  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
+    tokenCrypto.js (AES-256-GCM for OAuth tokens at rest, key rotation)
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (Sept 2026 answer to the March security review), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (203 tests, 22 suites)
+tests/                         Jest (215 tests, 24 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -326,7 +329,7 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 | `reactionHandler.js` | `reaction_added` | Match channel triggers by channel; fetch message; extract issue keys; per-trigger scope/allowlist/rate/dedup; update field via user OAuth or service account; thread confirmation; audit + ops. |
 | `replyHandler.js` | `message` (thread replies, non-bot) | Same for thread replies (root message holds the issue key). |
 | `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); clears `jira_prompts` on failure so the poller re-asks. Pino logs carry issue keys, actions and text *lengths* only — never the user's text or extracted values (those go to the ops channel). |
-| `homeHandler.js` | `app_home_opened` | Builds the Home view (connection, notifications, how it works, persistent recent activity; trigger sections **admin-only**); exports `publishHome` for other handlers to refresh it. |
+| `homeHandler.js` | `app_home_opened`; action `home_disconnect_jira`; view `home_disconnect_jira_modal` | Builds the Home view (connection with Connect / Disconnect, notifications, how it works, persistent recent activity; trigger sections **admin-only**); Disconnect → confirm modal → `oauthService.disconnect` → DM + ops line + Home refresh; exports `publishHome` for other handlers to refresh it. |
 | `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (Jira-trigger modal: ask type yes/no / risk review / collect (+ field list, one per line), notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; runs the trigger once right after saving and posts the same summary as Run now (`runSummaryLines`: matched · not yet asked · already asked or waiting in a digest · sent · queued, with 🔔 lines for matches held for a digest); Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
 
@@ -351,10 +354,15 @@ stored in `oauth_states` with a 24 h expiry — memory Map when there is no DB; 
 `handleCallback(code, state)` (`_consumeState` burns the state atomically → Slack user id, else throws
 `OAuthStateError` with `code: 'invalid_state'`; then exchange, resolve cloudId matching `JIRA_BASE_URL`,
 persist; prunes old states fire-and-forget), `hasToken`, `getJiraService(slackUserId)` (refresh if
-<5 min to expiry), `loadFromDb()`. In-memory Map is a cache over the `oauth_tokens` table. Exports
-`OAuthStateError` and `STATE_TTL_MS`.
+<5 min to expiry), `loadFromDb()` (loads decrypted rows; rewrites any row that is plaintext or under a
+previous key — lazy migration and rotation; rethrows `encryption_key_missing` so boot fails instead of
+running with unreadable tokens), `disconnect(slackUserId)` (memory + `deleteToken`). In-memory Map is a
+cache over the `oauth_tokens` table. Exports `OAuthStateError` and `STATE_TTL_MS`.
 
-**`supabaseService.js`** — PostgREST via axios with `apikey` + `Authorization: Bearer <secret>`.
+**`supabaseService.js`** — PostgREST via axios with `apikey` + `Authorization: Bearer <secret>`. Constructed
+with an optional `tokenCrypto` (`TokenCrypto.fromEnv()`): `upsertToken` encrypts `access_token` /
+`refresh_token`, `getToken` / `getAllTokens` decrypt (`getAllTokens` also flags `needsRewrite`); reading an
+`enc:` row without a key throws `encryption_key_missing`.
 Methods per table (see §6): tokens (`upsertToken`, `getToken`, `getAllTokens`, `deleteToken`),
 oauth_states (`insertOauthState`, `consumeOauthState` — conditional PATCH `used_at is null and expires_at > now()` with `return=representation`, so single-use is atomic — `pruneOauthStates`),
 integrations (`getActiveIntegrations`, `upsertIntegration`, `updateIntegration`, `deactivateIntegration`),
@@ -426,7 +434,7 @@ Returns `{pick, reason, alternative, acceptedAt, statusName, candidates, childre
 
 ### 5.4 Utils
 
-`opsNotifier` (all ops messages, incl. `riskReviewAction` and `collectAction`), `dmQuestion.sendDmQuestion(client, userId, context, _, ops)` (builds
+`tokenCrypto.TokenCrypto` (`encrypt` → `enc:v1:<iv>:<tag>:<data>` base64url, `decrypt` with legacy plaintext passthrough and previous-key fallback, `isEncrypted`, `isCurrent`, `fromEnv`), `opsNotifier` (all ops messages, incl. `riskReviewAction` and `collectAction`), `dmQuestion.sendDmQuestion(client, userId, context, _, ops)` (builds
 the Yes/No/Reply message, optional Connect block, no key prefix if the question already names the
 issue), `jiraLink` (`issueUrl`, `issueLink`, `issueLinkLabelled` with link-safe labels — `|`→`∣`,
 `<>&` escaped), `jiraLinkParser.extractJiraIssueKeys`, `keepAlive` (self-GET `/health` every 5 min),
@@ -448,13 +456,18 @@ via REST; RLS is not relied upon. All SQL below has been run in the SQL editor a
 ```sql
 create table if not exists public.oauth_tokens (
   slack_user_id  text primary key,
-  access_token   text not null,
-  refresh_token  text not null,
+  access_token   text not null,   -- ciphertext: enc:v1:<iv>:<tag>:<data> (AES-256-GCM, TOKEN_ENCRYPTION_KEY)
+  refresh_token  text not null,   -- same
   expires_at     timestamptz not null,
   cloud_id       text not null,
   updated_at     timestamptz not null default now()
 );
 ```
+
+Both token columns hold ciphertext since Sept 2026 (§14 #30). Rows written before that (plaintext) are
+rewritten on the first start with a key; nothing needs a SQL migration. **RLS is enabled on every table
+with no policies** (`supabase/rls.sql`) — the service-role key the app uses bypasses it, the anon key
+gets nothing.
 
 ### 6.2 `integrations` — channel triggers
 
@@ -870,8 +883,10 @@ automatically" note.
 
 ### 9.4 Supabase
 
-Project created manually; tables per §6; server uses the secret key. Dashboard → Table Editor is the
-operator UI for ad-hoc inspection/deletes.
+Project created manually; tables per §6; server uses the secret (service-role) key. **RLS enabled on all
+tables, no policies** (`supabase/rls.sql`) so only that key can read or write. OAuth tokens are
+ciphertext in the table (§6.1); Dashboard → Table Editor is the operator UI for ad-hoc inspection/deletes,
+and token values are not readable there — by design. Key rotation: §12.5.
 
 ### 9.5 Azure OpenAI
 
@@ -890,6 +905,8 @@ style base with `OPENAI_DEPLOYMENT` = deployment name (GPT-5.1). Uses `api-key` 
 | `JIRA_OAUTH_CLIENT_ID`, `JIRA_OAUTH_CLIENT_SECRET`, `OAUTH_REDIRECT_URI` | for OAuth | Atlassian 3LO |
 | `OAUTH_PORT` | no | Local callback port (Render supplies `PORT`) |
 | `SUPABASE_URL`, `SUPABASE_SECRET_KEY` | yes (features) | Persistence; without them tokens are in-memory and triggers static |
+| `TOKEN_ENCRYPTION_KEY` | yes (with Supabase) | 32 random bytes, base64 (`openssl rand -base64 32`); encrypts OAuth tokens at rest. Once any encrypted row exists the bot refuses to start without it |
+| `TOKEN_ENCRYPTION_KEY_PREVIOUS` | during rotation | Old key, decrypt-only; rows are rewritten with the current key on start (§12.5) |
 | `ADMIN_SLACK_USER_IDS` | no | Comma-separated; may create `global` triggers and manage any trigger |
 | `INTEGRATIONS_JSON` | legacy | Static channel triggers JSON array (optional now) |
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_DEPLOYMENT`, `OPENAI_MODEL` | one provider | LLM (Azure when BASE_URL set) |
@@ -976,6 +993,9 @@ architecture note superseded by this document.
 | 🔁 Re-ask open matches | `deletePromptsForTrigger` then force run — re-DMs everyone still matching (including those who answered No) |
 | 🗑 Delete | `active = false` |
 
+Everyone (not only admins): **Disconnect** next to the connection status → confirm → tokens forgotten,
+DM with the Atlassian revocation link, ops line; Connect reappears.
+
 ### 12.2a Creating the R&D risk-review trigger (App Home → ➕ Create Jira Trigger)
 
 | Field | Value |
@@ -1054,6 +1074,8 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | "You don't have access to this app" on Atlassian consent | OAuth app not shared | Distribution → Sharing |
 | Callback page says "This link has expired or was already used" | Connect link older than 24 h, clicked twice, or not issued by us (`oauth_states` has no live row) | Open the bot's Home tab and press Connect Jira again; Home issues a fresh link on every open |
 | Saving a Connect link fails / Home shows no Connect button after deploy | `oauth_states` table missing | Run `supabase/oauth_states.sql` |
+| Boot fails: "oauth_tokens are encrypted but TOKEN_ENCRYPTION_KEY is not set" | Key removed from Render (or wrong service) while encrypted rows exist | Restore the key in Render; never "fix" by deleting rows — users would have to reconnect |
+| Boot fails: "Could not decrypt token (wrong TOKEN_ENCRYPTION_KEY or tampered value)" | Key changed without keeping the old one | Put the old key in `TOKEN_ENCRYPTION_KEY_PREVIOUS`, deploy, then clear it (§12.5) |
 | Jira trigger matched but nobody DM'd | Reporter email hidden or no Slack user for email | Ops shows the reason; adjust profile visibility or map users |
 | Transition fails "A Fix Version is required" | Workflow validator | Bot offers suggestion + picker automatically |
 | Only 50 issues found | (fixed) pagination | Now follows `nextPageToken` |
@@ -1068,9 +1090,28 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 
 ---
 
+### 12.5 Key rotation runbooks
+
+**Supabase secret key** (compromise, or on a schedule):
+1. Supabase → Project Settings → API → *Rotate* the secret (service-role) key.
+2. Render → Environment → `SUPABASE_SECRET_KEY` = new value → save (Render redeploys).
+3. Watch `/health` and the ops channel for the boot line; anything else is a paste error.
+
+**`TOKEN_ENCRYPTION_KEY`** (tokens stay valid throughout):
+1. `openssl rand -base64 32` → new key.
+2. Render: `TOKEN_ENCRYPTION_KEY_PREVIOUS` = current key, `TOKEN_ENCRYPTION_KEY` = new key → deploy.
+   On start every row still under the old key is rewritten (log line "N re-encrypted with the current key").
+3. After that deploy: clear `TOKEN_ENCRYPTION_KEY_PREVIOUS` → deploy again.
+
+**Atlassian OAuth client secret**: developer.atlassian.com → the app → Settings → regenerate; Render
+`JIRA_OAUTH_CLIENT_SECRET`. Existing refresh tokens keep working.
+
+**Offboarding a user**: they press Disconnect, or an admin runs
+`delete from public.oauth_tokens where slack_user_id = 'U…';` (Table Editor works too).
+
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 203 tests in 22 suites:
+`npm test` → Jest, `tests/*.test.js`, 215 tests in 24 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1085,8 +1126,10 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; stale `Latest notification` stamps (older than `RISK_NOTIFICATION_MAX_AGE_DAYS`) are skipped without recording and counted in the Run-now summary; stamps that don't match `RISK_NOTIFICATION_MATCH` (orange, Overdue, Status mismatch…) are skipped the same way; collect trigger requests its field ids and DMs the PM owner an Answer/Skip ask with current values in the payload |
 | `collect` | Trigger field list parse/format round-trip + errors; `collectContextFor` current values + certified/timing; `visibilityLine`; certified line in DM and modal, absent otherwise; ask blocks (Answer/Skip, unique ids, ctx < 2000 chars); preview Save/Edit/Cancel vs missing-required (no Save); `mergeValues` precedence + 255 cap; modal prefill + slim metadata; `readCollectModal`; `sendDmQuestion` delegation; handlers: Answer opens modal with DM location, empty submit → inline error, explicit-only → no LLM, free text → LLM with typed field winning, LLM partial → "Almost there", LLM failure → note, Save → ONE `updateIssueFields` PUT + ✅ + answered + ops + FYI, save failure → ❌ + re-ask, Edit prefilled, Cancel restores ask, Skip |
 | `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; save-time run posts the Run-now summary with queued matches called out |
-| `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
+| `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), Connect (async URL) vs Disconnect by connection state, persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
 | `callbackServer` | Public HTTP surface is exactly `/health` (200) and `/oauth/callback` (400 without code/state, else `handleCallback(code, state)`; `invalid_state` → 400 "expired or already used" page, not 500); `/send-dm` and unknown paths → 404 |
+| `tokenCrypto` | Round trip, prefixed random ciphertext, legacy plaintext passthrough, wrong key / tampering / malformed detected, rotation (previous key decrypts, `isCurrent` distinguishes), `fromEnv` |
+| `oauthTokens` | `upsertToken` stores ciphertext and reads back plaintext; `loadFromDb` re-encrypts legacy plaintext rows exactly once; previous-key rows rewritten under the current key; encrypted rows without a key → `encryption_key_missing`; plaintext-only without a key still loads (local dev); `disconnect` forgets memory + DB |
 | `oauthState` | Memory mode: URL carries a random state (never the user id), fresh per call, accepted once, replay / unknown / malformed / expired rejected before any token exchange; Supabase mode: state inserted, consumed atomically through the DB, tokens persisted for the mapped user, prune called |
 | `noContentLogging` | A sentinel typed into the reply modal / collect modal reaches the ops channel but never any pino log call |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
@@ -1188,6 +1231,15 @@ Chronological, with rationale (see `git log` for commits):
     "expired or already used" page. `generateAuthUrl` became async; all six call sites await it.
     **Migration `supabase/oauth_states.sql` must be run before this deploys**, otherwise Connect links
     cannot be issued. See `SECURITY_SUMMARY.md` R3.
+30. **Security P0 (3/5): tokens encrypted at rest, RLS, rotation, Disconnect.** Application-level
+    AES-256-GCM (`tokenCrypto`) rather than pgcrypto, so Supabase never holds the key: a database leak
+    yields ciphertext, a Render leak yields a key without data. Legacy plaintext rows are rewritten
+    lazily on the first start with a key (no SQL migration, no user action); a previous-key slot makes
+    rotation a two-deploy affair with tokens valid throughout. Boot refuses to run when encrypted rows
+    exist and the key is missing — silently falling back to plaintext would be worse than downtime.
+    RLS with no policies (`supabase/rls.sql`) turns the anon key into a no-op. Disconnect gives users
+    the exit the March review implied under "accountability". **Manual: add `TOKEN_ENCRYPTION_KEY` in
+    Render before this deploys; run `supabase/rls.sql`; then rotate the Supabase secret key (§12.5).**
 
 ---
 
@@ -1232,13 +1284,13 @@ Ordered by value ÷ effort; each item is independently shippable.
 audit, operational controls, governance, data) to what the rebuild did and what is still open, and lists
 the risks the rebuild introduced (unauthenticated `/send-dm`, plaintext OAuth tokens, predictable OAuth
 `state`, public HTTP surface, PaaS hosting, LLM writes without preview on the Yes/No path, user text in
-logs). Its P0 list, in order: ~~remove `/send-dm`~~ (done, #28); ~~random single-use `state`~~ (done, #29); encrypt tokens
-+ RLS + key rotation + Disconnect; ~~stop logging user text~~ (done, #28); `require_oauth` per trigger
+logs). Its P0 list, in order: ~~remove `/send-dm`~~ (done, #28); ~~random single-use `state`~~ (done, #29); ~~encrypt tokens
++ RLS + key rotation + Disconnect~~ (done, #30); ~~stop logging user text~~ (done, #28); `require_oauth` per trigger
 (default on for PR).
 
-- Encrypt OAuth tokens at rest (pgcrypto or app-level) and rotate the Supabase secret key.
-- Enable RLS with a service role and audit table access; least-privilege Slack scopes review.
-- Secrets scanning in CI; never log tokens (already avoided) — add a test that asserts this.
+- ~~Encrypt OAuth tokens at rest and rotate the Supabase secret key~~ (done, #30; rotation is a runbook, §12.5).
+- ~~Enable RLS~~ (done, #30); audit table access; least-privilege Slack scopes review.
+- Secrets scanning in CI; ~~never log tokens~~ (tests: `noContentLogging`, `tokenCrypto`).
 
 ### 16.3 Multi-tenancy
 - Slack OAuth install flow (Bolt `installationStore` in Supabase) instead of a single bot token;

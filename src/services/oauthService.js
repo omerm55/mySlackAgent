@@ -59,18 +59,38 @@ class OAuthService {
     if (!this.db) return;
     try {
       const rows = await this.db.getAllTokens();
+      let rewritten = 0;
       for (const row of rows) {
-        this.tokens.set(row.slack_user_id, {
+        const token = {
           accessToken: row.access_token,
           refreshToken: row.refresh_token,
           expiresAt: new Date(row.expires_at).getTime(),
           cloudId: row.cloud_id,
-        });
+        };
+        this.tokens.set(row.slack_user_id, token);
+        // Lazy migration: plaintext rows (pre-encryption) and rows under a previous key are rewritten
+        // once with the current key. Values are never logged.
+        if (row.needsRewrite) {
+          await this.db.upsertToken(row.slack_user_id, token)
+            .then(() => { rewritten += 1; })
+            .catch((err) => logger.warn(`[oauth] Could not re-encrypt token for ${row.slack_user_id}: ${err.message}`));
+        }
       }
-      logger.info(`[oauth] Loaded ${rows.length} token(s) from Supabase`);
+      logger.info(`[oauth] Loaded ${rows.length} token(s) from Supabase${rewritten ? ` (${rewritten} re-encrypted with the current key)` : ''}`);
     } catch (err) {
+      if (err.code === 'encryption_key_missing') throw err; // boot must fail: tokens exist but cannot be read
       logger.warn(`[oauth] Could not load tokens from Supabase: ${err.message}`);
     }
+  }
+
+  /**
+   * Forget a user's tokens (App Home → Disconnect). Atlassian 3LO has no revocation endpoint for
+   * refresh tokens; the user revokes the app under id.atlassian.com → Connected apps if they want to.
+   */
+  async disconnect(slackUserId) {
+    this.tokens.delete(slackUserId);
+    if (this.db) await this.db.deleteToken(slackUserId);
+    logger.info(`[oauth] Disconnected Slack user ${slackUserId}`);
   }
 
   /**

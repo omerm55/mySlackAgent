@@ -1,13 +1,17 @@
 'use strict';
 
 const axios = require('axios');
+const { TokenCrypto } = require('../utils/tokenCrypto');
 
 /**
  * Minimal Supabase REST API client using axios (no SDK needed).
- * Uses the secret key for server-side access (bypasses RLS).
+ * Uses the secret (service-role) key for server-side access — it bypasses RLS, which is enabled on
+ * every table with no policies (supabase/rls.sql) so the anon key can read nothing.
+ * OAuth tokens are encrypted at rest with TokenCrypto when TOKEN_ENCRYPTION_KEY is set.
  */
 class SupabaseService {
-  constructor({ url, secretKey }) {
+  constructor({ url, secretKey, tokenCrypto = null }) {
+    this.tokenCrypto = tokenCrypto;
     this.client = axios.create({
       baseURL: `${url}/rest/v1`,
       headers: {
@@ -24,7 +28,20 @@ class SupabaseService {
     const url = process.env.SUPABASE_URL;
     const secretKey = process.env.SUPABASE_SECRET_KEY;
     if (!url || !secretKey) return null;
-    return new SupabaseService({ url, secretKey });
+    return new SupabaseService({ url, secretKey, tokenCrypto: TokenCrypto.fromEnv() });
+  }
+
+  _enc(v) { return this.tokenCrypto ? this.tokenCrypto.encrypt(v) : v; }
+
+  /** Decrypt a stored token; without a key, encrypted rows are unusable → fail loudly, never silently. */
+  _dec(v) {
+    if (this.tokenCrypto) return this.tokenCrypto.decrypt(v);
+    if (TokenCrypto.isEncrypted(v)) {
+      const err = new Error('oauth_tokens are encrypted but TOKEN_ENCRYPTION_KEY is not set');
+      err.code = 'encryption_key_missing';
+      throw err;
+    }
+    return v;
   }
 
   // ── oauth_tokens ────────────────────────────────────────────────
@@ -32,8 +49,8 @@ class SupabaseService {
   async upsertToken(slackUserId, { accessToken, refreshToken, expiresAt, cloudId }) {
     await this.client.post('/oauth_tokens', {
       slack_user_id: slackUserId,
-      access_token: accessToken,
-      refresh_token: refreshToken,
+      access_token: this._enc(accessToken),
+      refresh_token: this._enc(refreshToken),
       expires_at: new Date(expiresAt).toISOString(),
       cloud_id: cloudId,
       updated_at: new Date().toISOString(),
@@ -47,16 +64,25 @@ class SupabaseService {
     const row = res.data?.[0];
     if (!row) return null;
     return {
-      accessToken: row.access_token,
-      refreshToken: row.refresh_token,
+      accessToken: this._dec(row.access_token),
+      refreshToken: this._dec(row.refresh_token),
       expiresAt: new Date(row.expires_at).getTime(),
       cloudId: row.cloud_id,
     };
   }
 
+  /**
+   * All token rows, decrypted. `needsRewrite` is true for rows that are plaintext or encrypted with a
+   * previous key, so the caller can re-encrypt them once (lazy migration / rotation).
+   */
   async getAllTokens() {
     const res = await this.client.get('/oauth_tokens', { params: { select: '*' } });
-    return res.data ?? [];
+    return (res.data ?? []).map((row) => ({
+      ...row,
+      access_token: this._dec(row.access_token),
+      refresh_token: this._dec(row.refresh_token),
+      needsRewrite: !!this.tokenCrypto && !(this.tokenCrypto.isCurrent(row.access_token) && this.tokenCrypto.isCurrent(row.refresh_token)),
+    }));
   }
 
   async deleteToken(slackUserId) {

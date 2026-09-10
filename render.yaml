@@ -47,6 +47,10 @@ services:
         sync: false
       - key: SUPABASE_SECRET_KEY
         sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY_PREVIOUS
+        sync: false
       - key: ADMIN_SLACK_USER_IDS
         sync: false
       - key: JIRA_POLL_INTERVAL_SEC
