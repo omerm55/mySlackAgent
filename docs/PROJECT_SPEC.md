@@ -335,7 +335,8 @@ docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md,
 supabase/                      SQL for all tables and migrations (see §6)
 tests/                         Jest (267 tests, 28 suites)
 config/*.example.json          Local-dev config templates (legacy path)
-.github/workflows/ci.yml       CI: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
+.github/workflows/ci.yml       CI on GitHub: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
+.gitlab-ci.yml                 The same four gates on GitLab (for the move to gitlab.rnd.sisense.com)
 scripts/scan-secrets.sh        Secret scan over tracked files (Slack / Atlassian / Supabase / OpenAI / keys)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -1092,6 +1093,38 @@ Four jobs on every push and pull request (Node 22, `npm ci`):
 
 Run the secret scan locally with `bash scripts/scan-secrets.sh`. Deployment stays Render's own
 auto-deploy on push; CI is a gate for review, not for the deploy.
+
+**On GitLab** (`.gitlab-ci.yml`) the same four gates run as one `verify` stage on `node:22`, with the
+spec check limited to merge-request pipelines (`CI_PIPELINE_SOURCE == "merge_request_event"`, `GIT_DEPTH: 0`
+so the base branch can be diffed). Both files are kept while the repository is mirrored on GitHub; the
+GitHub workflow goes away once GitLab is the only remote (§11.4).
+
+### 11.4 Moving the repository to GitLab
+
+The code lives in GitHub (`omerm55/mySlackAgent`) and Render auto-deploys from it. The move to the
+company GitLab (`gitlab.rnd.sisense.com`, alongside the Jira Manager project) is done in this order, and
+nothing in the app changes:
+
+1. **Create the project** in the same GitLab group as Jira Manager, named `slack-jira-bot`, visibility
+   *Internal* or *Private*, **without** a README or any initial file (an initial commit would force a
+   merge on the first push).
+2. **Push the history** from a clone that has it (110 commits at the time of writing):
+   ```bash
+   git remote add gitlab https://gitlab.rnd.sisense.com/<group>/slack-jira-bot.git
+   git push -u gitlab --all && git push gitlab --tags
+   ```
+   GitLab's *Import project → GitHub* achieves the same and brings issues and pull requests with it.
+3. **Point Render at GitLab**: Settings → Build & Deploy → disconnect the GitHub repository, connect the
+   GitLab one, keep the branch. Environment variables are unaffected. Confirm the first deploy and the
+   `🔑 Jira service identity` line in the ops channel.
+4. **CI**: `.gitlab-ci.yml` already carries the four gates (§11.2a). Delete `.github/workflows/ci.yml`
+   once GitHub is no longer used, and set the branch as protected in GitLab.
+5. **Update the references**: this spec (§11.1, §12.2), `SECURITY_SUMMARY.md` §7, and the Reference
+   Materials field of the security-review ticket SNS-133715.
+6. **Archive the GitHub repository** (do not delete it until Render has deployed from GitLab twice).
+
+Nothing secret is in the history — `scripts/scan-secrets.sh` passes over every tracked file, and all
+credentials live in the runtime environment (§10).
 
 ### 11.3 Other artefacts
 

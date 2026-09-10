@@ -1,0 +1,59 @@
+# GitLab CI — the same four gates as .github/workflows/ci.yml, so the checks survive the move to
+# gitlab.rnd.sisense.com. Both files are kept while the repository is mirrored on GitHub; delete the
+# GitHub workflow once GitLab is the only remote.
+#
+# Jobs: tests · dependency audit (high and above) · secret scan · specification updated with the code.
+
+default:
+  image: node:22
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - .npm/
+  before_script:
+    - npm ci --cache .npm --prefer-offline
+
+stages:
+  - verify
+
+tests:
+  stage: verify
+  script:
+    - npm test
+
+audit:
+  stage: verify
+  # Low and moderate advisories in transitive dev dependencies should not block a deploy;
+  # anything high or critical must be looked at.
+  script:
+    - npm audit --audit-level=high
+
+secrets:
+  stage: verify
+  # scripts/scan-secrets.sh needs the tracked-file list, not the dependencies.
+  before_script: []
+  script:
+    - bash scripts/scan-secrets.sh
+
+spec-updated:
+  stage: verify
+  # CLAUDE.md: a change to behaviour, schema, configuration, prompts or operations must update
+  # docs/PROJECT_SPEC.md in the same change. Enforced on merge requests, where a base exists.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    GIT_DEPTH: 0
+  before_script: []
+  script:
+    - git fetch --no-tags origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - changed=$(git diff --name-only "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"...HEAD)
+    - echo "$changed"
+    - code=$(echo "$changed" | grep -E '^(src/|supabase/)' || true)
+    - spec=$(echo "$changed" | grep -E '^docs/PROJECT_SPEC\.md$' || true)
+    - |
+      if [ -n "$code" ] && [ -z "$spec" ]; then
+        echo "Code or SQL changed but docs/PROJECT_SPEC.md was not updated (see CLAUDE.md)."
+        exit 1
+      fi
