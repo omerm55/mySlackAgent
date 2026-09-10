@@ -159,7 +159,8 @@ question as Lauren's, one hop further.
   environment; the database holds ciphertext. The bot refuses to start if tokens exist and the key is
   missing, rather than run with unreadable or unprotected tokens. Key rotation is a two-deploy runbook.
 - **Row Level Security is enabled on every table with no policies**, so only the server's key can read
-  or write; the public keys get nothing.
+  or write; the public keys get nothing. **The server's database key was rotated** after the encryption
+  change and the previous key revoked.
 - **Users can disconnect** from App Home at any time; the tokens are deleted and the confirmation links
   to Atlassian's own "Connected apps" page for revocation on their side.
 - **The public HTTP surface is two paths**: `/health` and the OAuth callback. Everything else is 404, and
@@ -185,10 +186,9 @@ In rough priority order, each with the mitigation we propose.
 | 5 | **Jira triggers have no hourly cap; in-memory limits reset on restart** (F4) | A mis-scoped trigger can reach many people quickly | Per-trigger daily cap; "who would be asked" preview before saving |
 | 6 | **No second approver for triggers; scope grew SNS → PR without review** (F5) | Governance rests on two people | Trigger review checklist; quarterly review with Security |
 | 7 | **Customer-visible fields are written from Slack** | *Customer-friendly name* / *Customer value* appear on the certified roadmap | Preview is mandatory today; consider a second approver for certified Initiatives |
-| 8 | **Supabase secret key rotation** | Scheduled as part of the encryption change; not yet performed at the time of writing | Rotate per the runbook; confirm in this thread |
-| 9 | **Broader Slack scopes than March** | Six more bot scopes, incl. private-channel history | Needed for private-channel triggers; each scope is mapped to a feature in the spec (§9.1) |
-| 10 | **No CI checks** | No secrets or dependency scanning on the repository | Add GitHub Actions: tests, `npm audit`, secret scan |
-| 11 | **Audit trail lives in Slack** (F3) | Retention and immutability are Slack's | Immutable store for the audit events (post-pilot) |
+| 8 | **Broader Slack scopes than March** | Six more bot scopes, incl. private-channel history | Needed for private-channel triggers; each scope is mapped to a feature in the spec (§9.1) |
+| 9 | **No CI checks** | No secrets or dependency scanning on the repository | Add GitHub Actions: tests, `npm audit`, secret scan |
+| 10 | **Audit trail lives in Slack** (F3) | Retention and immutability are Slack's | Immutable store for the audit events (post-pilot) |
 
 ## 6. Decisions we need from Security
 

@@ -1320,8 +1320,8 @@ does today about each point → what still remains, plus the precautions taken o
 the decisions we need from Security. It deliberately does not use our internal "P0" labels (those live
 in §14 #28–#31). The five internal P0 items — remove `/send-dm`, random single-use OAuth `state`,
 encrypted tokens + RLS + rotation + Disconnect, no user text in logs, OAuth required for writes — are
-all implemented; the operator steps (migrations, encryption key in Render, Supabase key rotation) are
-in §12.5 and the summary's "what remains" table.
+all implemented; the Supabase secret key has been rotated (10 Sept); the remaining operator steps
+(migrations, encryption key in Render) are in §12.5.
 
 - ~~Encrypt OAuth tokens at rest and rotate the Supabase secret key~~ (done, #30; rotation is a runbook, §12.5).
 - ~~Enable RLS~~ (done, #30); audit table access; least-privilege Slack scopes review.
