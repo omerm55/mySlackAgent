@@ -1169,8 +1169,12 @@ cloud session to GitLab, a deleted branch is only as recoverable as the bundle s
   Transfer project. Ownership then survives any change of role (see `SECURITY_SUMMARY.md` F2).
 - Keep both CI files (§11.2a): `.gitlab-ci.yml` gates the real work, and `.github/workflows/ci.yml`
   stays as long as GitHub is the deploy target. Neither can be dropped while the mirror is load-bearing.
-- Update the remaining external references: `SECURITY_SUMMARY.md` §7 and the Reference Materials field
-  of the security-review ticket SNS-133715.
+- External references are updated: `SECURITY_SUMMARY.md` §7 names GitLab as the code location, and the
+  *SR Reference Materials* field of SNS-133715 (`customfield_15386`) now gives the GitLab project, with
+  a comment on that ticket answering the security review's repository precondition — it states the new
+  location, that the GitHub repository survives only as the deploy mirror, and that the project is still
+  in a personal namespace. Still owed to Security there: adding Vahagn Israyelyan and Elinoy Pasternak
+  to the GitLab project (they were asked for their handles) and onboarding it into Orca scanning.
 
 Nothing secret is in the history — `scripts/scan-secrets.sh` passes over every tracked file, and all
 credentials live in the runtime environment (§10).
