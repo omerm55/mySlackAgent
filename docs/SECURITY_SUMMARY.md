@@ -14,6 +14,9 @@
   (PMs, a few Dev owners) during the hackathon. It writes to the SNS and PR Jira projects. **No
   security sign-off has been obtained for this.** This document is the input for that sign-off; the
   ask is a decision on §5 (P0 items) and §6 (decisions needed), not a retroactive approval.
+- **Update 10 September: all five P0 items in §5 are implemented and deployed** (commits on
+  `claude/slack-jira-integration-nRbia`, spec §14 #28–#31). Three operator steps remain and are listed in
+  §5 — two SQL migrations, the token-encryption key in Render, and rotating the Supabase secret key.
 - The architecture is materially different from the one reviewed in March. The two headline changes
   are the reason for this rewrite: **writes now happen as the real user via Atlassian OAuth**, and the
   bot now **initiates conversations** (polls Jira, DMs people, asks them to act) instead of only
@@ -181,6 +184,13 @@ Ranked by what an attacker could do with them.
 4. ~~Stop logging user free text and extracted values (R7).~~ ✅ Done 2026-09-10.
 5. ~~OAuth required for writes; service-account fallback becomes an explicit per-trigger exception (F1).~~ ✅ Done 2026-09-10 (run `supabase/require_oauth.sql`).
 
+**Operator checklist to finish P0** (Omer, minutes each):
+- [ ] Supabase SQL editor: run `supabase/oauth_states.sql`, `supabase/require_oauth.sql`, `supabase/rls.sql`.
+- [ ] Render → Environment: add `TOKEN_ENCRYPTION_KEY` = output of `openssl rand -base64 32` (deploy re-encrypts existing rows on start).
+- [ ] Supabase → Project Settings → API: rotate the secret key; paste into Render `SUPABASE_SECRET_KEY`.
+- [ ] Jira automation library: confirm no rule calls `myslackagent.onrender.com/send-dm` (none expected).
+- [ ] Decide per trigger whether the bot account may act for unconnected people (recommendation: leave all off).
+
 **P1 — before general availability**
 6. Hosting decision with IT/Security: company infrastructure or approved PaaS tier and region; secrets in a managed store (R5).
 7. Data-processing approval for the Azure OpenAI flow; confirm tenant, retention and no-training terms (F6).
@@ -195,10 +205,10 @@ Ranked by what an attacker could do with them.
 
 ## 6. Decisions we need from Security
 
-1. **May the current pilot continue** (about ten users, SNS + PR, OAuth writes, service-account fallback labelled) while P0 is done this week — or must it pause until P0 lands?
+1. **May the current pilot continue** (about ten users, SNS + PR, OAuth writes, no service-account writes unless an admin enables it per trigger) now that the P0 code is deployed and the operator steps above are being completed?
 2. **Hosting**: is Render acceptable at all (paid tier, EU/US region), or must this move to company infrastructure before GA?
 3. **Azure OpenAI data flow**: is the current tenant/contract acceptable for Jira summaries, Notes previews and users' free text?
-4. **Fallback policy**: is a labelled service-account write ever acceptable, or is OAuth mandatory for all writes?
+4. **Fallback policy**: OAuth is now mandatory by default. Is the per-trigger admin exception (labelled bot-account write with attribution comment) acceptable to keep at all, or should the checkbox be removed?
 
 ## 7. Reference — environment facts
 
