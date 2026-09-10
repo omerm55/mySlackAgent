@@ -5,7 +5,9 @@
 > changes are attributed to the real person, and an LLM to interpret free-text answers and to
 > suggest values (e.g. an epic's Fix Version).
 >
-> Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
+> Status: hackathon build (Sept 2026), deployed and in use at Sisense. Repository:
+> `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (migrating from GitHub, §11.4). Trunk: `main`;
+> Render still deploys `claude/slack-jira-integration-nRbia` until it is repointed.
 > Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (267 passing, 28 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
@@ -1058,7 +1060,9 @@ services:
     envVars: [ …all variables in §10, secrets with sync: false… ]
 ```
 
-- Auto-deploys on push to `claude/slack-jira-integration-nRbia`.
+- Auto-deploys on push to `claude/slack-jira-integration-nRbia` — **to be repointed to `main` when the
+  GitLab move completes (§11.4)**; switch the GitLab default branch and Render's branch together, or
+  work on `main` will never deploy.
 - **Free tier sleeps after 15 idle minutes of inbound HTTP.** Socket Mode traffic is outbound and
   does not count; when asleep, Slack events and the poller stop. Mitigations: in-app self-ping
   (`keepAlive.js`, 5 min), recommended external monitor (UptimeRobot → `/health` every 5 min), or a
@@ -1069,8 +1073,9 @@ services:
 ### 11.2 Local
 
 ```bash
-git clone https://github.com/omerm55/mySlackAgent && cd mySlackAgent
-git checkout claude/slack-jira-integration-nRbia
+git clone https://gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot.git && cd jira-slack-bot
+# main is the trunk; the session branch is kept until Render is repointed
+git checkout main
 npm install
 cp .env.example .env   # fill in
 npm start              # or: npm run dev (watch)
@@ -1101,9 +1106,57 @@ GitHub workflow goes away once GitLab is the only remote (§11.4).
 
 ### 11.4 Moving the repository to GitLab
 
-The code lives in GitHub (`omerm55/mySlackAgent`) and Render auto-deploys from it. The move to the
-company GitLab (`gitlab.rnd.sisense.com`, alongside the Jira Manager project) is done in this order, and
-nothing in the app changes:
+The repository is moving from GitHub (`omerm55/mySlackAgent`, which Render still auto-deploys) to the
+company GitLab: **`gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot`**, imported 10 Sept. Nothing in the
+app changes. State and remaining steps:
+
+- **Done:** the GitLab project exists and holds both branches; `main` was 92 commits behind (last touched
+  16 April, pull request #11) because every commit since 3 Sept went to the session branch, so the work
+  was merged into `main` on GitHub (`6c3fd70`) — the eleven commits `main` had that the branch lacked were
+  merge commits carrying no file content, so nothing was lost.
+- **Done:** GitLab's `main` brought up to date by a merge request there (branch → `main`). Its merge
+  commit differs from GitHub's `6c3fd70`; the trees are identical, so the two are interchangeable.
+- **⚠️ Render cannot deploy from this GitLab.** Render's builders are on the public internet;
+  `gitlab.rnd.sisense.com` resolves only inside the corporate network, and Render's Git integrations are
+  GitHub, GitLab.com and Bitbucket — a self-managed instance is not among them. "Repoint Render at GitLab"
+  is therefore **not possible**, which leaves two paths:
+  - **Interim:** GitLab is where people work; GitHub stays as a **deploy mirror**. GitLab → Settings →
+    Repository → *Mirroring repositories*, direction **Push**. The form only offers username/password or
+    an SSH key, which is expected — GitHub stopped accepting account passwords over Git in 2021, so the
+    credential is a token or a deploy key, never a password:
+    - **SSH deploy key (preferred — does not expire).** The URL goes in *Git repository URL*, the single
+      field at the top of the *Mirroring repositories* section, and GitLab's mirror form validates it as a
+      URL, so it needs the scheme — `ssh://git@github.com/omerm55/mySlackAgent.git` (a slash after the
+      host, not GitHub's `git@github.com:owner/repo.git` copy-paste form, which is rejected). Direction
+      **Push**, authentication method *SSH public key*, then *Detect host keys* and check the fingerprint
+      against GitHub's own two channels — the docs page *GitHub's SSH key fingerprints*
+      (`docs.github.com/en/authentication/keeping-your-ssh-keys-and-github-account-secure/githubs-ssh-key-fingerprints`)
+      or `curl -s https://api.github.com/meta | jq .ssh_key_fingerprints`, run from a machine with plain
+      internet access. Leave *Mirror only protected branches* unchecked
+      while Render still deploys from the session branch. Only after **Mirror repository** is saved does
+      GitLab generate the key: reopen the row, copy the public key, and add it in GitHub → the repository
+      → Settings → *Deploy keys* → Add, with **Allow write access** ticked. Then *Update now*.
+    - **HTTPS + token.** URL `https://omerm55@github.com/omerm55/mySlackAgent.git` (the account name goes
+      in the URL), authentication method *Password*, and paste a GitHub personal-access token as the
+      password — fine-grained, scoped to this one repository with *Contents: read and write*, or classic
+      with `repo`. Fine-grained tokens expire (one year maximum) and the mirror then fails silently apart
+      from the error shown on the mirror row, so diary the renewal.
+
+    Render keeps deploying from GitHub. The mirror force-pushes, so GitHub branch protection on `main`
+    must allow it (or stay off), and the first push replaces GitHub's `main` with GitLab's merge commit
+    (same tree — harmless) and triggers a deploy. Then move the GitLab default branch and Render's branch
+    to `main` together.
+  - **Proper fix:** move hosting inside the network, which is open item 1 of the security review
+    (`SECURITY_SUMMARY.md` §5) — a runner inside the network reaches both the code and the target, and the
+    Render questions (free tier, secrets, region) disappear with it. Fold this into that decision rather
+    than solving deployment twice.
+- **Outstanding after that:** delete the session branch once `main` deploys, and archive the GitHub
+  repository only if the deploy no longer depends on it.
+- **Namespace:** the project sits in a personal namespace (`Omer.Meshar/`). For a company-owned service
+  under security review it belongs in the same group as Jira Manager — Settings → General → Advanced →
+  Transfer project. Ownership then survives any change of role (see `SECURITY_SUMMARY.md` F2).
+
+The original ordered steps, for reference:
 
 1. **Create the project** in the same GitLab group as Jira Manager, named `slack-jira-bot`, visibility
    *Internal* or *Private*, **without** a README or any initial file (an initial commit would force a
@@ -1114,14 +1167,14 @@ nothing in the app changes:
    git push -u gitlab --all && git push gitlab --tags
    ```
    GitLab's *Import project → GitHub* achieves the same and brings issues and pull requests with it.
-3. **Point Render at GitLab**: Settings → Build & Deploy → disconnect the GitHub repository, connect the
-   GitLab one, keep the branch. Environment variables are unaffected. Confirm the first deploy and the
-   `🔑 Jira service identity` line in the ops channel.
+3. **Deployment** — see the ⚠️ above: Render cannot reach a self-managed GitLab. Either keep GitHub as a
+   push-mirror target (Render unchanged), or move hosting inside the network. Whatever changes, confirm
+   the first deploy and the `🔑 Jira service identity` line in the ops channel afterwards.
 4. **CI**: `.gitlab-ci.yml` already carries the four gates (§11.2a). Delete `.github/workflows/ci.yml`
    once GitHub is no longer used, and set the branch as protected in GitLab.
 5. **Update the references**: this spec (§11.1, §12.2), `SECURITY_SUMMARY.md` §7, and the Reference
    Materials field of the security-review ticket SNS-133715.
-6. **Archive the GitHub repository** (do not delete it until Render has deployed from GitLab twice).
+6. **Archive the GitHub repository** — only once nothing deploys from it (not while it is the mirror).
 
 Nothing secret is in the history — `scripts/scan-secrets.sh` passes over every tracked file, and all
 credentials live in the runtime environment (§10).

@@ -226,7 +226,7 @@ In rough priority order, each with the mitigation we propose.
 
 | # | Open item | Why it matters | Proposed mitigation |
 |---|---|---|---|
-| 1 | **Hosting on Render (free tier) with production secrets** | No SLA, instance sleeps, region not chosen by us; Slack/Jira/OAuth/Supabase/OpenAI secrets live in Render's environment; not reviewed by IT/Security | Decide with IT: company infrastructure, or an approved Render tier and region; secrets in a managed store |
+| 1 | **Hosting on Render (free tier) with production secrets** | No SLA, instance sleeps, region not chosen by us; Slack/Jira/OAuth/Supabase/OpenAI secrets live in Render's environment; not reviewed by IT/Security. The code now lives in the company GitLab, which Render cannot reach — its builders are on the public internet and `gitlab.rnd.sisense.com` is internal-only — so the running deploy still comes from a GitHub copy of the same commits, one more reason to settle hosting | Decide with IT: company infrastructure, or an approved Render tier and region; secrets in a managed store. Company infrastructure would also let the deploy build straight from GitLab and remove the GitHub copy |
 | 2 | **Azure OpenAI data flow** (F6) | Jira summaries, Notes previews and users' free text leave Jira and Slack | Data-processing approval: tenant, retention, no-training terms |
 | 3 | **The bot's Jira account is a personal admin account** (F1) | Reads and any bot-account writes are attributed to a person who did not perform them, the credential carries admin rights the bot never needs, and it cannot be revoked without disrupting that person | IT provisions a dedicated non-admin service account with the permission list in `JIRA_SERVICE_ACCOUNT.md` (SNS + PR only); the bot already reports and flags its live identity |
 | 4 | **No "who would be asked" preview before a trigger is saved** (F4) | An admin cannot see the audience a JQL resolves to until it runs; volume is now capped and new triggers start as *only me*, so the blast radius is small, but the list is still not shown up front | Render the resolved audience in the trigger modal before saving |
@@ -250,10 +250,10 @@ In rough priority order, each with the mitigation we propose.
 
 | Item | Value |
 |---|---|
-| Code | GitHub `omerm55/mySlackAgent`, branch `claude/slack-jira-integration-nRbia` (auto-deploys) |
-| Runtime | Node 22, `@slack/bolt` (Socket Mode), `axios`, `pino`; 228 Jest tests |
+| Code | GitLab `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (imported 10 Sept 2026). GitHub `omerm55/mySlackAgent` is kept as a deploy copy because Render's builders cannot reach an internal GitLab host (open item 1). Trunk `main`; a personal namespace today, to be transferred to the same group as Jira Manager |
+| Runtime | Node 22, `@slack/bolt` (Socket Mode), `axios`, `pino`; 267 Jest tests in 28 suites |
 | Hosting | Render web service, free plan; public URL `https://myslackagent.onrender.com` — endpoints `/oauth/callback` and `/health` only |
-| Data store | Supabase Postgres: `oauth_tokens` (ciphertext), `oauth_states`, `integrations`, `jira_triggers`, `jira_prompts`, `release_calendar`, `user_preferences`, `activity_log`, `audit_events`; accessed with the server key; RLS enabled on all tables, no policies |
+| Data store | Supabase Postgres: `oauth_tokens` (ciphertext), `oauth_states`, `integrations`, `jira_triggers`, `jira_prompts`, `release_calendar`, `user_preferences`, `activity_log`, `audit_events`, `app_settings`; accessed with the server key; RLS enabled on all tables, no policies |
 | Secrets (Render env) | Slack bot + app tokens, signing secret; Jira service-account email + API token; Atlassian OAuth client id + secret; Supabase URL + secret key; token-encryption key; Azure OpenAI key/endpoint; admin Slack ids; ops channel id |
 | Slack scopes | `channels:history groups:history channels:read groups:read channels:join reactions:read chat:write im:history im:write users:read users:read.email` + app-level `connections:write` |
 | Atlassian OAuth | 3LO app, scopes `read:jira-user read:jira-work write:jira-work offline_access`, distribution "Sharing", callback on Render; access tokens 1 h, refresh tokens rotated on use |
