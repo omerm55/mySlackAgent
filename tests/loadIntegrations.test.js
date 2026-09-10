@@ -38,8 +38,14 @@ describe('loadIntegrations', () => {
     expect(result[0].name).toBe('my-workflow');
   });
 
-  test('exits if file does not exist', () => {
-    expect(() => loadIntegrations('/nonexistent/path.json')).toThrow('process.exit(1)');
+  test('returns an empty list if file does not exist (integrations live in Supabase)', () => {
+    const saved = process.env.INTEGRATIONS_JSON;
+    delete process.env.INTEGRATIONS_JSON;
+    try {
+      expect(loadIntegrations('/nonexistent/path.json')).toEqual([]);
+    } finally {
+      if (saved !== undefined) process.env.INTEGRATIONS_JSON = saved;
+    }
   });
 
   test('exits if JSON is malformed', () => {
@@ -48,8 +54,8 @@ describe('loadIntegrations', () => {
     expect(() => loadIntegrations(file)).toThrow('process.exit(1)');
   });
 
-  test('exits if config is an empty array', () => {
-    expect(() => loadIntegrations(writeTempConfig([]))).toThrow('process.exit(1)');
+  test('accepts an empty array', () => {
+    expect(loadIntegrations(writeTempConfig([]))).toEqual([]);
   });
 
   test('exits if name is missing', () => {

@@ -7,11 +7,20 @@ function loadSettings(filePath) {
   const configPath = filePath || path.resolve(__dirname, '../config/settings.json');
 
   if (!fs.existsSync(configPath)) {
-    console.error(
-      `Settings file not found at: ${configPath}\n` +
-      `Copy config/settings.example.json to config/settings.json and fill in your values.`
-    );
-    process.exit(1);
+    const opsChannelId = process.env.OPS_CHANNEL_ID;
+    if (!opsChannelId) {
+      console.error(
+        `Settings file not found at: ${configPath}\n` +
+        `Copy config/settings.example.json to config/settings.json, or set OPS_CHANNEL_ID env var.`
+      );
+      process.exit(1);
+    }
+    return {
+      opsChannelId,
+      alerting: { errorThreshold: 3, errorWindowMinutes: 5 },
+      rateLimiting: { defaultPerHour: 20 },
+      dailySummary: { enabled: true, utcHour: 7 },
+    };
   }
 
   let raw;

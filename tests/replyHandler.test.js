@@ -57,6 +57,20 @@ function makeClient(rootMessageText) {
 
 const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
+// The handler is registered once and reads integrations from services.integrationCache
+// at event time. Wrap a legacy-style config in a fake cache for these tests.
+function register(app, jira, cfg, services) {
+  services.integrationCache = {
+    getAll: async () => [{
+      ...cfg,
+      slackChannelId: cfg.watchChannelId,
+      triggers: cfg.triggers || ['reply'],
+      scope: cfg.scope || 'global',
+    }],
+  };
+  registerReplyHandler(app, jira, attribution, services);
+}
+
 describe('replyHandler', () => {
   beforeEach(() => jest.clearAllMocks());
 
@@ -65,7 +79,7 @@ describe('replyHandler', () => {
     const jira = makeJira();
     const client = makeClient(REAL_MESSAGE);
     const services = makeServices();
-    registerReplyHandler(app, jira, attribution, config, services);
+    register(app, jira, config, services);
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U123' },
@@ -89,7 +103,7 @@ describe('replyHandler', () => {
     const app = makeApp();
     const jira = makeJira();
     const restrictedConfig = { ...config, allowedSlackUserIds: ['U_ALLOWED'] };
-    registerReplyHandler(app, jira, attribution, restrictedConfig, makeServices());
+    register(app, jira, restrictedConfig, makeServices());
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U_OTHER' },
@@ -104,7 +118,7 @@ describe('replyHandler', () => {
     const app = makeApp();
     const jira = makeJira();
     const restrictedConfig = { ...config, allowedSlackUserIds: ['U_ALLOWED'] };
-    registerReplyHandler(app, jira, attribution, restrictedConfig, makeServices());
+    register(app, jira, restrictedConfig, makeServices());
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U_ALLOWED' },
@@ -120,7 +134,7 @@ describe('replyHandler', () => {
     const jira = makeJira();
     const services = makeServices();
     const limitedConfig = { ...config, rateLimitPerHour: 1 };
-    registerReplyHandler(app, jira, attribution, limitedConfig, services);
+    register(app, jira, limitedConfig, services);
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U123' },
@@ -140,7 +154,7 @@ describe('replyHandler', () => {
   test('does not update Jira twice for the same event (deduplication)', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, attribution, config, makeServices());
+    register(app, jira, config, makeServices());
 
     const event = {
       message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U123' },
@@ -157,7 +171,7 @@ describe('replyHandler', () => {
     const app = makeApp();
     const jira = { updateIssueField: jest.fn().mockRejectedValue(new Error('Jira down')) };
     const services = makeServices();
-    registerReplyHandler(app, jira, attribution, config, services);
+    register(app, jira, config, services);
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U123' },
@@ -172,7 +186,7 @@ describe('replyHandler', () => {
   test('does nothing if the message is not a thread reply', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, attribution, config, makeServices());
+    register(app, jira, config, makeServices());
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '111.000', thread_ts: '111.000', user: 'U123' },
@@ -186,7 +200,7 @@ describe('replyHandler', () => {
   test('does nothing if the channel does not match', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, attribution, config, makeServices());
+    register(app, jira, config, makeServices());
 
     await app._trigger({
       message: { channel: 'C_OTHER', ts: '222.000', thread_ts: '111.000', user: 'U123' },
@@ -200,7 +214,7 @@ describe('replyHandler', () => {
   test('does nothing if the root message has no Jira key', async () => {
     const app = makeApp();
     const jira = makeJira();
-    registerReplyHandler(app, jira, attribution, config, makeServices());
+    register(app, jira, config, makeServices());
 
     await app._trigger({
       message: { channel: 'C_WATCH', ts: '222.000', thread_ts: '111.000', user: 'U123' },

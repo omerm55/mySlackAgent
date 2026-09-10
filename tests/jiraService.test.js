@@ -8,6 +8,7 @@ jest.mock('axios');
 const mockClient = {
   get: jest.fn(),
   put: jest.fn(),
+  post: jest.fn(),
 };
 axios.create.mockReturnValue(mockClient);
 
@@ -76,5 +77,77 @@ describe('JiraService.updateIssueField', () => {
     expect(mockClient.put).toHaveBeenCalledWith('/rest/api/3/issue/PROJ-1', {
       fields: { customfield_10000: { value: 'Done' } },
     });
+  });
+});
+
+describe('JiraService.searchIssues', () => {
+  const page = (n, count, nextPageToken) => ({
+    data: {
+      issues: Array.from({ length: count }, (_, i) => ({ key: `P-${n}${i}`, fields: {} })),
+      ...(nextPageToken ? { nextPageToken } : {}),
+    },
+  });
+
+  test('follows nextPageToken until exhausted and returns every issue', async () => {
+    mockClient.post
+      .mockResolvedValueOnce(page(1, 50, 'tok-2'))
+      .mockResolvedValueOnce(page(2, 40));
+    const issues = await service.searchIssues('project = P', ['summary']);
+    expect(issues).toHaveLength(90);
+    expect(mockClient.post).toHaveBeenCalledTimes(2);
+    expect(mockClient.post.mock.calls[0][1]).toMatchObject({ jql: 'project = P', fields: ['summary'], maxResults: 100 });
+    expect(mockClient.post.mock.calls[0][1].nextPageToken).toBeUndefined();
+    expect(mockClient.post.mock.calls[1][1]).toMatchObject({ nextPageToken: 'tok-2' });
+    expect(issues.truncated).toBeUndefined();
+  });
+
+  test('stops at maxResults and flags truncation when more pages remain', async () => {
+    mockClient.post.mockResolvedValueOnce(page(1, 1, 'more'));
+    const issues = await service.searchIssues('project = P', ['summary'], 1);
+    expect(issues).toHaveLength(1);
+    expect(mockClient.post).toHaveBeenCalledTimes(1);
+    expect(mockClient.post.mock.calls[0][1].maxResults).toBe(1);
+    expect(issues.truncated).toBe(true);
+  });
+
+  test('surfaces Jira error messages', async () => {
+    mockClient.post.mockRejectedValueOnce({ response: { status: 400, data: { errorMessages: ["Field 'foo' does not exist"] } } });
+    await expect(service.searchIssues('foo = 1')).rejects.toThrow("HTTP 400 — JQL search failed: Field 'foo' does not exist");
+  });
+});
+
+describe('JiraService.transitionIssue', () => {
+  test('matches the target status by destination name and auto-fills a required Resolution', async () => {
+    mockClient.get.mockResolvedValueOnce({
+      data: {
+        transitions: [
+          { id: '11', name: 'Start', to: { name: 'In Progress' }, fields: {} },
+          {
+            id: '31', name: 'Close it', to: { name: 'Done' },
+            fields: { resolution: { required: true, name: 'Resolution', allowedValues: [{ id: '1', name: 'Fixed' }, { id: '10000', name: 'Done' }] } },
+          },
+        ],
+      },
+    });
+    mockClient.post.mockResolvedValueOnce({});
+    await service.transitionIssue('PROJ-1', 'done');
+    expect(mockClient.get).toHaveBeenCalledWith('/rest/api/3/issue/PROJ-1/transitions', { params: { expand: 'transitions.fields' } });
+    expect(mockClient.post).toHaveBeenCalledWith('/rest/api/3/issue/PROJ-1/transitions', {
+      transition: { id: '31' },
+      fields: { resolution: { id: '10000' } },
+    });
+  });
+
+  test('names required fields it cannot fill instead of posting', async () => {
+    mockClient.get.mockResolvedValueOnce({
+      data: { transitions: [{ id: '31', name: 'Done', to: { name: 'Done' }, fields: { customfield_1: { required: true, name: 'Sprint' } } }] },
+    });
+    await expect(service.transitionIssue('PROJ-1', 'Done')).rejects.toThrow(/requires field\(s\) I can't fill automatically: Sprint/);
+    expect(mockClient.post).not.toHaveBeenCalled();
+  });
+
+  test('lists available transitions when the target is not reachable', async () => {
+    mockClient.get.mockResolvedValueOnce({ data: { transitions: [{ id: '11', name: 'Start', to: { name: 'In Progress' } }] } });
+    await expect(service.transitionIssue('PROJ-1', 'Done')).rejects.toThrow('No transition to "Done" from current status (available: In Progress)');
   });
 });

@@ -13,9 +13,25 @@ const MAX_MESSAGE_LENGTH = 3800; // Slack's limit is ~4000 chars; leave headroom
  * posted on each issue at the time of the update.
  */
 class AuditLog {
-  constructor() {
+  /** @param {{ db?: import('../services/supabaseService') }} [opts] */
+  constructor({ db = null } = {}) {
     this.entries = [];
+    this.db = db;
     this._summaryTimer = null;
+  }
+
+  /** Attach the persistent store after construction (index.js wires Supabase later). */
+  setDb(db) { this.db = db; }
+
+  /**
+   * Last `limit` entries for a user, newest first — from Supabase when available
+   * (survives restarts), else from memory.
+   */
+  async recentFor(slackUserId, limit = 5) {
+    if (this.db?.getRecentActivity) {
+      try { return await this.db.getRecentActivity(slackUserId, limit); } catch { /* fall back */ }
+    }
+    return this.entries.filter((e) => e.slackUserId === slackUserId).slice(-limit).reverse();
   }
 
   /**
@@ -34,6 +50,10 @@ class AuditLog {
    */
   addEntry(entry) {
     this.entries.push(entry);
+    // Persist for the App Home history; never let a DB hiccup affect the caller.
+    if (this.db?.insertActivity && entry.slackUserId && entry.issueKey) {
+      this.db.insertActivity(entry).catch(() => {});
+    }
   }
 
   /**

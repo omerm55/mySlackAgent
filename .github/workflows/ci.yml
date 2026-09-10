@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  audit:
+    name: Dependency audit (high and above)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # Low/moderate advisories in transitive dev dependencies should not block a deploy;
+      # anything high or critical must be looked at.
+      - run: npm audit --audit-level=high
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Look for committed credentials
+        run: bash scripts/scan-secrets.sh
+
+  spec:
+    name: Spec updated with the change
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # CLAUDE.md: every commit that changes behaviour, schema, configuration, prompts or operations
+      # must update docs/PROJECT_SPEC.md in the same change.
+      - name: Compare changed paths
+        run: |
+          base="origin/${{ github.base_ref }}"
+          git fetch --no-tags --depth=50 origin "${{ github.base_ref }}"
+          changed=$(git diff --name-only "$base"...HEAD)
+          echo "$changed"
+          code=$(echo "$changed" | grep -E '^(src/|supabase/)' || true)
+          spec=$(echo "$changed" | grep -E '^docs/PROJECT_SPEC\.md$' || true)
+          if [ -n "$code" ] && [ -z "$spec" ]; then
+            echo "::error::Code or SQL changed but docs/PROJECT_SPEC.md was not updated (see CLAUDE.md)."
+            exit 1
+          fi
