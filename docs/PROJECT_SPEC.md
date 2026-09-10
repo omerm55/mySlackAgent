@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (249 passing, 27 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (253 passing, 27 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -308,7 +308,7 @@ src/
     digestScheduler.js         Delivers queued prompts at users' slots; tz-aware slot math
     fixVersionSuggester.js     Children + acceptance date + release calendar (+ LLM) → Fix Version
     llmService.js              Provider-agnostic JSON calls (OpenAI/Azure, Gemini, Anthropic); prompts
-    attributionService.js      Comment on Jira when acting as the service account
+    attributionService.js      Comment on Jira naming the human, whenever the service account acts for them
   server/callbackServer.js     HTTP: /oauth/callback, /health (and nothing else)
   utils/
     opsNotifier.js (ops channel + audit_events)  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
@@ -316,7 +316,7 @@ src/
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (249 tests, 27 suites)
+tests/                         Jest (253 tests, 27 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 .github/workflows/ci.yml       CI: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
 scripts/scan-secrets.sh        Secret scan over tracked files (Slack / Atlassian / Supabase / OpenAI / keys)
@@ -351,7 +351,7 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 |---|---|---|
 | `reactionHandler.js` | `reaction_added` | Match channel triggers by channel; fetch message; extract issue keys; per-trigger scope/allowlist/**OAuth gate** (no token and `allowBotFallback` false → thread reply "connect, then react again" + auth DM + ops `reactionFiltered`, nothing written)/rate/dedup; update field via user OAuth (or the service account when the trigger allows it, with attribution comment); thread confirmation; audit + ops. |
 | `replyHandler.js` | `message` (thread replies, non-bot) | Same for thread replies (root message holds the issue key), including the OAuth gate. |
-| `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_reply_confirm`, `jira_reply_edit`, `jira_reply_cancel`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text is **preview-then-confirm** (`buildReplyPreviewBlocks` → `executeDecision`; the LLM never writes unconfirmed); Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); **`resolveJira(user, client, ctx)`** returns the user's client, the service account only when `ctx.allowFallback`, else `null` → **`needsConnect`** re-renders the ask (the message's own blocks, or rebuilt from ctx) with a Connect nudge and leaves `jira_prompts` alone; modal openers check `canWrite` before opening; clears `jira_prompts` on failure so the poller re-asks. Pino logs carry issue keys, actions and text *lengths* only — never the user's text or extracted values (those go to the ops channel). |
+| `dmHandler.js` | **`attributeIfBot`** adds the attribution comment after any successful write made by the bot account (never when the user's own token was used; a failed comment never fails the action) · actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_reply_confirm`, `jira_reply_edit`, `jira_reply_cancel`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text is **preview-then-confirm** (`buildReplyPreviewBlocks` → `executeDecision`; the LLM never writes unconfirmed); Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); **`resolveJira(user, client, ctx)`** returns the user's client, the service account only when `ctx.allowFallback`, else `null` → **`needsConnect`** re-renders the ask (the message's own blocks, or rebuilt from ctx) with a Connect nudge and leaves `jira_prompts` alone; modal openers check `canWrite` before opening; clears `jira_prompts` on failure so the poller re-asks. Pino logs carry issue keys, actions and text *lengths* only — never the user's text or extracted values (those go to the ops channel). |
 | `homeHandler.js` | `app_home_opened`; action `home_disconnect_jira`; view `home_disconnect_jira_modal` | Builds the Home view (connection with Connect / Disconnect, notifications, how it works, persistent recent activity; trigger sections **admin-only**); Disconnect → confirm modal → `oauthService.disconnect` → DM + ops line + Home refresh; exports `publishHome` for other handlers to refresh it. |
 | `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (both modals: admin-only **Jira identity** checkbox `allow_bot_fallback`, default off; Jira-trigger modal: ask type yes/no / risk review / collect (+ field list, one per line), notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; runs the trigger once right after saving and posts the same summary as Run now (`runSummaryLines`: matched · not yet asked · already asked or waiting in a digest · sent · queued, with 🔔 lines for matches held for a digest); Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
@@ -418,6 +418,13 @@ current values ride along); all carry `allowFallback` (= `trigger.allow_bot_fall
 person asked, `sendFyi` posts an informational DM right away and the id rides in the payload/button
 context so `dmHandler` can echo actions to them. Returns per-trigger stats `{matched, fresh, sent, queued,
 fyi, pilotSkipped, stale, offTopic, dayCapped, skipped[], sentTo[], queuedFor[]}`. `runOnce({force, onlyId})` is used by Run now / Re-ask / save.
+
+**`attributionService.js`** — `postAttributionComment(client, slackUserId, issueKey, fieldId, fieldName,
+fieldValue, trigger, integrationName)`: resolves the Slack user's name and e-mail, finds their Jira
+account (`[~accountId:…]` mention, else "Name (email)"), and comments "Automated update via Slack …
+Triggered by: X via <trigger> … Field 'F' set to 'V'". Called by the channel handlers *and* by
+`dmHandler.attributeIfBot` for every bot-account write from a DM ask — so an action the service account
+performed on someone's behalf always names that person on the issue itself, whichever surface it came from.
 
 **`riskReviewMessage.js`** (utils) — builds the `risk_review` DM (`buildRiskReviewBlocks`,
 `sendRiskReview`, `afterStatusBlocks` = Update Notes + Skip), the buttonless `sendFyi` (risk-review and
@@ -705,7 +712,7 @@ reaction_added ─► isThumbsUp? ─► integrationCache.getAll() filter channe
   ─► resolve Jira client: OAuth token? use it : (no token)
   ─► per trigger: scope/allowlist ─► no token & !allowBotFallback? thread "🔐 connect, then react again" + auth DM + ops, skip
                                    ─► no token & allowBotFallback? service account + auth DM ("made by the bot account")
-  ─► rate/dedup ─► updateIssueField ─► thread ✅ ─► attribution comment (svc acct only)
+  ─► rate/dedup ─► updateIssueField ─► thread ✅ ─► attribution comment (bot-account writes only)
   ─► auditLog.addEntry ─► opsNotifier.jiraTriggered
 ```
 
@@ -717,7 +724,7 @@ JiraPoller tick ─► trigger due? ─► searchIssues(jql) (paginated) ─► 
   ─► preference: digest? recordPrompt(queued, payload) : sendDmQuestion(+Connect if no OAuth) + recordPrompt(delivered)
 User clicks Yes ─► dmHandler.resolveJira(user, ctx): own token → as user · no token & ctx.allowFallback → bot · else null
   ├─ null ─► needsConnect: ask re-rendered with its buttons + "🔐 Connect Jira first, then press again" (nothing written, prompt kept) ─► ops
-  ├─ ok ─► message replaced with ✅ (issue linked) ─► ops
+  ├─ ok ─► message replaced with ✅ (issue linked) ─► attribution comment if the bot account acted ─► ops
   ├─ "Fix Version is required" ─► offerFixVersion (progress ≤5s/stage) ─► [Use X & retry][Use Y instead][Choose another…]
   └─ other error ─► ❌ + deletePromptsForIssue (poller re-asks next run)
 User clicks 💬 Reply ─► modal ─► LLM interpretJiraResponse ─► *preview* (nothing written) + ops "proposes"
@@ -1227,7 +1234,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 249 tests in 27 suites:
+`npm test` → Jest, `tests/*.test.js`, 253 tests in 27 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1242,7 +1249,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; stale `Latest notification` stamps (older than `RISK_NOTIFICATION_MAX_AGE_DAYS`) are skipped without recording and counted in the Run-now summary; stamps that don't match `RISK_NOTIFICATION_MATCH` (orange, Overdue, Status mismatch…) are skipped the same way; collect trigger requests its field ids and DMs the PM owner an Answer/Skip ask with current values in the payload; every payload carries `allowFallback`; durable daily cap: budget spent → nothing sent or recorded + ops warning, partial budget → only that many asked, counting failure → per-run cap still applies |
 | `collect` | Trigger field list parse/format round-trip + errors; `collectContextFor` current values + certified/timing; `visibilityLine`; certified line in DM and modal, absent otherwise; ask blocks (Answer/Skip, unique ids, ctx < 2000 chars); preview Save/Edit/Cancel vs missing-required (no Save); `mergeValues` precedence + 255 cap; modal prefill + slim metadata; `readCollectModal`; `sendDmQuestion` delegation; handlers: Answer opens modal with DM location, empty submit → inline error, explicit-only → no LLM, free text → LLM with typed field winning, LLM partial → "Almost there", LLM failure → note, Save → ONE `updateIssueFields` PUT + ✅ + answered + ops + FYI, save failure → ❌ + re-ask, Edit prefilled, Cancel restores ask, Skip |
 | `dmReplyPreview` | Modal submit previews and writes nothing (ops "proposed", not "decision"); Confirm applies transition + comment + assignee and reports to ops; Cancel restores the Yes/No/Reply ask; Edit reply reopens the modal prefilled; `no_action` finalises without buttons; LLM failure keeps the ask actionable; the preview button value stays under Slack's 2000-char cap; `describeDecision` renders each change kind |
-| `dmRequireOauth` | Yes without token/fallback → nothing written, ask restored with its buttons + Connect, prompt kept, ops told; with fallback → bot writes + nudge; with token → user writes; a second nudge does not stack; Reply / Update Notes / Answer without token → modal not opened; Notes modal submitted without token → ask rebuilt from ctx; risk status with fallback / token; No and Handled still work; all three ctx builders carry `allowFallback` |
+| `dmRequireOauth` | Attribution: a bot-account write from a DM ask comments naming the person and the change (Yes, risk status, collect save), a write as the user does not, and a failing comment never breaks the write; Yes without token/fallback → nothing written, ask restored with its buttons + Connect, prompt kept, ops told; with fallback → bot writes + nudge; with token → user writes; a second nudge does not stack; Reply / Update Notes / Answer without token → modal not opened; Notes modal submitted without token → ask rebuilt from ctx; risk status with fallback / token; No and Handled still work; all three ctx builders carry `allowFallback` |
 | `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; a new trigger with no scope choice defaults to `personal`; save-time run posts the Run-now summary with queued matches called out; Jira identity checkbox → `allow_bot_fallback` on both trigger kinds (default false; ops line says OAuth required / bot may act) |
 | `auditEvents` | Every notifier method writes a row mirroring the ops line (kind, user, issue, identity, structured detail); failures recorded with `ok:false` and the error; bot-account identity captured; proposed vs applied LLM decisions are distinct kinds; a plain `post` is kind `ops`; a failing sink never breaks the message; rows are written even with no ops channel; insert truncates long text; the query filters by issue / user / kind / time |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), Connect (async URL) vs Disconnect by connection state, persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
@@ -1402,6 +1409,13 @@ Chronological, with rationale (see `git log` for commits):
     list derived from what the code actually calls (browse + user lookup always; edit, transition,
     comment, assign only for allowed-fallback triggers; explicitly *not* delete or administer), scoped to
     SNS and PR, with the switchover steps and the e-mail-visibility caveat.
+37. **Attribution for bot-account writes from DM asks.** Found while checking the security summary against
+    the code: `postAttributionComment` was wired only into the channel handlers, so a bot-account write
+    from a DM ask (Yes, a risk button, collect Save, a confirmed reply) left nothing on the issue naming
+    the human — only the service account in the changelog. Not yet reachable in practice (the fallback is
+    off everywhere), but the summary asserted it as a property. `attributeIfBot` now covers all seven DM
+    write paths; a write with the person's own token adds no comment because the changelog already names
+    them, and a failed comment is logged without failing the action.
 
 ---
 

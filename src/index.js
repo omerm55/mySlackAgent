@@ -110,7 +110,7 @@ let jiraPoller;
 let digestScheduler;
 
 const services = {
-  dedupCache, rateLimiter, auditLog, userCache, oauthService, llmService,
+  dedupCache, rateLimiter, auditLog, userCache, oauthService, llmService, attributionService,
   integrationCache, jiraService,
   db: supabaseService,
   get alerting() { return alerting; },

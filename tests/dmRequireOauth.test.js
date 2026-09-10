@@ -23,9 +23,10 @@ function setup({ hasToken = false } = {}) {
   const oauthService = { hasToken: jest.fn(() => hasToken), generateAuthUrl: jest.fn().mockResolvedValue('https://auth?state=r'), getJiraService: jest.fn().mockResolvedValue(userJira) };
   const db = { markPromptAnswered: jest.fn().mockResolvedValue(undefined), deletePromptsForIssue: jest.fn().mockResolvedValue(undefined) };
   const ops = { post: jest.fn().mockResolvedValue(undefined), dmButtonClicked: jest.fn(), riskReviewAction: jest.fn(), collectAction: jest.fn(), dmLlmDecision: jest.fn(), dmLlmProposed: jest.fn() };
-  registerDmHandler(app, botJira, { db, llmService: null, oauthService, opsNotifier: ops, userCache: { getName: jest.fn().mockResolvedValue('Omer') } });
+  const attributionService = { postAttributionComment: jest.fn().mockResolvedValue(undefined) };
+  registerDmHandler(app, botJira, { db, llmService: null, oauthService, opsNotifier: ops, attributionService, userCache: { getName: jest.fn().mockResolvedValue('Omer') } });
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
-  return { handlers, client, botJira, userJira, oauthService, db, ops, updates, logger };
+  return { handlers, client, botJira, userJira, oauthService, db, ops, attributionService, updates, logger };
 }
 
 const yesCtx = (extra = {}) => ({ issueKey: 'SNS-1', question: 'Approve?', transitionTo: 'Done', slackUserId: 'U1', ...extra });
@@ -66,6 +67,45 @@ describe('Yes button', () => {
     const nudged = updates[updates.length - 1].blocks;
     await handlers.jira_confirm_yes({ ack: jest.fn(), body: { ...yesBody(ctx), message: { ts: '1', text: 'x', blocks: nudged } }, client, logger });
     expect(actionIds(updates[updates.length - 1].blocks).filter((a) => a === 'dm_connect_jira')).toHaveLength(1);
+  });
+});
+
+describe('attribution comment for bot-account writes', () => {
+  // A bot-account write leaves nothing in Jira's changelog naming the human, so the comment is the
+  // only record on the issue itself. A write as the user needs none.
+  test('no token + fallback allowed → comment naming the person and the change', async () => {
+    const { handlers, client, attributionService, logger } = setup();
+    await handlers.jira_confirm_yes({ ack: jest.fn(), body: yesBody(yesCtx({ allowFallback: true })), client, logger });
+    expect(attributionService.postAttributionComment).toHaveBeenCalledWith(
+      client, 'U1', 'SNS-1', null, 'status', 'Done', 'Yes on a bot question', 'Slack DM',
+    );
+  });
+
+  test('with a token → no comment (the changelog already names them)', async () => {
+    const { handlers, client, attributionService, logger } = setup({ hasToken: true });
+    await handlers.jira_confirm_yes({ ack: jest.fn(), body: yesBody(yesCtx()), client, logger });
+    expect(attributionService.postAttributionComment).not.toHaveBeenCalled();
+  });
+
+  test('risk and collect bot-account writes are attributed too', async () => {
+    const statusHandler = (h) => h[Object.keys(h).find((k) => k.startsWith('/^risk_set_status_'))];
+    const s = setup();
+    await statusHandler(s.handlers)({ ack: jest.fn(), body: { actions: [{ value: JSON.stringify({ askType: 'risk_review', issueKey: 'PR-1', slackUserId: 'U1', status: 'High Risk', allowFallback: true, risk: { status: 'On Track' } }) }], channel: { id: 'D1' }, message: { ts: '1', text: 'o' } }, client: s.client, logger: s.logger });
+    expect(s.attributionService.postAttributionComment).toHaveBeenCalledWith(s.client, 'U1', 'PR-1', null, 'status', 'High Risk', 'a risk-review action', 'Slack DM');
+
+    const c = setup();
+    const ctx = { askType: 'collect', issueKey: 'PR-2', slackUserId: 'U1', allowFallback: true, collect: { fields: [{ id: 'customfield_11822', name: 'Customer-friendly name', required: true, current: '' }] }, values: { customfield_11822: 'Smart Alerts' } };
+    await c.handlers.collect_save({ ack: jest.fn(), body: { actions: [{ value: JSON.stringify(ctx) }], channel: { id: 'D1' }, message: { ts: '1', text: 'o' } }, client: c.client, logger: c.logger });
+    expect(c.botJira.updateIssueFields).toHaveBeenCalledWith('PR-2', { customfield_11822: 'Smart Alerts' });
+    expect(c.attributionService.postAttributionComment).toHaveBeenCalledWith(c.client, 'U1', 'PR-2', null, 'Customer-friendly name', 'Smart Alerts', 'filling in requested fields', 'Slack DM');
+  });
+
+  test('a failing comment never breaks the write the person asked for', async () => {
+    const { handlers, client, botJira, attributionService, updates, logger } = setup();
+    attributionService.postAttributionComment.mockRejectedValueOnce(new Error('Jira 403'));
+    await handlers.jira_confirm_yes({ ack: jest.fn(), body: yesBody(yesCtx({ allowFallback: true })), client, logger });
+    expect(botJira.transitionIssue).toHaveBeenCalledWith('SNS-1', 'Done');
+    expect(updates[updates.length - 1].text).toMatch(/✅ Done/);
   });
 });
 
