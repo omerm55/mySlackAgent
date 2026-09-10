@@ -1129,7 +1129,10 @@ app changes. State and remaining steps:
       URL, so it needs the scheme — `ssh://git@github.com/omerm55/mySlackAgent.git` (a slash after the
       host, not GitHub's `git@github.com:owner/repo.git` copy-paste form, which is rejected). Direction
       **Push**, authentication method *SSH public key*, then *Detect host keys* and check the fingerprint
-      against GitHub's published SSH key fingerprints. Leave *Mirror only protected branches* unchecked
+      against GitHub's own two channels — the docs page *GitHub's SSH key fingerprints*
+      (`docs.github.com/en/authentication/keeping-your-ssh-keys-and-github-account-secure/githubs-ssh-key-fingerprints`)
+      or `curl -s https://api.github.com/meta | jq .ssh_key_fingerprints`, run from a machine with plain
+      internet access. Leave *Mirror only protected branches* unchecked
       while Render still deploys from the session branch. Only after **Mirror repository** is saved does
       GitLab generate the key: reopen the row, copy the public key, and add it in GitHub → the repository
       → Settings → *Deploy keys* → Add, with **Allow write access** ticked. Then *Update now*.
