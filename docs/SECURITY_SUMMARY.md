@@ -250,7 +250,7 @@ In rough priority order, each with the mitigation we propose.
 
 | Item | Value |
 |---|---|
-| Code | GitHub `omerm55/mySlackAgent`, branch `claude/slack-jira-integration-nRbia` (auto-deploys) |
+| Code | GitLab `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (imported 10 Sept 2026; being moved off GitHub `omerm55/mySlackAgent`, which still drives the deploy until Render is repointed). Trunk `main`; a personal namespace today, to be transferred to the same group as Jira Manager |
 | Runtime | Node 22, `@slack/bolt` (Socket Mode), `axios`, `pino`; 228 Jest tests |
 | Hosting | Render web service, free plan; public URL `https://myslackagent.onrender.com` — endpoints `/oauth/callback` and `/health` only |
 | Data store | Supabase Postgres: `oauth_tokens` (ciphertext), `oauth_states`, `integrations`, `jira_triggers`, `jira_prompts`, `release_calendar`, `user_preferences`, `activity_log`, `audit_events`; accessed with the server key; RLS enabled on all tables, no policies |

@@ -5,7 +5,9 @@
 > changes are attributed to the real person, and an LLM to interpret free-text answers and to
 > suggest values (e.g. an epic's Fix Version).
 >
-> Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
+> Status: hackathon build (Sept 2026), deployed and in use at Sisense. Repository:
+> `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (migrating from GitHub, §11.4). Trunk: `main`;
+> Render still deploys `claude/slack-jira-integration-nRbia` until it is repointed.
 > Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (267 passing, 28 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
@@ -1058,7 +1060,9 @@ services:
     envVars: [ …all variables in §10, secrets with sync: false… ]
 ```
 
-- Auto-deploys on push to `claude/slack-jira-integration-nRbia`.
+- Auto-deploys on push to `claude/slack-jira-integration-nRbia` — **to be repointed to `main` when the
+  GitLab move completes (§11.4)**; switch the GitLab default branch and Render's branch together, or
+  work on `main` will never deploy.
 - **Free tier sleeps after 15 idle minutes of inbound HTTP.** Socket Mode traffic is outbound and
   does not count; when asleep, Slack events and the poller stop. Mitigations: in-app self-ping
   (`keepAlive.js`, 5 min), recommended external monitor (UptimeRobot → `/health` every 5 min), or a
@@ -1069,8 +1073,9 @@ services:
 ### 11.2 Local
 
 ```bash
-git clone https://github.com/omerm55/mySlackAgent && cd mySlackAgent
-git checkout claude/slack-jira-integration-nRbia
+git clone https://gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot.git && cd jira-slack-bot
+# main is the trunk; the session branch is kept until Render is repointed
+git checkout main
 npm install
 cp .env.example .env   # fill in
 npm start              # or: npm run dev (watch)
@@ -1101,9 +1106,23 @@ GitHub workflow goes away once GitLab is the only remote (§11.4).
 
 ### 11.4 Moving the repository to GitLab
 
-The code lives in GitHub (`omerm55/mySlackAgent`) and Render auto-deploys from it. The move to the
-company GitLab (`gitlab.rnd.sisense.com`, alongside the Jira Manager project) is done in this order, and
-nothing in the app changes:
+The repository is moving from GitHub (`omerm55/mySlackAgent`, which Render still auto-deploys) to the
+company GitLab: **`gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot`**, imported 10 Sept. Nothing in the
+app changes. State and remaining steps:
+
+- **Done:** the GitLab project exists and holds both branches; `main` was 92 commits behind (last touched
+  16 April, pull request #11) because every commit since 3 Sept went to the session branch, so the work
+  was merged into `main` on GitHub (`6c3fd70`) — the eleven commits `main` had that the branch lacked were
+  merge commits carrying no file content, so nothing was lost.
+- **Outstanding:** GitLab's `main` is still at the imported April tip (`da9b260`) — the import is a
+  one-time copy, so the merge has to reach GitLab either by a merge request there (branch → `main`) or by
+  a mirror push; then the GitLab default branch and Render's branch move to `main` together; then the
+  session branch is deleted and the GitHub repository archived.
+- **Namespace:** the project sits in a personal namespace (`Omer.Meshar/`). For a company-owned service
+  under security review it belongs in the same group as Jira Manager — Settings → General → Advanced →
+  Transfer project. Ownership then survives any change of role (see `SECURITY_SUMMARY.md` F2).
+
+The original ordered steps, for reference:
 
 1. **Create the project** in the same GitLab group as Jira Manager, named `slack-jira-bot`, visibility
    *Internal* or *Private*, **without** a README or any initial file (an initial commit would force a
