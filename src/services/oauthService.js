@@ -22,14 +22,14 @@ class OAuthStateError extends Error {
  * Manages Atlassian OAuth 2.0 3LO tokens on a per-Slack-user basis.
  *
  * Flow:
- *   1. generateAuthUrl(slackUserId) → random single-use `state` stored (Supabase `oauth_states`, or
+ *   1. generateAuthUrl(slackUserId) → random single-use `state` stored (`oauth_states` in Postgres, or
  *      memory when there is no DB) → link shown in Home / DM
  *   2. User consents → Atlassian redirects to OAUTH_REDIRECT_URI?code=...&state=<random>
  *   3. handleCallback(code, state) → state consumed (unknown / expired / used → OAuthStateError)
  *      → exchanges code for tokens + resolves cloudId → stored for the mapped Slack user
  *   4. getJiraService(slackUserId) → returns a JiraService instance authed as that user
  *
- * Tokens are cached in memory and persisted in Supabase (see loadFromDb).
+ * Tokens are cached in memory and persisted in Postgres (see loadFromDb).
  */
 class OAuthService {
   /**
@@ -39,20 +39,20 @@ class OAuthService {
    * @param {string} opts.redirectUri    OAUTH_REDIRECT_URI (must match Atlassian dev console)
    * @param {string} opts.jiraBaseUrl    JIRA_BASE_URL — used to match the right cloud resource
    */
-  constructor({ clientId, clientSecret, redirectUri, jiraBaseUrl, supabaseService = null }) {
+  constructor({ clientId, clientSecret, redirectUri, jiraBaseUrl, db = null }) {
     this.clientId = clientId;
     this.clientSecret = clientSecret;
     this.redirectUri = redirectUri;
     this.jiraBaseUrl = jiraBaseUrl;
-    this.db = supabaseService;
-    // In-memory cache — populated from Supabase at startup and on each write
+    this.db = db;
+    // In-memory cache — populated from the database at startup and on each write
     this.tokens = new Map();
     // Pending OAuth states when there is no DB (single process, lost on restart)
     this.states = new Map();
   }
 
   /**
-   * Load all tokens from Supabase into the in-memory cache.
+   * Load all tokens from the database into the in-memory cache.
    * Called once at startup so hasToken() works without a DB round-trip per event.
    */
   async loadFromDb() {
@@ -76,10 +76,10 @@ class OAuthService {
             .catch((err) => logger.warn(`[oauth] Could not re-encrypt token for ${row.slack_user_id}: ${err.message}`));
         }
       }
-      logger.info(`[oauth] Loaded ${rows.length} token(s) from Supabase${rewritten ? ` (${rewritten} re-encrypted with the current key)` : ''}`);
+      logger.info(`[oauth] Loaded ${rows.length} token(s) from the database${rewritten ? ` (${rewritten} re-encrypted with the current key)` : ''}`);
     } catch (err) {
       if (err.code === 'encryption_key_missing') throw err; // boot must fail: tokens exist but cannot be read
-      logger.warn(`[oauth] Could not load tokens from Supabase: ${err.message}`);
+      logger.warn(`[oauth] Could not load tokens from the database: ${err.message}`);
     }
   }
 
@@ -167,7 +167,7 @@ class OAuthService {
     this.tokens.set(slackUserId, tokenData);
     if (this.db) {
       await this.db.upsertToken(slackUserId, tokenData).catch((err) =>
-        logger.warn(`[oauth] Failed to persist token to Supabase: ${err.message}`)
+        logger.warn(`[oauth] Failed to persist token to the database: ${err.message}`)
       );
     }
     logger.info(`[oauth] Token stored for Slack user ${slackUserId} (cloudId: ${cloudId})`);

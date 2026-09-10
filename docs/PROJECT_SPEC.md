@@ -9,7 +9,8 @@
 > truth: `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (moved from GitHub, §11.4). Trunk:
 > `main`. Render deploys `main` through the GitHub push mirror — Render cannot reach the internal
 > GitLab (§11.4).
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (267 passing, 28 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (280 tests, 29 suites; 13
+> of them need a Postgres and skip without one — §13).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -135,7 +136,7 @@ versions). Required *Resolution* is auto-filled (Done → Fixed → Resolved).
 Users connect once (App Home → Connect Jira, or the button in a DM). Every Connect link carries a
 **random, single-use `state`** that maps to the Slack user server-side and expires after 24 hours; a
 reused, stale or forged link gets a "This link has expired or was already used" page and nothing is
-stored. Tokens persist in Supabase **encrypted at rest** (AES-256-GCM, key only in the runtime
+stored. Tokens persist in Postgres **encrypted at rest** (AES-256-GCM, key only in the runtime
 environment — `TOKEN_ENCRYPTION_KEY`), refresh automatically, and survive restarts. **Disconnect** in
 App Home forgets the tokens at any time (Atlassian-side revocation is a link in the confirmation). **Writes
 need the person's own token**: without one the bot asks them to connect and keeps the ask open; only
@@ -249,7 +250,7 @@ Two independent switches, either of which pauses:
 - **App Home → ⏸ Pause everything** (admins only; ▶️ Resume while paused). Stored in `app_settings`, so
   it takes effect within 30 seconds and needs no deploy. Everyone's Home shows a banner naming who paused
   it and when; both transitions go to the ops channel and to `audit_events` (`paused` / `resumed`).
-- **`BOT_PAUSED=true`** in the environment — break-glass for when Supabase itself is the problem. It
+- **`BOT_PAUSED=true`** in the environment — break-glass for when the database itself is the problem. It
   cannot be undone from Home (the banner says so); clear the variable and redeploy.
 
 A database failure never pauses the bot by itself: an unreadable flag reads as "running".
@@ -276,7 +277,7 @@ if no ops channel is configured. Errors above a threshold alert; a daily audit s
  Slack ◄─WS─────►│  handlers/           services/             utils/            │
   events,        │   reactionHandler     jiraService (REST)    opsNotifier      │
   actions,       │   replyHandler        oauthService (3LO)    dmQuestion       │
-  views,         │   dmHandler           supabaseService       jiraLink         │
+  views,         │   dmHandler           dbService             jiraLink         │
   app_home       │   homeHandler         integrationCache      keepAlive        │
                  │   triggerHandler      jiraPoller  ──┐       withTimeout      │
                  │   preferencesHandler  digestScheduler│      admins, logger   │
@@ -286,8 +287,8 @@ if no ops channel is configured. Errors above a threshold alert; a daily audit s
  Browser ─HTTPS─►│  GET /oauth/callback  GET /health                            │
                  └───────────┬──────────────────┬──────┴───────────┬────────────┘
                              │                  │                  │
-                      Jira Cloud REST     Supabase REST        Azure OpenAI
-                    (service acct + OAuth)  (Postgres)         (GPT-5.1) / Gemini / Anthropic
+                      Jira Cloud REST     Postgres (SQL)       Azure OpenAI
+                    (service acct + OAuth) (Supabase today)    (GPT-5.1) / Gemini / Anthropic
 ```
 
 Key properties:
@@ -297,7 +298,7 @@ Key properties:
   test endpoint was removed in Sept 2026, see §14 #28). No inbound Slack HTTP, so no public request
   URL/signing verification path is exercised (signing secret still configured).
 - **Stateless-ish.** All durable state (tokens, triggers, prompts, preferences, release calendar) is
-  in Supabase. In-memory caches: integrations (60 s TTL), dedup (5 min), rate limits, audit log
+  in Postgres. In-memory caches: integrations (60 s TTL), dedup (5 min), rate limits, audit log
   (process lifetime), email→Slack id.
 - **Two Jira identities.** A service account (Basic auth) for reads/polling and as fallback; the
   user's OAuth token (Bearer via `api.atlassian.com/ex/jira/{cloudId}`) for writes when connected.
@@ -321,8 +322,8 @@ src/
     preferencesHandler.js      Notification frequency select
   services/
     jiraService.js             Jira REST: issues, fields, comments, transitions, search (paginated), versions, changelog
-    oauthService.js            Atlassian 3LO: random single-use state, auth URL, code exchange, refresh, per-user JiraService; Supabase-backed
-    supabaseService.js         Thin axios client over Supabase REST (PostgREST)
+    oauthService.js            Atlassian 3LO: random single-use state, auth URL, code exchange, refresh, per-user JiraService; database-backed
+    dbService.js               Postgres (node-postgres): every table read and write, pooled, in SQL
     integrationCache.js        Static + DB channel triggers, 60 s TTL
     jiraPoller.js              Evaluates Jira triggers on their cadence; sends or queues DMs
     digestScheduler.js         Delivers queued prompts at users' slots; tz-aware slot math
@@ -335,16 +336,18 @@ src/
     tokenCrypto.js (AES-256-GCM for OAuth tokens at rest, key rotation)
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
-supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (267 tests, 28 suites)
+supabase/                      SQL for all tables and migrations (see §6); applied by scripts/apply-schema.js
+tests/                         Jest (280 tests, 29 suites; the database suite needs TEST_DATABASE_URL)
 config/*.example.json          Local-dev config templates (legacy path)
 .github/workflows/ci.yml       CI on GitHub: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
 .gitlab-ci.yml                 The same four gates on GitLab (for the move to gitlab.rnd.sisense.com)
 scripts/scan-secrets.sh        Secret scan over tracked files (Slack / Atlassian / Supabase / OpenAI / keys)
+scripts/apply-schema.js        Applies supabase/*.sql to any Postgres in dependency order (§12.7)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
 
-Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No Slack/Jira/Supabase SDKs beyond Bolt.
+Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pg ^8`, `pino`; dev: `jest ^30`. No Slack/Jira SDKs
+beyond Bolt, and no ORM — the database is addressed in SQL.
 
 ---
 
@@ -357,13 +360,13 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 2. `loadSettings()` (ops channel, alert thresholds, rate-limit default, daily summary hour).
 3. `loadIntegrations()` → static channel triggers (may be `[]`).
 4. Construct `App` (Socket Mode), `JiraService` (service account), `AttributionService`, caches,
-   `SupabaseService.fromEnv()`, `OAuthService` (if `JIRA_OAUTH_CLIENT_ID`), `IntegrationCache`,
+   `DbService.fromEnv()`, `OAuthService` (if `JIRA_OAUTH_CLIENT_ID`), `IntegrationCache`,
    `LlmService.fromEnv()`.
 5. Build a `services` bag (with getters for late-bound `alerting`, `opsNotifier`, `jiraPoller`,
    `digestScheduler`) and register **one** handler per concern.
 6. `await app.start()`; then create `Alerting`, `OpsNotifier`; `oauthService.loadFromDb()`; start
    the callback HTTP server; report the Jira service identity to ops (`whoAmI`, warns on a
-   `JIRA_SERVICE_ACCOUNT_EMAIL` mismatch); start `JiraPoller` and `DigestScheduler` (if Supabase); start
+   `JIRA_SERVICE_ACCOUNT_EMAIL` mismatch); start `JiraPoller` and `DigestScheduler` (if `DATABASE_URL`); start
    keep-alive; schedule daily summary.
 
 ### 5.2 Handlers
@@ -404,19 +407,39 @@ previous key — lazy migration and rotation; rethrows `encryption_key_missing` 
 running with unreadable tokens), `disconnect(slackUserId)` (memory + `deleteToken`). In-memory Map is a
 cache over the `oauth_tokens` table. Exports `OAuthStateError` and `STATE_TTL_MS`.
 
-**`supabaseService.js`** — PostgREST via axios with `apikey` + `Authorization: Bearer <secret>`. Constructed
-with an optional `tokenCrypto` (`TokenCrypto.fromEnv()`): `upsertToken` encrypts `access_token` /
-`refresh_token`, `getToken` / `getAllTokens` decrypt (`getAllTokens` also flags `needsRewrite`); reading an
-`enc:` row without a key throws `encryption_key_missing`.
-Methods per table (see §6): tokens (`upsertToken`, `getToken`, `getAllTokens`, `deleteToken`),
-oauth_states (`insertOauthState`, `consumeOauthState` — conditional PATCH `used_at is null and expires_at > now()` with `return=representation`, so single-use is atomic — `pruneOauthStates`),
+**`dbService.js`** — Postgres over the wire protocol (`pg`). One pool: `max: 5`, 10 s connection and
+statement timeouts, `application_name=slack-jira-bot`, and an `error` handler so a dropped idle
+connection never takes the process down. `DbService.fromEnv()` needs `DATABASE_URL` and returns `null`
+without it (the app then runs with in-memory tokens and static triggers). TLS comes from
+`DATABASE_SSL` — `require` by default off localhost (encrypted, chain not verified, which is what a
+hosted provider's `sslmode=require` means), `verify`, or `disable`; `DATABASE_CA_CERT` (PEM) verifies
+the chain properly. Constructed with an optional `tokenCrypto` (`TokenCrypto.fromEnv()`): `upsertToken`
+encrypts `access_token` / `refresh_token`, `getToken` / `getAllTokens` decrypt (`getAllTokens` also flags
+`needsRewrite`); reading an `enc:` row without a key throws `encryption_key_missing`.
+Methods per table (see §6): tokens (`upsertToken` — `insert … on conflict (slack_user_id) do update`,
+`getToken`, `getAllTokens`, `deleteToken`),
+oauth_states (`insertOauthState`, `consumeOauthState` — one statement, `update … set used_at = now()
+where state = $1 and used_at is null and expires_at > now() returning *`, so single-use is atomic and
+the clock is the database's, not the process's — `pruneOauthStates`),
 integrations (`getActiveIntegrations`, `upsertIntegration`, `updateIntegration`, `deactivateIntegration`),
 jira_triggers (`getActiveJiraTriggers`, `insertJiraTrigger`, `updateJiraTrigger`, `deactivateJiraTrigger`),
-jira_prompts (`getPromptedIssueKeys`, `getPromptsForTrigger`, `recordPrompt(…, {payload, delivered})`,
-`updatePromptPayload`, `markPromptAnswered`, `deletePromptsForIssue`, `deletePromptsForTrigger`,
-`getPendingPrompts`, `markPromptsDelivered`, `countPromptsSince` — PostgREST `count=exact` header), release_calendar (`getReleaseCalendar`), user_preferences
+jira_prompts (`getPromptedIssueKeys`, `getPromptsForTrigger`, `recordPrompt(…, {payload, delivered})` —
+`on conflict (trigger_id, issue_key) do nothing`, `updatePromptPayload`, `markPromptAnswered`,
+`deletePromptsForIssue`, `deletePromptsForTrigger` (returns `rowCount`), `getPendingPrompts`,
+`markPromptsDelivered` (`id = any($1::uuid[])`), `countPromptsSince` — `select count(*)::int`),
+release_calendar (`getReleaseCalendar` — dates cast `::text` so they stay `YYYY-MM-DD` strings for the
+Fix Version suggester rather than becoming local-midnight `Date`s), user_preferences
 (`getUserPreference`, `getDigestUsers`, `upsertUserPreference`), activity_log (`insertActivity`,
 `getRecentActivity`), audit_events (`insertAuditEvent`, `getAuditEvents({issueKey, slackUserId, kind, since, limit})`).
+`close()` ends the pool.
+
+Two small builders cover the dynamic column sets (`upsertIntegration`, `insertJiraTrigger`, both
+`update*`): column names must match `^[a-z_][a-z0-9_]*$`, every value is a bound parameter, and the
+jsonb columns (`jira_triggers.collect_fields`, `jira_prompts.payload`, `audit_events.detail`,
+`app_settings.value`) are JSON-encoded on the way in — otherwise node-postgres would write a JS array
+as a Postgres array literal. `integrations.triggers` and `jira_triggers.pilot_slack_user_ids` are
+genuine `text[]` and are passed through as arrays; that distinction is what
+`tests/dbService.integration.test.js` pins.
 
 **`integrationCache.js`** — merges static integrations with `integrations` rows (normalised to
 camelCase, incl. `allowBotFallback`), refreshes every 60 s, `invalidate()` on writes.
@@ -501,11 +524,14 @@ to `activity_log`; `recentFor(user)` feeds the Home tab), `alerting` (error thre
 
 ---
 
-## 6. Data model (Supabase / Postgres)
+## 6. Data model (Postgres)
 
-Project: `https://psmbjacsexnyruhvaxao.supabase.co`. Server uses the **secret (service-role) key**
-via REST; RLS is not relied upon. All SQL below has been run in the SQL editor and lives under
-`supabase/` (except the first two tables, created earlier by hand and reconstructed here).
+Plain Postgres. The instance today is Supabase (`https://psmbjacsexnyruhvaxao.supabase.co`), reached
+over the **Postgres wire protocol** with `DATABASE_URL` — not the PostgREST API it used to use, and no
+service-role key (§14.41). Nothing below is Supabase-specific except `rls.sql`. All SQL lives under
+`supabase/`; `node scripts/apply-schema.js <connection-string>` applies every file in dependency order,
+which is how a new database is provisioned (§12.7). `oauth_tokens` and `integrations` were created by
+hand long before the rest and their definitions lived only in this section; they are now files too.
 
 ### 6.1 `oauth_tokens` — per-Slack-user Atlassian tokens
 
@@ -522,8 +548,9 @@ create table if not exists public.oauth_tokens (
 
 Both token columns hold ciphertext since Sept 2026 (§14 #30). Rows written before that (plaintext) are
 rewritten on the first start with a key; nothing needs a SQL migration. **RLS is enabled on every table
-with no policies** (`supabase/rls.sql`) — the service-role key the app uses bypasses it, the anon key
-gets nothing.
+with no policies** (`supabase/rls.sql`) — that is a Supabase-specific guard against its public anon and
+publishable keys; the app's own connection is an ordinary Postgres login and is unaffected. On a
+database with no such public API the equivalent is a least-privilege role for the app (§12.7).
 
 ### 6.2 `integrations` — channel triggers
 
@@ -996,12 +1023,15 @@ automatically" note.
 - Existing Jira Automation for epics: when all children are Done → move epic to *Acceptance*.
   Its Slack-notification action should be removed once the bot asks instead.
 
-### 9.4 Supabase
+### 9.4 Database (Supabase today)
 
-Project created manually; tables per §6; server uses the secret (service-role) key. **RLS enabled on all
-tables, no policies** (`supabase/rls.sql`) so only that key can read or write. OAuth tokens are
-ciphertext in the table (§6.1); Dashboard → Table Editor is the operator UI for ad-hoc inspection/deletes,
-and token values are not readable there — by design. Key rotation: §12.5.
+Project created manually; tables per §6, applied by `node scripts/apply-schema.js` or by hand in the SQL
+editor. The app connects with `DATABASE_URL` over TLS — the Postgres protocol, so **the secret
+(service-role) API key is no longer part of the deployment** (§14.41); revoke it once nothing else uses
+it. **RLS enabled on all tables, no policies** (`supabase/rls.sql`) so Supabase's anon and publishable
+keys can read nothing. OAuth tokens are ciphertext in the table (§6.1); Dashboard → Table Editor is the
+operator UI for ad-hoc inspection/deletes, and token values are not readable there — by design.
+Credential rotation: §12.5. Moving to a Postgres outside Supabase: §12.7.
 
 ### 9.5 Azure OpenAI
 
@@ -1021,8 +1051,9 @@ style base with `OPENAI_DEPLOYMENT` = deployment name (GPT-5.1). Uses `api-key` 
 | `OPS_CHANNEL_ID` | yes (cloud) | Ops channel for all notifications (when `config/settings.json` absent) |
 | `JIRA_OAUTH_CLIENT_ID`, `JIRA_OAUTH_CLIENT_SECRET`, `OAUTH_REDIRECT_URI` | for OAuth | Atlassian 3LO |
 | `OAUTH_PORT` | no | Local callback port (Render supplies `PORT`) |
-| `SUPABASE_URL`, `SUPABASE_SECRET_KEY` | yes (features) | Persistence; without them tokens are in-memory and triggers static |
-| `TOKEN_ENCRYPTION_KEY` | yes (with Supabase) | 32 random bytes, base64 (`openssl rand -base64 32`); encrypts OAuth tokens at rest. Once any encrypted row exists the bot refuses to start without it |
+| `DATABASE_URL` | yes (features) | Postgres connection string (`postgres://user:pass@host:5432/db`); without it tokens are in-memory and triggers static |
+| `DATABASE_SSL`, `DATABASE_CA_CERT` | no | TLS: `require` (default off localhost — encrypted, chain unverified), `verify`, or `disable`; the CA (PEM) makes `require` verify the chain |
+| `TOKEN_ENCRYPTION_KEY` | yes (with a database) | 32 random bytes, base64 (`openssl rand -base64 32`); encrypts OAuth tokens at rest. Once any encrypted row exists the bot refuses to start without it |
 | `TOKEN_ENCRYPTION_KEY_PREVIOUS` | during rotation | Old key, decrypt-only; rows are rewritten with the current key on start (§12.5) |
 | `ADMIN_SLACK_USER_IDS` | no | Comma-separated; may create `global` triggers and manage any trigger |
 | `INTEGRATIONS_JSON` | legacy | Static channel triggers JSON array (optional now) |
@@ -1096,7 +1127,7 @@ Four jobs on every push and pull request (Node 22, `npm ci`):
 
 | Job | What it does | Fails when |
 |---|---|---|
-| Tests | `npm test` | any test fails |
+| Tests | `npm test`, with a `postgres:16` service and `TEST_DATABASE_URL` so the database suite runs the real SQL rather than skipping | any test fails |
 | Dependency audit | `npm audit --audit-level=high` | a high or critical advisory exists (low/moderate in dev dependencies do not block) |
 | Secret scan | `scripts/scan-secrets.sh` over every tracked file | anything matching a Slack (`xox…`), Atlassian (`ATATT3…`), Supabase (`sb_secret_…`, `sb_publishable_…`), JWT, OpenAI (`sk-…`), private-key or `TOKEN_ENCRYPTION_KEY=` pattern is committed. `.env.example` is exempt (placeholders); the script prints file and line only, never the value |
 | Spec updated | on PRs: compares changed paths against the base branch | `src/` or `supabase/` changed without `docs/PROJECT_SPEC.md` — the `CLAUDE.md` rule, enforced |
@@ -1342,10 +1373,14 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 
 ### 12.5 Key rotation runbooks
 
-**Supabase secret key** (compromise, or on a schedule):
-1. Supabase → Project Settings → API → *Rotate* the secret (service-role) key.
-2. Render → Environment → `SUPABASE_SECRET_KEY` = new value → save (Render redeploys).
+**Database credentials** (compromise, or on a schedule):
+1. Rotate the password at the database. Supabase: Project Settings → Database → *Reset database
+   password*. RDS / Azure: change the password of the application role.
+2. Render → Environment → `DATABASE_URL` = the new connection string → save (Render redeploys).
 3. Watch `/health` and the ops channel for the boot line; anything else is a paste error.
+
+The Supabase *secret (service-role) API key* is no longer used by the app (§14.41). Rotating it changes
+nothing here; revoke it once nothing else depends on it.
 
 **`TOKEN_ENCRYPTION_KEY`** (tokens stay valid throughout):
 1. `openssl rand -base64 32` → new key.
@@ -1366,10 +1401,10 @@ alerting above the error threshold). There is no formal on-call: an incident fou
 is handled at the next opportunity, which is acceptable because the blast radius is bounded by §2.11
 (pause), the per-trigger caps (§5.3) and OAuth-required writes (§2.5).
 
-**First move in every case: pause.** App Home → ⏸ Pause everything (or `BOT_PAUSED=true` if Supabase is
+**First move in every case: pause.** App Home → ⏸ Pause everything (or `BOT_PAUSED=true` if the database is
 implicated). Nothing is lost — asks stay put and work after resuming.
 
-**A credential may have leaked.** Pause. Rotate what leaked: Supabase secret key or
+**A credential may have leaked.** Pause. Rotate what leaked: the database password or
 `TOKEN_ENCRYPTION_KEY` per §12.5; Slack tokens in the Slack app (Basic Information → regenerate);
 Atlassian OAuth client secret in the developer console; the Jira service-account API token in Atlassian.
 Then check what was done with it: `select * from audit_events where ts > '<window start>' order by ts;`
@@ -1409,14 +1444,71 @@ delete from public.activity_log where ts < now() - interval '12 months';
 delete from public.jira_prompts where prompted_at < now() - interval '12 months';
 ```
 
+### 12.7 Provisioning a database, and moving off Supabase
+
+Since §14.41 the app speaks the Postgres protocol, so the database is a connection string: Supabase
+today, an RDS or Azure Flexible Server tomorrow, with no code change. What the move needs:
+
+**1. Create the database and the schema.**
+
+```bash
+node scripts/apply-schema.js "postgres://user:password@host:5432/database"
+```
+
+Every file is idempotent, so this is also how to repair a missing table. `supabase/rls.sql` is
+deliberately *not* applied by the script: it grants against Supabase's `anon` / `authenticated` roles,
+which exist only there.
+
+**2. Give the app its own role**, rather than the owner/superuser the provider hands out:
+
+```sql
+create role slack_jira_bot login password '…';
+grant connect on database <db> to slack_jira_bot;
+grant usage on schema public to slack_jira_bot;
+grant select, insert, update, delete on all tables in schema public to slack_jira_bot;
+revoke all on schema public from public;
+```
+
+No DDL rights: migrations are applied with the owner role, deliberately, so the running service cannot
+change its own schema. This is what replaces the RLS posture outside Supabase (§6.1).
+
+**3. Copy the data.** Ten small tables; a dump and restore is enough, run from a machine that can reach
+both (inside the corporate network, if the target is internal):
+
+```bash
+pg_dump --no-owner --no-acl --data-only "postgres://…supabase…" > data.sql
+psql "postgres://…new-host…" -f data.sql
+```
+
+OAuth tokens move as ciphertext and keep working as long as `TOKEN_ENCRYPTION_KEY` moves with them.
+Better: rotate the key at the same time (§12.5) so the key that lived in the old environment dies with
+it — the previous-key mechanism re-encrypts every row on the first start.
+
+**4. Cut over.** Pause the bot (App Home → ⏸), copy the data, set `DATABASE_URL` to the new host,
+redeploy, check `/health` and the boot line in the ops channel, resume. Anyone mid-Connect simply
+clicks again — `oauth_states` rows are short-lived by design.
+
+**5. Afterwards.** Keep the old database readable but unused for a week (a rollback is a redeploy with
+the old `DATABASE_URL`, and loses anything written after the cutover). Then delete the Supabase project
+— deleting it, not just leaving it idle, is what closes the third-party-processor finding — and revoke
+its service-role key.
+
+**Network reality.** A database on a private network is only reachable from inside it. Render's
+builders and dynos are on the public internet, so a private RDS/VPC endpoint means the *application*
+must move at the same time; a provider endpoint with TLS and a firewall (Azure Flexible Server,
+Supabase) can be reached from Render as it stands. That choice belongs with the hosting decision —
+open item 1 of the security review (`SECURITY_SUMMARY.md` §5), the same boundary that keeps Render from
+reaching GitLab (§11.4).
+
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 267 tests in 28 suites:
+`npm test` → Jest, `tests/*.test.js`, 280 tests in 29 suites:
 
 | Suite | Covers |
 |---|---|
 | `reactionHandler`, `replyHandler` | Trigger matching, allowlist, rate limit, dedup, personal scope, emoji variants, audit/alerting; OAuth gate: no token + no fallback → thread reply + auth DM + ops, nothing written; fallback allowed → bot writes with attribution; token → user writes, no attribution |
 | `jiraService` | Field payload shapes, JQL pagination/truncation/errors, transition matching, Resolution auto-fill, unfillable fields |
+| `dbService.integration` | **Needs a Postgres** (`TEST_DATABASE_URL`; skipped without one, which is the default on a laptop). Applies the whole schema, then exercises the real SQL: token upsert stores ciphertext and replaces rather than duplicates; `consumeOauthState` succeeds exactly once and refuses expired states; pruning keeps recent ones; `integrations.triggers` stays a `text[]` and `collect_fields` / `payload` / `detail` / `value` stay jsonb; one prompt per (trigger, issue); the durable daily count; digest queue and `uuid[]` delivery; `markPromptAnswered` for one user or all; audit filters newest-first; activity mapping; digest users exclude `immediate`; release-calendar dates come back as `YYYY-MM-DD` strings |
 | `fixVersionSuggester` | Candidate filtering, calendar windows, timeline/current, LLM adjudication + fallbacks, stage timeouts, progress |
 | `digestScheduler` | Time-zone helpers, slot computation, due logic, delivery, flush |
 | `jiraPollerQueue` | Send vs queue by preference |
@@ -1430,11 +1522,11 @@ delete from public.jira_prompts where prompted_at < now() - interval '12 months'
 | `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; a new trigger with no scope choice defaults to `personal`; save-time run posts the Run-now summary with queued matches called out; Jira identity checkbox → `allow_bot_fallback` on both trigger kinds (default false; ops line says OAuth required / bot may act) |
 | `pauseSwitch` | `pauseState`: DB flag, `BOT_PAUSED` override, DB failure reads as running, 30 s cache + `invalidate`, `setPaused` records who, `describePause` wording; poller evaluates nothing and warns ops once; DM paths (Yes, risk status, collect Save, Reply modal) write nothing and keep the ask and prompt; reaction answers in-thread; Home banner and admin-only Pause / Resume, both audited; not paused → the same click goes through |
 | `auditEvents` | Every notifier method writes a row mirroring the ops line (kind, user, issue, identity, structured detail); failures recorded with `ok:false` and the error; bot-account identity captured; proposed vs applied LLM decisions are distinct kinds; a plain `post` is kind `ops`; a failing sink never breaks the message; rows are written even with no ops channel; insert truncates long text; the query filters by issue / user / kind / time |
-| `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), Connect (async URL) vs Disconnect by connection state, persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
+| `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), Connect (async URL) vs Disconnect by connection state, persistent recent activity from the database, in-memory fallback, `addEntry` persistence |
 | `callbackServer` | Public HTTP surface is exactly `/health` (200) and `/oauth/callback` (400 without code/state, else `handleCallback(code, state)`; `invalid_state` → 400 "expired or already used" page, not 500); `/send-dm` and unknown paths → 404 |
 | `tokenCrypto` | Round trip, prefixed random ciphertext, legacy plaintext passthrough, wrong key / tampering / malformed detected, rotation (previous key decrypts, `isCurrent` distinguishes), `fromEnv` |
 | `oauthTokens` | `upsertToken` stores ciphertext and reads back plaintext; `loadFromDb` re-encrypts legacy plaintext rows exactly once; previous-key rows rewritten under the current key; encrypted rows without a key → `encryption_key_missing`; plaintext-only without a key still loads (local dev); `disconnect` forgets memory + DB |
-| `oauthState` | Memory mode: URL carries a random state (never the user id), fresh per call, accepted once, replay / unknown / malformed / expired rejected before any token exchange; Supabase mode: state inserted, consumed atomically through the DB, tokens persisted for the mapped user, prune called |
+| `oauthState` | Memory mode: URL carries a random state (never the user id), fresh per call, accepted once, replay / unknown / malformed / expired rejected before any token exchange; database mode: state inserted, consumed atomically through the DB, tokens persisted for the mapped user, prune called |
 | `noContentLogging` | A sentinel typed into the reply modal / collect modal reaches the ops channel but never any pino log call |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
 
@@ -1616,6 +1708,23 @@ Chronological, with rationale (see `git log` for commits):
     writer at a time and work comes back from a cloud session as a `git bundle`. That was learned the hard
     way — the first merge request deleted its source branch (the project default), stranding commits that
     lived only in a session with no way to push, recoverable only from a bundle.
+41. **Postgres directly, instead of Supabase's REST API (§12.7).** The store was reached through
+    PostgREST over HTTP (`/rest/v1/jira_prompts?trigger_id=eq.…`, service-role key in a header). That is
+    the only part of the system that was Supabase-shaped: the database underneath is ordinary Postgres.
+    Speaking the Postgres protocol (`pg`) makes the vendor a connection string — Supabase now, RDS or
+    Azure Flexible Server later, with no code change — which is what the security review's migration
+    condition needs, and it can be proven against Supabase's own Postgres endpoint weeks before any data
+    moves. It is also better on its own terms: **the service-role key stops existing** (a bearer token
+    granting full read/write to every table from anywhere on the internet, which lived in Render's
+    environment), one HTTP hop and one client disappear, and the two implicit tricks become plain SQL —
+    the single-use OAuth `state` is now `update … where used_at is null and expires_at > now() returning *`
+    (atomic, and on the database's clock rather than the process's), and the daily prompt cap is
+    `select count(*)` instead of parsing a `Content-Range` header. The method surface, signatures and
+    return shapes were kept identical, so no caller changed. Two things surfaced while doing it and were
+    fixed: `oauth_tokens` and `integrations` had no SQL file at all — their DDL lived only in §6 — so the
+    repository could not create its own database; and `integrations.triggers` is a `text[]`, not jsonb,
+    which a naive rewrite would have written as a JSON string. Both are pinned by tests that run the real
+    SQL against a real Postgres in CI (§13), which nothing did before.
 
 ---
 
@@ -1656,7 +1765,7 @@ Ordered by value ÷ effort; each item is independently shippable.
 ### 16.1 Reliability & hosting
 - Move to a non-sleeping host (Render Starter or equivalent) and add an external uptime monitor on `/health`.
 - Graceful shutdown (drain in-flight handlers on SIGTERM) and a startup self-check (Slack auth test,
-  Jira `/myself`, Supabase ping) posted to ops.
+  Jira `/myself`, database ping) posted to ops.
 - Persist `auditLog`, dedup and rate-limit state (or accept reset and document it).
 - Retries with backoff for Jira/Slack 429/5xx; central Slack rate-limit queue.
 
@@ -1710,7 +1819,8 @@ all implemented; the Supabase secret key has been rotated (10 Sept); the remaini
 - ESLint/Prettier config; JSDoc → TypeScript migration or type-checking via `checkJs`.
 - Remove legacy paths (JSON config loaders) once confirmed unused; update README
   to point at this spec.
-- Migration tooling for Supabase (numbered SQL files, applied via CI) instead of hand-run scripts.
+- ~~Migration tooling~~ — `scripts/apply-schema.js` applies every file in dependency order to any
+  Postgres (§12.7). Still not numbered migrations, and still not applied by CI.
 
 ### 16.9 Compliance & rollout
 - **Security review SNS-133715** set three preconditions (10 Sept). The *repository* one is met

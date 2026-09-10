@@ -23,12 +23,12 @@ function normalizeRow(row) {
 }
 
 /**
- * Merges static integrations (from INTEGRATIONS_JSON) with Supabase rows.
+ * Merges static integrations (from INTEGRATIONS_JSON) with database rows.
  * Refreshes from DB at most every `ttlMs` milliseconds.
  */
 class IntegrationCache {
-  constructor(supabaseService, staticIntegrations = [], ttlMs = 60_000) {
-    this.db = supabaseService;
+  constructor(db, staticIntegrations = [], ttlMs = 60_000) {
+    this.db = db;
     this.static = staticIntegrations;
     this.ttlMs = ttlMs;
     this._cache = null;
@@ -53,7 +53,7 @@ class IntegrationCache {
       try {
         dbRows = await this.db.getActiveIntegrations();
       } catch (err) {
-        logger.warn(`[integrationCache] Failed to load from Supabase: ${err.message}`);
+        logger.warn(`[integrationCache] Failed to load from the database: ${err.message}`);
       }
     }
     const dbIntegrations = dbRows.map(normalizeRow);

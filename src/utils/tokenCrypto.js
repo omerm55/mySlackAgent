@@ -3,7 +3,7 @@
 /**
  * Application-level encryption for OAuth tokens at rest (AES-256-GCM).
  *
- * Supabase only ever sees ciphertext; the key lives in the runtime environment
+ * The database only ever sees ciphertext; the key lives in the runtime environment
  * (TOKEN_ENCRYPTION_KEY, 32 random bytes, base64 — `openssl rand -base64 32`).
  *
  * Format: `enc:v1:<iv>:<tag>:<ciphertext>` (all base64url). The prefix makes legacy plaintext rows
@@ -34,7 +34,7 @@ class TokenCrypto {
     return buf;
   }
 
-  /** @returns {TokenCrypto|null} null when no key is configured (local dev without Supabase) */
+  /** @returns {TokenCrypto|null} null when no key is configured (local dev without a database) */
   static fromEnv(env = process.env) {
     if (!env.TOKEN_ENCRYPTION_KEY) return null;
     return new TokenCrypto(env.TOKEN_ENCRYPTION_KEY, env.TOKEN_ENCRYPTION_KEY_PREVIOUS || null);

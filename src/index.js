@@ -19,7 +19,7 @@ const AuditLog = require('./utils/auditLog');
 const Alerting = require('./utils/alerting');
 const UserCache = require('./utils/userCache');
 const OAuthService = require('./services/oauthService');
-const SupabaseService = require('./services/supabaseService');
+const DbService = require('./services/dbService');
 const IntegrationCache = require('./services/integrationCache');
 const LlmService = require('./services/llmService');
 const { startCallbackServer } = require('./server/callbackServer');
@@ -68,8 +68,8 @@ const rateLimiter = new RateLimiter();
 const auditLog = new AuditLog();
 const userCache = new UserCache();
 
-const supabaseService = SupabaseService.fromEnv();
-auditLog.setDb(supabaseService); // persist per-user activity for the App Home
+const db = DbService.fromEnv();
+auditLog.setDb(db); // persist per-user activity for the App Home
 
 // OAuth impersonation — active only when JIRA_OAUTH_CLIENT_ID is set.
 const oauthService = process.env.JIRA_OAUTH_CLIENT_ID
@@ -78,7 +78,7 @@ const oauthService = process.env.JIRA_OAUTH_CLIENT_ID
     clientSecret: process.env.JIRA_OAUTH_CLIENT_SECRET,
     redirectUri: process.env.OAUTH_REDIRECT_URI,
     jiraBaseUrl: process.env.JIRA_BASE_URL,
-    supabaseService,
+    db,
   })
   : null;
 
@@ -99,7 +99,7 @@ const normalizedStatic = staticIntegrations.map((i) => ({
   createdBy: null,
 }));
 
-const integrationCache = new IntegrationCache(supabaseService, normalizedStatic);
+const integrationCache = new IntegrationCache(db, normalizedStatic);
 
 const llmService = LlmService.fromEnv();
 
@@ -112,7 +112,7 @@ let digestScheduler;
 const services = {
   dedupCache, rateLimiter, auditLog, userCache, oauthService, llmService, attributionService,
   integrationCache, jiraService,
-  db: supabaseService,
+  db,
   get alerting() { return alerting; },
   get opsNotifier() { return opsNotifier; },
   get jiraPoller() { return jiraPoller; },
@@ -137,7 +137,7 @@ registerPreferencesHandler(app, services);
     errorThreshold: settings.alerting.errorThreshold,
     errorWindowMs: settings.alerting.errorWindowMinutes * 60 * 1000,
   });
-  opsNotifier = new OpsNotifier(app.client, settings.opsChannelId, supabaseService);
+  opsNotifier = new OpsNotifier(app.client, settings.opsChannelId, db);
 
   if (oauthService) {
     try {
@@ -176,18 +176,18 @@ registerPreferencesHandler(app, services);
   startKeepAlive({ logger });
 
   // Jira triggers: poll JQL conditions and DM the relevant person
-  if (supabaseService) {
+  if (db) {
     // Tick cadence — the floor for per-trigger poll_interval_min (default 60s)
     const intervalSec = parseInt(process.env.JIRA_POLL_INTERVAL_SEC || '60', 10);
     jiraPoller = new JiraPoller({
-      jiraService, db: supabaseService, slackClient: app.client, opsNotifier, oauthService, logger,
+      jiraService, db, slackClient: app.client, opsNotifier, oauthService, logger,
       intervalMs: intervalSec * 1000,
     });
     jiraPoller.start();
 
     // Deliver queued prompts to users who chose an hourly / daily digest
     digestScheduler = new DigestScheduler({
-      db: supabaseService, slackClient: app.client, opsNotifier, oauthService, logger,
+      db, slackClient: app.client, opsNotifier, oauthService, logger,
     });
     digestScheduler.start();
   }
