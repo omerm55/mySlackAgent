@@ -1087,6 +1087,9 @@ npm test
 The OAuth callback needs a public URL locally (tunnel) — corporate networks blocked ngrok, which is why
 Render was adopted early.
 
+Per-developer Claude Code permissions live in `.claude/settings.local.json`, which is gitignored: it is
+personal tooling config, not repository configuration, so it is never committed.
+
 ### 11.2a Continuous integration (`.github/workflows/ci.yml`)
 
 Four jobs on every push and pull request (Node 22, `npm ci`):

@@ -1,5 +1,6 @@
 node_modules/
 .env
+.claude/settings.local.json
 # Deployment-specific configs — commit the .example versions only
 config/integrations.json
 config/settings.json
