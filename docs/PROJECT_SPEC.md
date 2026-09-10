@@ -236,9 +236,13 @@ Text fields only for now (§15).
 
 ### 2.8 Operator visibility
 
-Every trigger firing, filtered event, DM sent, button click, LLM decision, digest, trigger
-create/edit/delete and Run/Re-ask summary is posted to the ops channel. Errors above a threshold
-alert; a daily audit summary is posted.
+Every trigger firing, filtered event, DM sent, button click, LLM proposal and decision, digest, trigger
+create/edit/delete and Run/Re-ask summary is posted to the ops channel **and written to the durable
+`audit_events` table** — same text, plus `kind`, Slack user, issue key, success flag and a structured
+`detail` (field, value, the identity used: user OAuth or bot account). That makes "who changed what, when,
+as whom" a query rather than a Slack search, and it outlives Slack's retention. The insert is
+fire-and-forget: a database hiccup never delays or breaks the operator message, and rows are written even
+if no ops channel is configured. Errors above a threshold alert; a daily audit summary is posted.
 
 ---
 
@@ -307,7 +311,7 @@ src/
     attributionService.js      Comment on Jira when acting as the service account
   server/callbackServer.js     HTTP: /oauth/callback, /health (and nothing else)
   utils/
-    opsNotifier.js  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
+    opsNotifier.js (ops channel + audit_events)  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     tokenCrypto.js (AES-256-GCM for OAuth tokens at rest, key rotation)
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (Sept 2026 answer to the March security review), architecture.md (March design)
@@ -389,7 +393,7 @@ jira_prompts (`getPromptedIssueKeys`, `getPromptsForTrigger`, `recordPrompt(…,
 `updatePromptPayload`, `markPromptAnswered`, `deletePromptsForIssue`, `deletePromptsForTrigger`,
 `getPendingPrompts`, `markPromptsDelivered`, `countPromptsSince` — PostgREST `count=exact` header), release_calendar (`getReleaseCalendar`), user_preferences
 (`getUserPreference`, `getDigestUsers`, `upsertUserPreference`), activity_log (`insertActivity`,
-`getRecentActivity`).
+`getRecentActivity`), audit_events (`insertAuditEvent`, `getAuditEvents({issueKey, slackUserId, kind, since, limit})`).
 
 **`integrationCache.js`** — merges static integrations with `integrations` rows (normalised to
 camelCase, incl. `allowBotFallback`), refreshes every 60 s, `invalidate()` on writes.
@@ -452,6 +456,8 @@ Returns `{pick, reason, alternative, acceptedAt, statusName, candidates, childre
 
 ### 5.4 Utils
 
+`opsNotifier` funnels every message through `post(text, meta)`; `meta` (`kind`, `user`, `issue`, `ok`,
+`detail`) becomes the `audit_events` row, and `setDb` attaches the sink after construction.
 `tokenCrypto.TokenCrypto` (`encrypt` → `enc:v1:<iv>:<tag>:<data>` base64url, `decrypt` with legacy plaintext passthrough and previous-key fallback, `isEncrypted`, `isCurrent`, `fromEnv`), `opsNotifier` (all ops messages, incl. `riskReviewAction` and `collectAction`), `dmQuestion` (`sendDmQuestion`, `buildYesNoBlocks`, `connectBlocks`, `describeDecision` → human-readable list of an LLM decision's effects, `buildReplyPreviewBlocks` → preview + Confirm/Edit/Cancel with a compacted decision in the button value) (builds
 the Yes/No/Reply message, optional Connect block, no key prefix if the question already names the
 issue), `jiraLink` (`issueUrl`, `issueLink`, `issueLinkLabelled` with link-safe labels — `|`→`∣`,
@@ -644,6 +650,30 @@ create table if not exists public.user_preferences (
   updated_at        timestamptz not null default now()
 );
 ```
+
+### 6.8 `audit_events` — durable operator record (`supabase/audit_events.sql`)
+
+```sql
+create table if not exists public.audit_events (
+  id             uuid primary key default gen_random_uuid(),
+  ts             timestamptz not null default now(),
+  kind           text not null,   -- reaction_write | reply_write | ask_sent | dm_yes | dm_no |
+                                  -- risk_action | collect_action | llm_proposed | llm_applied |
+                                  -- llm_error | trigger_skipped | reaction_filtered | ops
+  slack_user_id  text null,
+  issue_key      text null,
+  ok             boolean not null default true,
+  text           text null,       -- the ops-channel message, verbatim (≤4000 chars)
+  detail         jsonb null       -- field, value, identity ('user (OAuth)' | 'bot account'), reason, decision
+);
+create index if not exists audit_events_ts_idx    on public.audit_events (ts desc);
+create index if not exists audit_events_issue_idx on public.audit_events (issue_key, ts desc);
+create index if not exists audit_events_user_idx  on public.audit_events (slack_user_id, ts desc);
+create index if not exists audit_events_kind_idx  on public.audit_events (kind, ts desc);
+```
+
+Written by `opsNotifier.post` for every operator message (§2.8). **Migration to run by hand**; it also
+enables RLS on itself, and `supabase/rls.sql` includes it for future re-runs.
 
 ### 6.7 `oauth_states` — pending Connect links (`supabase/oauth_states.sql`)
 
@@ -1094,6 +1124,25 @@ drifts.") → preview → Save → both fields set in one changelog entry under 
 
 ### 12.3 SQL snippets used
 
+Who changed what on an issue, newest first (the audit query):
+
+```sql
+select ts, kind, slack_user_id, ok, detail->>'identity' as identity, text
+from public.audit_events
+where issue_key = 'SNS-128269'
+order by ts desc;
+```
+
+Everything one person did in the last week, and every write made by the bot account rather than a user:
+
+```sql
+select ts, kind, issue_key, text from public.audit_events
+where slack_user_id = 'U06QZMVLHNJ' and ts > now() - interval '7 days' order by ts desc;
+
+select ts, kind, slack_user_id, issue_key, text from public.audit_events
+where detail->>'identity' = 'bot account' order by ts desc limit 100;
+```
+
 Re-ask a single issue:
 
 ```sql
@@ -1187,6 +1236,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `dmReplyPreview` | Modal submit previews and writes nothing (ops "proposed", not "decision"); Confirm applies transition + comment + assignee and reports to ops; Cancel restores the Yes/No/Reply ask; Edit reply reopens the modal prefilled; `no_action` finalises without buttons; LLM failure keeps the ask actionable; the preview button value stays under Slack's 2000-char cap; `describeDecision` renders each change kind |
 | `dmRequireOauth` | Yes without token/fallback → nothing written, ask restored with its buttons + Connect, prompt kept, ops told; with fallback → bot writes + nudge; with token → user writes; a second nudge does not stack; Reply / Update Notes / Answer without token → modal not opened; Notes modal submitted without token → ask rebuilt from ctx; risk status with fallback / token; No and Handled still work; all three ctx builders carry `allowFallback` |
 | `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; a new trigger with no scope choice defaults to `personal`; save-time run posts the Run-now summary with queued matches called out; Jira identity checkbox → `allow_bot_fallback` on both trigger kinds (default false; ops line says OAuth required / bot may act) |
+| `auditEvents` | Every notifier method writes a row mirroring the ops line (kind, user, issue, identity, structured detail); failures recorded with `ok:false` and the error; bot-account identity captured; proposed vs applied LLM decisions are distinct kinds; a plain `post` is kind `ops`; a failing sink never breaks the message; rows are written even with no ops channel; insert truncates long text; the query filters by issue / user / kind / time |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), Connect (async URL) vs Disconnect by connection state, persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
 | `callbackServer` | Public HTTP surface is exactly `/health` (200) and `/oauth/callback` (400 without code/state, else `handleCallback(code, state)`; `invalid_state` → 400 "expired or already used" page, not 500); `/send-dm` and unknown paths → 404 |
 | `tokenCrypto` | Round trip, prefixed random ciphertext, legacy plaintext passthrough, wrong key / tampering / malformed detected, rotation (previous key decrypts, `isCurrent` distinguishes), `fromEnv` |
@@ -1329,6 +1379,13 @@ Chronological, with rationale (see `git log` for commits):
     the next window rather than dropping them. Counting failures fall back to the per-run cap instead of
     blocking a trigger. Separately, both modals now default a **new** trigger to *Only me* — the 8 Sept
     surprise was a trigger saved as global on the first try. Closes two security-summary open items.
+35. **Durable audit events.** The ops channel was the de-facto audit log: a private Slack channel with
+    Slack's retention and no way to query it. Every operator message now also becomes an `audit_events`
+    row with the same text plus `kind`, user, issue, success and a structured `detail` — including which
+    identity made the write, which is what makes the bot-account exception auditable. Chosen over a
+    write-ahead log or an external SIEM because it reuses the store we already have and needs no new
+    credential; it is durable and queryable, not immutable (the server key could still delete rows),
+    which the security summary says plainly. **Migration `supabase/audit_events.sql` must be run.**
 
 ---
 

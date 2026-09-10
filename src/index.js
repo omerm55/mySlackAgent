@@ -137,7 +137,7 @@ registerPreferencesHandler(app, services);
     errorThreshold: settings.alerting.errorThreshold,
     errorWindowMs: settings.alerting.errorWindowMinutes * 60 * 1000,
   });
-  opsNotifier = new OpsNotifier(app.client, settings.opsChannelId);
+  opsNotifier = new OpsNotifier(app.client, settings.opsChannelId, supabaseService);
 
   if (oauthService) {
     try {

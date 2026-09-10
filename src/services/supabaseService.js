@@ -308,6 +308,33 @@ class SupabaseService {
     }, { headers: { Prefer: 'return=minimal' } });
   }
 
+  // ── audit_events (durable operator record; mirrors every ops-channel line) ──
+
+  async insertAuditEvent({ kind, slackUserId, issueKey, ok, text, detail }) {
+    await this.client.post('/audit_events', {
+      kind,
+      slack_user_id: slackUserId ?? null,
+      issue_key: issueKey ?? null,
+      ok: ok !== false,
+      text: text == null ? null : String(text).slice(0, 4000),
+      detail: detail ?? null,
+    }, { headers: { Prefer: 'return=minimal' } });
+  }
+
+  /**
+   * Audit events, newest first. Filter by issue, user or kind — the "who changed what, when" query.
+   * @param {{issueKey?: string, slackUserId?: string, kind?: string, since?: number|string, limit?: number}} [f]
+   */
+  async getAuditEvents({ issueKey, slackUserId, kind, since, limit = 50 } = {}) {
+    const params = { select: '*', order: 'ts.desc', limit };
+    if (issueKey) params.issue_key = `eq.${issueKey}`;
+    if (slackUserId) params.slack_user_id = `eq.${slackUserId}`;
+    if (kind) params.kind = `eq.${kind}`;
+    if (since) params.ts = `gte.${new Date(since).toISOString()}`;
+    const res = await this.client.get('/audit_events', { params });
+    return res.data ?? [];
+  }
+
   /** Newest first, normalised to the audit-entry shape. */
   async getRecentActivity(slackUserId, limit = 5) {
     const res = await this.client.get('/activity_log', {

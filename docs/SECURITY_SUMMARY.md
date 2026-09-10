@@ -98,8 +98,10 @@ other than deleting the trigger in App Home or suspending the Render service.
 - **Jira's own changelog names the real person** for every write, because the write is made as them.
   Where the bot account is allowed to act, an attribution comment ("changed by X via Slack") is added.
 - **The ops channel** (`#ph-ops-ops`, private) receives every ask sent, every click (with the identity
-  used), every LLM decision with the user's text, every trigger create/edit/delete/run, digests and FYIs
-  sent, and a daily summary. Trigger management output goes only there, never to user DMs.
+  used), every LLM proposal and decision with the user's text, every trigger create/edit/delete/run,
+  digests and FYIs sent, and a daily summary. Trigger management output goes only there, never to user DMs.
+- **The same events are written to a durable `audit_events` table** — event type, person, issue, success,
+  and the identity used — so the trail is queryable and survives Slack retention.
 - **An `activity_log` table** holds each user's history of what they did through the bot (shown in
   their App Home); `jira_prompts` records who was asked about which issue, when, and when they answered.
 - **The "why" lands in Jira for the owner loops**: the risk review writes a dated line into the
@@ -107,9 +109,8 @@ other than deleting the trigger in App Home or suspending the Render service.
 - **Application logs carry no user content** — issue key, action and text length only.
 
 **What remains.**
-- For plain Yes/No asks the *reason* exists only in the Slack thread and the ops channel, not in Jira.
-- The ops channel is the de-facto audit log: a private Slack channel with Slack's retention, not an
-  immutable store.
+- For plain Yes/No asks the *reason* exists only in the Slack thread and the audit table, not in Jira.
+- The audit table is durable and queryable but not immutable: the server's key could delete rows.
 
 ### F4 — Operational controls
 
@@ -177,6 +178,10 @@ question as Lauren's, one hop further.
   is reported to the ops channel.
 - **Time-boxed operations**: every lookup stage is capped at 5 seconds and every message ends in an
   actionable state.
+- **A durable audit record**: every line the bot posts to the operator channel is also written to a
+  database table with the event type, the person, the issue, success or failure, and which identity made
+  the change (the person's own Jira account, or the bot account where a trigger allows it). "Who changed
+  what, when, as whom" is a query, and it no longer depends on Slack's retention.
 - **Automated checks on every change**: tests, a dependency audit that fails on high or critical
   advisories, a secret scan over every tracked file, and a check that the specification was updated with
   the code. The dependency gate immediately surfaced and fixed a high-severity advisory in our HTTP
@@ -195,7 +200,7 @@ In rough priority order, each with the mitigation we propose.
 | 5 | **No second approver for triggers; scope grew SNS → PR without review** (F5) | Governance rests on two people | Trigger review checklist; quarterly review with Security |
 | 6 | **Customer-visible fields are written from Slack** | *Customer-friendly name* / *Customer value* appear on the certified roadmap | Preview is mandatory today; consider a second approver for certified Initiatives |
 | 7 | **Broader Slack scopes than March** | Six more bot scopes, incl. private-channel history | Needed for private-channel triggers; each scope is mapped to a feature in the spec (§9.1) |
-| 8 | **Audit trail lives in Slack** (F3) | Retention and immutability are Slack's | Immutable store for the audit events (post-pilot) |
+| 8 | **The audit record is durable but not immutable** (F3) | Operator events are now in a database table (queryable, independent of Slack retention), but the server's key could still delete rows | Append-only enforcement, or shipping the events to a write-once store / SIEM (post-pilot) |
 
 ## 6. Decisions we need from Security
 
@@ -215,7 +220,7 @@ In rough priority order, each with the mitigation we propose.
 | Code | GitHub `omerm55/mySlackAgent`, branch `claude/slack-jira-integration-nRbia` (auto-deploys) |
 | Runtime | Node 22, `@slack/bolt` (Socket Mode), `axios`, `pino`; 228 Jest tests |
 | Hosting | Render web service, free plan; public URL `https://myslackagent.onrender.com` — endpoints `/oauth/callback` and `/health` only |
-| Data store | Supabase Postgres: `oauth_tokens` (ciphertext), `oauth_states`, `integrations`, `jira_triggers`, `jira_prompts`, `release_calendar`, `user_preferences`, `activity_log`; accessed with the server key; RLS enabled on all tables, no policies |
+| Data store | Supabase Postgres: `oauth_tokens` (ciphertext), `oauth_states`, `integrations`, `jira_triggers`, `jira_prompts`, `release_calendar`, `user_preferences`, `activity_log`, `audit_events`; accessed with the server key; RLS enabled on all tables, no policies |
 | Secrets (Render env) | Slack bot + app tokens, signing secret; Jira service-account email + API token; Atlassian OAuth client id + secret; Supabase URL + secret key; token-encryption key; Azure OpenAI key/endpoint; admin Slack ids; ops channel id |
 | Slack scopes | `channels:history groups:history channels:read groups:read channels:join reactions:read chat:write im:history im:write users:read users:read.email` + app-level `connections:write` |
 | Atlassian OAuth | 3LO app, scopes `read:jira-user read:jira-work write:jira-work offline_access`, distribution "Sharing", callback on Render; access tokens 1 h, refresh tokens rotated on use |
