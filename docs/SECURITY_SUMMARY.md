@@ -108,9 +108,8 @@ kill switch other than deleting the trigger in App Home or suspending the Render
 
 **Still open.**
 - For plain Yes/No asks the *reason* exists only in the Slack thread and the ops channel, not in Jira.
-- **Render logs contain more than the March design promised**: the LLM-decision log line includes the
-  user's free text and the collect log line includes the extracted values (`logger.info({... userText})`).
-  March said logs never contain message text. Fix: log lengths/hashes, not content.
+- ~~Render logs contained the user's free text and the extracted values~~ — fixed 2026-09-10; logs now
+  carry lengths and field ids only.
 - Ops-channel history is the de-facto audit log; it is a private Slack channel with Slack's retention,
   not an immutable store.
 
@@ -161,13 +160,13 @@ Ranked by what an attacker could do with them.
 
 | # | Risk | Detail | Fix |
 |---|---|---|---|
-| R1 | **Unauthenticated `/send-dm` endpoint on the public URL** | `GET https://myslackagent.onrender.com/send-dm?user=…&issue=…&fieldId=…&value=…&question=…` makes the bot DM any Slack user a genuine-looking Yes/No question; on *Yes* the field is written to Jira **as that user** (or as the service account). A demo shortcut that became a phishing primitive. | **Remove it** (or require a shared-secret header and an allowlist of callers). P0. |
+| R1 | **Unauthenticated `/send-dm` endpoint on the public URL** | `GET https://myslackagent.onrender.com/send-dm?user=…&issue=…&fieldId=…&value=…&question=…` makes the bot DM any Slack user a genuine-looking Yes/No question; on *Yes* the field is written to Jira **as that user** (or as the service account). A demo shortcut that became a phishing primitive. | ✅ **Done 2026-09-10** — endpoint and the legacy `pendingQuestions` store removed; a test pins the HTTP surface to `/health` + `/oauth/callback`. Nothing called it (added 7 Sept for a Jira-Automation webhook idea dropped a day later). |
 | R2 | **OAuth tokens stored in plaintext** | `oauth_tokens` holds access *and refresh* tokens (`offline_access`) for every connected user, readable with the Supabase secret key, which the app holds and which bypasses RLS. A Supabase or Render env leak = long-lived Jira write access as every connected user. | Encrypt at rest (pgcrypto or app-level key held only in Render); enable RLS; rotate the Supabase key; add a **Disconnect** button and delete tokens on offboarding. P0. |
 | R3 | **OAuth `state` is the Slack user id** | Predictable, no nonce, no expiry. An attacker can complete the consent flow with *their* Atlassian account and `state=<victim>`, binding their Jira identity to the victim's Slack account: the victim's subsequent clicks are executed and audited as the attacker (audit poisoning), or vice-versa. | Random, single-use, time-limited `state` stored server-side and mapped to the Slack user. P0. |
-| R4 | **Inbound HTTP exists again** | March's "no inbound exposure" no longer holds: `/oauth/callback`, `/health`, `/send-dm` are public. Only the callback is needed. | Remove `/send-dm`; keep `/health` unauthenticated but trivial; rate-limit the callback. |
+| R4 | **Inbound HTTP exists again** | March's "no inbound exposure" no longer holds: `/oauth/callback`, `/health`, `/send-dm` are public. Only the callback is needed. | ✅ `/send-dm` removed 2026-09-10. Remaining: `/health` (trivial, unauthenticated by design) and `/oauth/callback`; rate-limit the callback (P1). |
 | R5 | **Third-party hosting with production data** | Render free tier (no SLA, sleeps, US region unknown to us), Supabase, Azure OpenAI. Secrets (Slack tokens, Jira API token, OAuth client secret, Supabase key, OpenAI key) live in Render's environment. Not reviewed by IT/Security; company hosting policy unknown. | Decide hosting with IT (company Kubernetes / Azure) or approve Render paid tier + region; secrets manager. |
 | R6 | **LLM-driven writes without a preview on the Yes/No path** | `interpretJiraResponse` may transition, set a field, **add a comment or assign the issue** from the user's free text; only the collect ask shows a preview before writing. Jira content in prompts (child summaries, Notes) is an injection surface. | Preview-then-confirm for every LLM decision (as collect does); constrain the JSON schema (no assignee/comment unless the trigger allows). |
-| R7 | **Logs contain user text** | See F3. | Redact. |
+| R7 | **Logs contain user text** | See F3. | ✅ **Done 2026-09-10** — pino lines carry issue key, action and text length only; a sentinel test guards it. The ops channel keeps the text as the audit trail. |
 | R8 | **Bot can DM anyone in the workspace** | `im:write` + `users:read.email` let the bot look up any employee by Jira email and message them. Correct for the product, but the blast radius of a mis-scoped trigger is the whole company (8 September incident). | Pilot list + personal scope are the current controls; add a "who would be asked" preview and a hard cap per trigger per day. |
 | R9 | **Customer-visible fields are now written from Slack** | The collect ask writes *Customer-friendly name* and *Customer value* on PR Initiatives — text that the certified roadmap shows to customers. It is written as the PM, after a preview, but a typo or an LLM paraphrase becomes customer-facing. | Keep the preview mandatory (it is); consider a second approver for certified Initiatives. |
 | R10 | **Broader Slack scopes** | Six more bot scopes than March, including private-channel history (`groups:history`) so triggers can run in private channels. | Reviewed and needed; document per scope which feature uses it (spec §9.1 does). |
@@ -176,10 +175,10 @@ Ranked by what an attacker could do with them.
 ## 5. What we still need to do — prioritised
 
 **P0 — before opening beyond the pilot group**
-1. Remove `/send-dm` (R1). Half a day.
+1. ~~Remove `/send-dm` (R1).~~ ✅ Done 2026-09-10.
 2. Random single-use `state` with expiry for OAuth (R3). Half a day.
 3. Encrypt OAuth tokens at rest, enable RLS, rotate the Supabase secret key, add Disconnect (R2). One to two days.
-4. Stop logging user free text and extracted values (R7). One hour.
+4. ~~Stop logging user free text and extracted values (R7).~~ ✅ Done 2026-09-10.
 5. `require_oauth` per trigger, on by default for PR; the service-account fallback becomes an explicit exception (F1). One day.
 
 **P1 — before general availability**
@@ -207,7 +206,7 @@ Ranked by what an attacker could do with them.
 |---|---|
 | Code | GitHub `omerm55/mySlackAgent`, branch `claude/slack-jira-integration-nRbia` (auto-deploys) |
 | Runtime | Node 22, `@slack/bolt` (Socket Mode), `axios`, `pino`; 193 Jest tests |
-| Hosting | Render web service, free plan; public URL `https://myslackagent.onrender.com` (`/oauth/callback`, `/health`, `/send-dm`) |
+| Hosting | Render web service, free plan; public URL `https://myslackagent.onrender.com` (`/oauth/callback`, `/health` only) |
 | Data store | Supabase Postgres: `oauth_tokens`, `integrations`, `jira_triggers`, `jira_prompts`, `release_calendar`, `user_preferences`, `activity_log`; accessed with the secret (service-role) key; no RLS |
 | Secrets (Render env) | Slack bot + app tokens, signing secret; Jira service-account email + API token; Atlassian OAuth client id + secret; Supabase URL + secret key; Azure OpenAI key/endpoint; admin Slack ids; ops channel id |
 | Slack scopes | `channels:history groups:history channels:read groups:read channels:join reactions:read chat:write im:history im:write users:read users:read.email` + app-level `connections:write` |

@@ -22,11 +22,9 @@ const OAuthService = require('./services/oauthService');
 const SupabaseService = require('./services/supabaseService');
 const IntegrationCache = require('./services/integrationCache');
 const LlmService = require('./services/llmService');
-const PendingQuestions = require('./services/pendingQuestions');
 const { startCallbackServer } = require('./server/callbackServer');
 const { registerDmHandler } = require('./handlers/dmHandler');
 const { registerHomeHandler } = require('./handlers/homeHandler');
-const { sendDmQuestion } = require('./utils/dmQuestion');
 const { logger, boltLogger } = require('./utils/logger');
 const OpsNotifier = require('./utils/opsNotifier');
 const { startKeepAlive } = require('./utils/keepAlive');
@@ -102,7 +100,6 @@ const normalizedStatic = staticIntegrations.map((i) => ({
 
 const integrationCache = new IntegrationCache(supabaseService, normalizedStatic);
 
-const pendingQuestions = new PendingQuestions();
 const llmService = LlmService.fromEnv();
 
 // Alerting, opsNotifier and jiraPoller are initialised after app.start() so app.client is available.
@@ -112,7 +109,7 @@ let jiraPoller;
 let digestScheduler;
 
 const services = {
-  dedupCache, rateLimiter, auditLog, userCache, oauthService, pendingQuestions, llmService,
+  dedupCache, rateLimiter, auditLog, userCache, oauthService, llmService,
   integrationCache, jiraService,
   db: supabaseService,
   get alerting() { return alerting; },
@@ -144,12 +141,7 @@ registerPreferencesHandler(app, services);
   if (oauthService) {
     await oauthService.loadFromDb();
     const oauthPort = parseInt(process.env.OAUTH_PORT || '3000', 10);
-    startCallbackServer(oauthService, oauthPort, logger, {
-      slackClient: app.client,
-      pendingQuestions,
-      sendDmQuestion,
-      opsNotifier,
-    });
+    startCallbackServer(oauthService, oauthPort, logger);
     logger.info({ redirectUri: process.env.OAUTH_REDIRECT_URI }, '[oauth] Impersonation enabled');
   }
 

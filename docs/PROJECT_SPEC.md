@@ -6,7 +6,7 @@
 > suggest values (e.g. an epic's Fix Version).
 >
 > Status: hackathon build (Sept 2026), deployed and in use at Sisense. Branch `claude/slack-jira-integration-nRbia`.
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (193 passing, 19 suites).
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (199 passing, 21 suites).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
 system does, how it is built, how to operate it, and what remains for production. Every script,
@@ -239,7 +239,7 @@ alert; a daily audit summary is posted.
                  │                       fixVersionSuggester   dedup, rateLimit │
                  │                       llmService     │      auditLog, alert  │
                  │                                      │                       │
- Browser ─HTTPS─►│  GET /oauth/callback  GET /health  GET /send-dm              │
+ Browser ─HTTPS─►│  GET /oauth/callback  GET /health                            │
                  └───────────┬──────────────────┬──────┴───────────┬────────────┘
                              │                  │                  │
                       Jira Cloud REST     Supabase REST        Azure OpenAI
@@ -249,7 +249,8 @@ alert; a daily audit summary is posted.
 Key properties:
 
 - **Single process.** Slack Socket Mode (outbound WebSocket) + a tiny HTTP server for the OAuth
-  callback, `/health` and a `/send-dm` test endpoint. No inbound Slack HTTP, so no public request
+  callback and `/health` — **nothing else**; every other path is 404 (the unauthenticated `/send-dm`
+  test endpoint was removed in Sept 2026, see §14 #28). No inbound Slack HTTP, so no public request
   URL/signing verification path is exercised (signing secret still configured).
 - **Stateless-ish.** All durable state (tokens, triggers, prompts, preferences, release calendar) is
   in Supabase. In-memory caches: integrations (60 s TTL), dedup (5 min), rate limits, audit log
@@ -284,14 +285,13 @@ src/
     fixVersionSuggester.js     Children + acceptance date + release calendar (+ LLM) → Fix Version
     llmService.js              Provider-agnostic JSON calls (OpenAI/Azure, Gemini, Anthropic); prompts
     attributionService.js      Comment on Jira when acting as the service account
-    pendingQuestions.js        Legacy in-memory store (kept for API compatibility)
-  server/callbackServer.js     HTTP: /oauth/callback, /health, /send-dm
+  server/callbackServer.js     HTTP: /oauth/callback, /health (and nothing else)
   utils/
     opsNotifier.js  dmQuestion.js  riskReviewMessage.js  collectMessage.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (Sept 2026 answer to the March security review), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6)
-tests/                         Jest (193 tests, 19 suites)
+tests/                         Jest (199 tests, 21 suites)
 config/*.example.json          Local-dev config templates (legacy path)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
@@ -323,7 +323,7 @@ Dependencies: `@slack/bolt ^4`, `axios`, `dotenv`, `pino`; dev: `jest ^30`. No S
 |---|---|---|
 | `reactionHandler.js` | `reaction_added` | Match channel triggers by channel; fetch message; extract issue keys; per-trigger scope/allowlist/rate/dedup; update field via user OAuth or service account; thread confirmation; audit + ops. |
 | `replyHandler.js` | `message` (thread replies, non-bot) | Same for thread replies (root message holds the issue key). |
-| `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); clears `jira_prompts` on failure so the poller re-asks. |
+| `dmHandler.js` | actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text; Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); clears `jira_prompts` on failure so the poller re-asks. Pino logs carry issue keys, actions and text *lengths* only — never the user's text or extracted values (those go to the ops channel). |
 | `homeHandler.js` | `app_home_opened` | Builds the Home view (connection, notifications, how it works, persistent recent activity; trigger sections **admin-only**); exports `publishHome` for other handlers to refresh it. |
 | `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (Jira-trigger modal: ask type yes/no / risk review / collect (+ field list, one per line), notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; runs the trigger once right after saving and posts the same summary as Run now (`runSummaryLines`: matched · not yet asked · already asked or waiting in a digest · sent · queued, with 🔔 lines for matches held for a digest); Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
@@ -1044,7 +1044,7 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 193 tests in 19 suites:
+`npm test` → Jest, `tests/*.test.js`, 199 tests in 21 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1060,6 +1060,8 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | `collect` | Trigger field list parse/format round-trip + errors; `collectContextFor` current values + certified/timing; `visibilityLine`; certified line in DM and modal, absent otherwise; ask blocks (Answer/Skip, unique ids, ctx < 2000 chars); preview Save/Edit/Cancel vs missing-required (no Save); `mergeValues` precedence + 255 cap; modal prefill + slim metadata; `readCollectModal`; `sendDmQuestion` delegation; handlers: Answer opens modal with DM location, empty submit → inline error, explicit-only → no LLM, free text → LLM with typed field winning, LLM partial → "Almost there", LLM failure → note, Save → ONE `updateIssueFields` PUT + ✅ + answered + ops + FYI, save failure → ❌ + re-ask, Edit prefilled, Cancel restores ask, Skip |
 | `triggerModalSave` | Trigger modals save before ack: DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; save-time run posts the Run-now summary with queued matches called out |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), persistent recent activity from Supabase, in-memory fallback, `addEntry` persistence |
+| `callbackServer` | Public HTTP surface is exactly `/health` (200) and `/oauth/callback` (400 without code/state, else `handleCallback(code, state)`); `/send-dm` and unknown paths → 404 |
+| `noContentLogging` | A sentinel typed into the reply modal / collect modal reaches the ops channel but never any pino log call |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
 
 Tests mock Slack/Jira/Supabase clients; no network. Ad-hoc harnesses used during development live
@@ -1145,6 +1147,13 @@ Chronological, with rationale (see `git log` for commits):
     Certified Roadmap* actually says Yes; a *Now* Initiative gets the softer "once it is certified" line.
     Reading the field beats putting the claim in the trigger's question text, which would be wrong for
     half the JQL's matches.
+28. **Security P0 (1/5): `/send-dm` removed, no user text in logs.** The endpoint dated from the day
+    the DM flow was built (7 Sept), when Jira Automation was going to call the bot over HTTP; JQL-polled
+    triggers replaced that a day later and nothing called it since — but anyone on the internet could
+    have used it to make the bot DM any employee a real-looking ask. Removed together with the legacy
+    `pendingQuestions` store; the HTTP surface is now `/health` + `/oauth/callback` only, locked by a
+    test. Same commit: pino log lines no longer include what people typed or what the LLM extracted
+    (the ops channel keeps that as the audit trail). See `SECURITY_SUMMARY.md` R1, R4, R7.
 
 ---
 
@@ -1156,7 +1165,6 @@ Chronological, with rationale (see `git log` for commits):
   activity is persisted in `activity_log`, the daily ops summary still uses the in-memory list).
 - **Email-based user mapping** depends on Atlassian profile visibility; no manual override table yet.
 - **Re-ask re-asks everyone**, including users who answered No; outcomes aren't stored per prompt.
-- **`/send-dm` test endpoint is unauthenticated** (only useful for demos; remove or protect).
 - **Slack rate limits** are not centrally managed (bursts capped only by `JIRA_MAX_PROMPTS_PER_RUN`).
 - **PR workflow validators** ("Planned release" and "PR PM owner" must be set for any status change)
   are surfaced as Jira's error text on the risk-review buttons but not yet offered a fix-up picker.
@@ -1169,8 +1177,7 @@ Chronological, with rationale (see `git log` for commits):
   trigger). A per-trigger pattern (e.g. one trigger for red progress, another for Overdue) needs a
   `jira_triggers.notification_match` column + modal input — deferred until a second trigger exists.
 - **LLM output** is validated structurally, not semantically; reasons are shown to users as-is.
-- **Legacy code paths:** `pendingQuestions.js`, `config/*.json` loaders, Docker/pm2 files are kept
-  but not exercised in production.
+- **Legacy code paths:** `config/*.json` loaders, Docker/pm2 files are kept but not exercised in production.
 
 ---
 
@@ -1191,10 +1198,10 @@ Ordered by value ÷ effort; each item is independently shippable.
 audit, operational controls, governance, data) to what the rebuild did and what is still open, and lists
 the risks the rebuild introduced (unauthenticated `/send-dm`, plaintext OAuth tokens, predictable OAuth
 `state`, public HTTP surface, PaaS hosting, LLM writes without preview on the Yes/No path, user text in
-logs). Its P0 list, in order: remove `/send-dm`; random single-use `state`; encrypt tokens + RLS + key
-rotation + Disconnect; stop logging user text; `require_oauth` per trigger (default on for PR).
+logs). Its P0 list, in order: ~~remove `/send-dm`~~ (done, #28); random single-use `state`; encrypt tokens
++ RLS + key rotation + Disconnect; ~~stop logging user text~~ (done, #28); `require_oauth` per trigger
+(default on for PR).
 
-- Remove or authenticate `/send-dm`; add a shared-secret header if kept.
 - Encrypt OAuth tokens at rest (pgcrypto or app-level) and rotate the Supabase secret key.
 - Enable RLS with a service role and audit table access; least-privilege Slack scopes review.
 - Secrets scanning in CI; never log tokens (already avoided) — add a test that asserts this.
@@ -1233,7 +1240,7 @@ rotation + Disconnect; stop logging user text; `require_oauth` per trigger (defa
   `docs/PROJECT_SPEC.md` (a `git diff --name-only` check in GitHub Actions is enough).
 - CI (GitHub Actions): lint, `npm test`, dependency audit, deploy on green.
 - ESLint/Prettier config; JSDoc → TypeScript migration or type-checking via `checkJs`.
-- Remove legacy paths (`pendingQuestions`, JSON config loaders) once confirmed unused; update README
+- Remove legacy paths (JSON config loaders) once confirmed unused; update README
   to point at this spec.
 - Migration tooling for Supabase (numbered SQL files, applied via CI) instead of hand-run scripts.
 

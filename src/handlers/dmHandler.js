@@ -581,7 +581,8 @@ function registerDmHandler(app, jiraService, services) {
           const res = await withTimeout(services.llmService.extractFields({ issueKey, summary: ctx.collect?.summary, fields, userText: freeText }), 15_000, 'field extraction');
           extracted = res?.values && typeof res.values === 'object' ? res.values : {};
           note = typeof res?.note === 'string' && res.note.trim() ? res.note.trim() : null;
-          logger.info({ issueKey, extracted }, '[collect] LLM extraction');
+          // Never log the values themselves (they are user content); the ops channel carries the detail.
+          logger.info({ issueKey, fieldsExtracted: Object.keys(extracted).filter((k) => extracted[k]) }, '[collect] LLM extraction');
         } catch (err) {
           logger.warn(`[collect] extractFields failed for ${issueKey}: ${err.message}`);
           note = "I couldn't read that automatically — fill the fields directly.";
@@ -863,7 +864,7 @@ function registerDmHandler(app, jiraService, services) {
       decision = await llmService.interpretJiraResponse({
         issueKey, question: context.question, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType, transitionTo, userText,
       });
-      logger.info({ issueKey, action: decision.action, userText }, '[dm] LLM decision');
+      logger.info({ issueKey, action: decision.action, textLength: userText.length }, '[dm] LLM decision'); // no user text in logs
     } catch (err) {
       logger.error(`[dm] LLM error: ${err.message}`);
       if (dmChannelId && messageTs) {

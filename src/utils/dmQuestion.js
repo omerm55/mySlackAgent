@@ -10,7 +10,7 @@ const { issueLink, mentionsIssue } = require('./jiraLink');
  * @param {import('@slack/bolt').App['client']} client
  * @param {string} slackUserId
  * @param {{ issueKey: string, question: string, jiraFieldId: string, jiraFieldName: string, jiraFieldValue: string, jiraFieldType: string }} context
- * @param {import('../services/pendingQuestions')} _pendingQuestions  kept for API compat, unused
+ * @param {null} _pendingQuestions  legacy positional argument, always null (kept so callers need not change)
  * @returns {Promise<{ channelId: string, messageTs: string }>}
  */
 async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, opsNotifier) {
