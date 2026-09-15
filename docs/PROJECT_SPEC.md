@@ -9,7 +9,7 @@
 > truth: `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (moved from GitHub, §11.4). Trunk:
 > `main`. Render deploys `main` through the GitHub push mirror — Render cannot reach the internal
 > GitLab (§11.4).
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (280 tests, 29 suites; 13
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (287 tests, 29 suites; 13
 > of them need a Postgres and skip without one — §13).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
@@ -160,10 +160,19 @@ delivered in a burst (header + one message per question) at their slot.
 
 ### 2.9 R&D Initiative risk review (notifier → Dev owner loop)
 
-The `rd-initiative-notifier` Claude skill runs weekly per domain, flags PR Initiatives (Overdue, Progress
-red/orange, Missing inputs, Status mismatch, Placeholder target), posts to the leads' channel and writes a
-one-line diagnosis onto each flagged Initiative in **`Latest notification`** (`customfield_15525`), e.g.
-`Sep 8 — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress`. It does not DM owners.
+The `rd-initiative-notifier` Claude skill evaluates every non-terminal PR Initiative once a week (its
+**STAMP** pass) and writes a one-line verdict onto **`Latest notification`** (`customfield_15525`), e.g.
+`2026-09-14T06:03Z — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress`. It does
+not DM owners. Since its **2026-09-14 contract change** (§14 #42) the field is a *risk channel*, not a log:
+
+- It is written **only when an Initiative's risk set changes** — the four risk flags being `Overdue {N}d`,
+  `Target {N}d`, `Progress red …`, `Progress orange …`.
+- Hygiene flags (`Missing: …`, `Status mismatch`, `Placeholder target`) ride along inside a verdict but
+  never cause one on their own; clean Initiatives are recorded in the notifier's ledger, not on the field.
+- When the last risk clears it writes **once** more — the reserved literal `No flags`, or a hygiene-only
+  verdict — and then goes quiet. `Not tracked` is retired, though old values survive on the field.
+- The stamp is **ISO-8601 UTC** (`2026-09-14T06:03Z`, or `…+03:00`) and records **when the risk began**,
+  not when the notifier last looked; it does not move while the risk set is unchanged.
 
 A Jira trigger with **ask type `risk_review`** reads that field and DMs the **Dev owner** (`PR Dev
 Owner/FC Sponsor`, `customfield_11962`, fallback assignee → reporter) with the diagnosis, current status,
@@ -183,16 +192,28 @@ risk **and** refresh Notes", but nobody is forced). The Notes modal shows the cu
 input. The trigger uses **`watch_field = customfield_15525`**, so each weekly rewrite re-asks;
 an unchanged value never does. Field ids are overridable via `PR_*_FIELD` env vars.
 
-**Only the latest run counts.** The notifier never clears `Latest notification`, so an Initiative
-flagged once keeps the text for months. The bot parses the stamp the notifier writes (`Mmm DD — …`,
-current year, rolling back a year if that lands in the future) and skips notifications older than
-`RISK_NOTIFICATION_MAX_AGE_DAYS` (default 8, one weekly run plus slack) without recording them; a fresh
-stamp next week asks normally. Unparseable stamps are treated as fresh and logged.
+**Only a live risk is asked about.** Four filters run before anyone is DM'd, none of them recorded — so
+an Initiative that goes back into the red next week is asked about normally:
 
-**Only red progress counts (for now).** The notifier stamps every actionable Initiative — Overdue,
-Stale Notes, Progress red/orange, Missing inputs, Status mismatch, Placeholder target — but the pilot
-focuses on Initiatives that are *significantly behind pace*. The stamp must match
-`RISK_NOTIFICATION_MATCH` (case-insensitive regex, default `progress red`; the notifier writes the
+1. **Cleared** — `isClearedNotification`: the body is the reserved literal `No flags` (or the retired
+   `Not tracked`). The notifier looked and the risk is gone. Checked first, because an empty
+   `RISK_NOTIFICATION_MATCH` would otherwise wave a retraction straight through to an owner.
+2. **No risk flag** — `riskFlagsIn` finds none of the four risk phrases in the flag section (the
+   `Action: …` tail is ignored: it restates the same conditions in other words). Hygiene-only.
+3. **Legacy and stale** — `notificationAge`. An **ISO stamp never goes stale**, however old: it dates the
+   risk, and a retraction now arrives explicitly. The `RISK_NOTIFICATION_MAX_AGE_DAYS` cutoff (default 8)
+   applies **only to legacy `Mmm DD` stamps**, written under the pre-2026-09-14 contract where nothing was
+   ever cleared; they disappear as the notifier migrates or clears them. Unstamped text is treated as
+   fresh and logged.
+4. **Off topic** — `notificationMatches` against `RISK_NOTIFICATION_MATCH` (below).
+
+Both stamp formats are parsed (`notificationStamp` → `{date, format:'iso'|'legacy'|null}`); the legacy one
+still assumes the current year and rolls back a year if that lands in the future. The DM and the FYI show
+**Flagged since: `YYYY-MM-DD`** from the stamp, which is meaningful now that it dates the risk.
+
+**Only red progress counts (for now).** The notifier's four risk flags are Overdue, Target within 15d and
+Progress red/orange, but the pilot focuses on Initiatives that are *significantly behind pace*. The stamp
+must match `RISK_NOTIFICATION_MATCH` (case-insensitive regex, default `progress red`; the notifier writes the
 phrase `Progress red {actual}%/exp {expected}%`). Non-matching stamps are skipped without recording and
 counted in the Run-now summary ("N notification(s) not about …"). Set the variable to an empty string
 to review every flag, or e.g. `progress (red|orange)` to widen it. The filter is global to all
@@ -337,7 +358,7 @@ src/
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6); applied by scripts/apply-schema.js
-tests/                         Jest (280 tests, 29 suites; the database suite needs TEST_DATABASE_URL)
+tests/                         Jest (287 tests, 29 suites; the database suite needs TEST_DATABASE_URL)
 config/*.example.json          Local-dev config templates (legacy path)
 .github/workflows/ci.yml       CI on GitHub: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
 .gitlab-ci.yml                 The same four gates on GitLab (for the move to gitlab.rnd.sisense.com)
@@ -473,8 +494,13 @@ performed on someone's behalf always names that person on the issue itself, whic
 **`riskReviewMessage.js`** (utils) — builds the `risk_review` DM (`buildRiskReviewBlocks`,
 `sendRiskReview`, `afterStatusBlocks` = Update Notes + Skip), the buttonless `sendFyi` (risk-review and
 generic variants), `statusChoices(status)`, `parseInterval`, `riskContextFor(issue)` (incl. a 400-char
-Notes preview), `plainText` (string or ADF → text), `notesPreview`/`notesBlock`, `notesEntry`/`prependNotes`,
-and the `FIELDS` constants (env-overridable, incl. `PM_OWNER`). `sendDmQuestion` delegates to it
+Notes preview and `since`, the day the risk began), `plainText` (string or ADF → text),
+`notesPreview`/`notesBlock`, `notesEntry`/`prependNotes`, and the `FIELDS` constants (env-overridable,
+incl. `PM_OWNER`). It also owns everything that reads the notifier's verdict: `splitNotification`
+(`{stamp, body}` on the ` — ` separator), `notificationStamp` → `{date, format:'iso'|'legacy'|null}`,
+`parseNotificationDate`, `notificationAge` (ISO never stale; the cutoff is for legacy stamps only),
+`riskFlagsIn` (the four `RISK_FLAG_PATTERNS`, read from the flag section only), `isClearedNotification`
+(the reserved `No flags`, plus the retired `Not tracked`) and `notificationMatches`. `sendDmQuestion` delegates to it
 when `context.askType === 'risk_review'`, so digests, the Connect nudge and ops reporting are unchanged.
 
 **`collectMessage.js`** (utils) — the `collect` ask: `parseCollectFields` / `formatCollectFields`
@@ -830,16 +856,20 @@ Permission: creator or ADMIN_SLACK_USER_IDS. Admins may set scope=global.
 ### 7.6 Risk review (notifier flag → Dev owner → act)
 
 ```
-rd-initiative-notifier (weekly, Claude scheduled task) ─► writes cf[15525] "Latest notification" on flagged Initiatives
+rd-initiative-notifier STAMP (weekly, Claude scheduled task) ─► writes cf[15525] "Latest notification"
+     only when an Initiative's risk set changes, + one clearing write ("{ISO} — No flags") when it resolves
 JiraPoller tick ─► trigger ask_type=risk_review, watch_field=cf[15525]
   ─► searchIssues(jql, + notify_field_id + watch field + target + Notes) ─► for each issue:
        stored watchedValue == current? skip : deletePromptsForIssue + treat as new
   ─► resolvePerson: user_field cf[11962] → first user → email → Slack id (fallback assignee → reporter)
   ─► scope=personal? only creator · pilot list set? only listed users (others skipped, not recorded)
-  ─► notificationAge(cf[15525]) > RISK_NOTIFICATION_MAX_AGE_DAYS? skip (stale leftover, not recorded)
+  ─► isClearedNotification(cf[15525])? skip (notifier retracted it: "No flags" / "Not tracked", not recorded)
+  ─► riskFlagsIn(cf[15525]) empty? skip (hygiene-only verdict, no risk to act on, not recorded)
+  ─► legacy "Mmm DD" stamp older than RISK_NOTIFICATION_MAX_AGE_DAYS? skip (pre-2026-09-14 leftover, not recorded)
+       …an ISO stamp is never stale: it dates the risk, and a retraction arrives as its own write
   ─► !notificationMatches(cf[15525], RISK_NOTIFICATION_MATCH)? skip (not a red-progress flag, not recorded)
   ─► FYI: fyiFieldFor → PM owner cf[11909] → Slack id ≠ Dev owner? sendFyi (no buttons) + payload.fyiSlackUserId
-  ─► sendDmQuestion(payload{askType:'risk_review', risk:{notification,status,target}}) → sendRiskReview
+  ─► sendDmQuestion(payload{askType:'risk_review', risk:{notification,status,target,since}}) → sendRiskReview
 Dev owner clicks:
   [Low/High Risk | Off Track | Back On Track] ─► transitionIssue as user ─► ✅ + [📝 Update Notes] [Skip]
   [📝 Update Notes] ─► modal (shows current Notes) ─► llm.tidyNote (fallback raw) ─► prepend "YYYY-MM-DD (Name): …" to cf[12958]
@@ -1068,7 +1098,7 @@ style base with `OPENAI_DEPLOYMENT` = deployment name (GPT-5.1). Uses `api-key` 
 | `KEEP_ALIVE_URL`, `KEEP_ALIVE_INTERVAL_SEC`, `KEEP_ALIVE_DISABLED` | no | Self-ping (defaults from `RENDER_EXTERNAL_URL`, 300 s) |
 | `PR_LATEST_NOTIFICATION_FIELD`, `PR_NOTES_FIELD`, `PR_TARGET_FIELD`, `PR_DEV_OWNER_FIELD`, `PR_PM_OWNER_FIELD` | no | PR field ids for the risk review (defaults `customfield_15525` / `12958` / `11818` / `11962` / `11909`) |
 | `PR_CERTIFIED_FIELD`, `PR_TIMING_FIELD` | no | PR field ids the collect ask reads for its "why this matters" line (defaults `customfield_12170` / `14817`). Like the other `PR_*` ids, not listed in `render.yaml`: the defaults are the live ids |
-| `RISK_NOTIFICATION_MAX_AGE_DAYS` | no (8) | Risk reviews ignore `Latest notification` stamps older than this |
+| `RISK_NOTIFICATION_MAX_AGE_DAYS` | no (8) | Risk reviews ignore **legacy `Mmm DD`** `Latest notification` stamps older than this. Current ISO-8601 stamps are never aged out — they date the risk, and the notifier retracts explicitly (§2.9) |
 | `RISK_NOTIFICATION_MATCH` | no (`progress red`) | Case-insensitive regex the `Latest notification` stamp must match for a risk review to fire; empty = every flag |
 | `RENDER_EXTERNAL_URL`, `PORT` | set by Render | |
 
@@ -1269,8 +1299,9 @@ DM with the Atlassian revocation link, ops line; Connect reappears.
 | Scope | `personal` to test on yourself; then `global` **with a pilot list**; then `global` alone |
 | Pilot: only DM these people | the few Dev owners to start with (e.g. Yehuda). Clear it to open up. |
 
-The first run asks about every Initiative that currently carries a `Latest notification`; later runs
-only ask again when the notifier rewrites it. To pilot with one Initiative, edit its `Latest
+The first run asks about every Initiative whose `Latest notification` currently carries a live risk (§2.9
+filters out cleared, hygiene-only and legacy-stale values); later runs only ask again when the notifier
+rewrites the field — which, since 2026-09-14, it does only when that Initiative's risk set changes. To pilot with one Initiative, edit its `Latest
 notification` in Jira and **▶️ Run now**. To pilot with one *person* while the JQL stays broad, set
 scope to Everyone and put only them on the pilot list; the Run-now summary reports how many matches
 were "outside the pilot list".
@@ -1365,7 +1396,9 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | Saving a trigger shows "Could not save: … column … does not exist" inline in the modal | A migration in §6 hasn't been run yet (the modal stays open and the ops channel gets the same error) | Run the relevant SQL in §6, then Save again |
 | Risk button fails: "Planned release is empty; PR PM owner is empty" | PR workflow validators on the target status | Set those fields on the Initiative (any status transition in PR requires them); consider a picker like Fix Version |
 | Home "recent activity" empty after a deploy | `activity_log` table missing → falls back to memory | Run `supabase/activity_log.sql` |
-| Risk review fired on Initiatives that aren't flagged any more | `Latest notification` is never cleared by the notifier; stamps older than the last run are leftovers | Handled: stamps older than `RISK_NOTIFICATION_MAX_AGE_DAYS` are skipped (Run-now summary shows "N stale notification(s)"); ask the recipients to press Handled on the ones already sent |
+| Risk review fired on Initiatives that aren't flagged any more | A pre-2026-09-14 leftover: back then the notifier never cleared the field | Handled: legacy `Mmm DD` stamps older than `RISK_NOTIFICATION_MAX_AGE_DAYS` are skipped (Run-now summary shows "N legacy notification(s) older than …"); ask the recipients to press Handled on the ones already sent |
+| Risk review fired on an Initiative the notifier has since cleared | Shouldn't happen: `No flags` / `Not tracked` verdicts are skipped before the flag filter | Check the field's exact text — `No flags` is a reserved literal and a reworded one is not recognised. Run-now shows "N notification(s) the notifier has since cleared" |
+| Risk review didn't fire on an Initiative flagged weeks ago | Expected before this change (the old 8-day cutoff), **not** any more — an ISO stamp never ages out | Check the Run-now summary line it landed in: cleared / no risk flag / not about "progress red". A verdict whose stamp is still `Mmm DD` has not been rewritten by the notifier since its migration |
 | Run now says "N already asked or waiting in a digest" and the person got nothing | Their notification preference is a digest (hourly / daily); the match was queued, not dropped. The bot confirms a preference change in the person's DM ("You'll now get questions as a *hourly* digest") | Wait for the slot, or have them switch to *Immediate* in App Home — that flushes their queue at once. The first run after saving a trigger now reports queued matches with a 🔔 line |
 | Collect preview says "not found in what you wrote" / no Save button | The LLM couldn't find a required field in the text (or AI isn't configured) | Press *Add the missing part* and type the value into its field directly — typed values always win |
 | Collect ask arrived but the modal has no field inputs | Trigger saved with an empty `collect_fields` (migration not run → save failed → see modal error) | Run `supabase/collect_fields.sql`, edit the trigger, re-enter the field list |
@@ -1504,7 +1537,7 @@ reaching GitLab (§11.4).
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 280 tests in 29 suites:
+`npm test` → Jest, `tests/*.test.js`, 287 tests in 29 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1516,8 +1549,8 @@ reaching GitLab (§11.4).
 | `jiraPollerQueue` | Send vs queue by preference |
 | `dmFixVersionOffer` | Offer rendering, unique action_ids, progress lines, fallback when Slack rejects blocks |
 | `dmQuestionFormat` | Template rendering (`{key} ({summary})` → one link, pipe-safety), headline dedup, button context |
-| `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change; `parseNotificationDate` / `notificationAge` (current year, year roll-back, unparseable = fresh, 8-day cutoff); `notificationMatches` (case-insensitive regex, empty = all, invalid regex = substring) |
-| `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; stale `Latest notification` stamps (older than `RISK_NOTIFICATION_MAX_AGE_DAYS`) are skipped without recording and counted in the Run-now summary; stamps that don't match `RISK_NOTIFICATION_MATCH` (orange, Overdue, Status mismatch…) are skipped the same way; collect trigger requests its field ids and DMs the PM owner an Answer/Skip ask with current values in the payload; every payload carries `allowFallback`; durable daily cap: budget spent → nothing sent or recorded + ops warning, partial budget → only that many asked, counting failure → per-run cap still applies |
+| `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change; the notifier's verdict: ISO stamps (with/without seconds, `Z` or `+03:00`) and legacy `Mmm DD` (current year, year roll-back, unparseable = fresh), ISO never stale vs. the legacy 8-day cutoff, `riskFlagsIn` (the four risk flags, hygiene-only = none, the `Action:` tail never counts), `isClearedNotification` (`No flags`, `Not tracked`), `notificationMatches` (case-insensitive regex, empty = all, invalid regex = substring) |
+| `jiraPollerAudience` | `resolvePerson` for reporter/assignee/`user_field` with fallbacks, `fieldsFor`, risk-review payload, `watch_field` unchanged / changed / legacy row; `fyiFieldFor` defaults; FYI sent to a distinct PM owner (buttonless, carries `fyiSlackUserId`) and skipped when PM = Dev owner; pilot list restricts asks and FYIs, skips are not recorded, empty list = everyone; the risk-review filters, each counted in the Run-now summary and none recorded — an old ISO stamp still fires (2, 30 and 90 days all DM), a legacy `Mmm DD` stamp older than `RISK_NOTIFICATION_MAX_AGE_DAYS` does not, a cleared verdict (`No flags` / `Not tracked`) never does *even with `RISK_NOTIFICATION_MATCH` empty*, a hygiene-only verdict never does, and stamps that don't match `RISK_NOTIFICATION_MATCH` (orange, Target, Overdue…) are skipped the same way; collect trigger requests its field ids and DMs the PM owner an Answer/Skip ask with current values in the payload; every payload carries `allowFallback`; durable daily cap: budget spent → nothing sent or recorded + ops warning, partial budget → only that many asked, counting failure → per-run cap still applies |
 | `collect` | Trigger field list parse/format round-trip + errors; `collectContextFor` current values + certified/timing; `visibilityLine`; certified line in DM and modal, absent otherwise; ask blocks (Answer/Skip, unique ids, ctx < 2000 chars); preview Save/Edit/Cancel vs missing-required (no Save); `mergeValues` precedence + 255 cap; modal prefill + slim metadata; `readCollectModal`; `sendDmQuestion` delegation; handlers: Answer opens modal with DM location, empty submit → inline error, explicit-only → no LLM, free text → LLM with typed field winning, LLM partial → "Almost there", LLM failure → note, Save → ONE `updateIssueFields` PUT + ✅ + answered + ops + FYI, save failure → ❌ + re-ask, Edit prefilled, Cancel restores ask, Skip |
 | `dmReplyPreview` | Modal submit previews and writes nothing (ops "proposed", not "decision"); Confirm applies transition + comment + assignee and reports to ops; Cancel restores the Yes/No/Reply ask; Edit reply reopens the modal prefilled; `no_action` finalises without buttons; LLM failure keeps the ask actionable; the preview button value stays under Slack's 2000-char cap; `describeDecision` renders each change kind |
 | `dmRequireOauth` | Attribution: a bot-account write from a DM ask comments naming the person and the change (Yes, risk status, collect save), a write as the user does not, and a failing comment never breaks the write; Yes without token/fallback → nothing written, ask restored with its buttons + Connect, prompt kept, ops told; with fallback → bot writes + nudge; with token → user writes; a second nudge does not stack; Reply / Update Notes / Answer without token → modal not opened; Notes modal submitted without token → ask rebuilt from ctx; risk status with fallback / token; No and Handled still work; all three ctx builders carry `allowFallback` |
@@ -1736,6 +1769,30 @@ Chronological, with rationale (see `git log` for commits):
     `SUPABASE_URL` and `SUPABASE_SECRET_KEY` were then deleted from Render and the key revoked
     (§9.4). The store is now portable: what remains for the security review's migration condition is
     choosing the destination, not changing the code.
+
+42. **The notifier's field became a risk channel, and the 8-day cutoff became wrong (§2.9).** On
+    2026-09-14 the `rd-initiative-notifier` skill split its weekly work into a global STAMP pass and a
+    per-domain digest, and changed three things this bot depends on. The stamp is now a full ISO-8601 UTC
+    timestamp rather than `Mmm DD`. The field is written **only when an Initiative's risk set changes** —
+    the four risk flags — plus one clearing write (`{ISO} — No flags`, a reserved literal) when the last
+    risk resolves; hygiene flags and clean Initiatives go to the skill's ledger and never touch Jira. And
+    the timestamp now means *when the risk began*, not *when we last looked*.
+    That last one inverts our staleness rule. We skipped anything older than
+    `RISK_NOTIFICATION_MAX_AGE_DAYS` because an old stamp meant "was flagged once, not any more" — the
+    old notifier never retracted, so age was the only evidence we had. Under the new contract a
+    three-month-old stamp means a three-month-old risk that is *still live*, and the old rule would have
+    silently muted exactly the Initiatives in the worst trouble, roughly a week after each was flagged.
+    The cutoff is therefore scoped to **legacy `Mmm DD` stamps only** — genuine pre-change leftovers,
+    which age out on their own as the notifier migrates or clears them — and an ISO-stamped verdict is
+    never dropped for age. Retraction is now read from the field instead of inferred: `No flags` and the
+    retired `Not tracked` are recognised as the notifier saying *the risk is gone*, and are checked
+    **before** `RISK_NOTIFICATION_MATCH`, because setting that variable to the empty string (the
+    documented way to review every flag) would otherwise turn every resolution into a DM. A verdict
+    carrying no risk flag at all is likewise skipped, since hygiene gaps are now the ledger's business.
+    The two skips are counted separately in the Run-now summary, so "nothing fired" stays legible.
+    The DM and the FYI gained a **Flagged since** date, which is only worth showing because the stamp
+    now holds still while a risk persists. Both formats are still parsed on read: the notifier rewrites
+    a superseded value only when that Initiative next carries a risk, so legacy text lingers meanwhile.
 
 ---
 

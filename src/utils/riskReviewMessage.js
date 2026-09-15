@@ -5,9 +5,16 @@ const { issueLink, issueLinkLabelled, mentionsIssue } = require('./jiraLink');
 /**
  * "Risk review" ask type — closes the loop the rd-initiative-notifier skill leaves open.
  *
- * The notifier writes a one-line diagnosis onto every flagged PR Initiative in the
+ * The notifier's weekly STAMP pass writes a one-line verdict onto a PR Initiative's
  * `Latest notification` field (cf 15525), e.g.
- *   "Sep 8 — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress"
+ *   "2026-09-14T06:03Z — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress"
+ * Since its 2026-09-14 contract change it writes **only when the risk set changes** — the four risk
+ * flags being Overdue, Target {N}d, Progress red and Progress orange — and once more when the last
+ * risk clears (the reserved literal `No flags`, or a hygiene-only verdict). The ISO-8601 UTC stamp
+ * records *when the risk began*, not when the notifier last looked, so an old stamp is a long-running
+ * risk rather than a leftover. Hygiene flags (`Missing: …`, `Status mismatch`, `Placeholder target`)
+ * ride along inside a verdict but never cause one on their own.
+ *
  * We DM the Dev owner with that text and let them act as themselves:
  *   set a risk status · update Notes · move / clear the Project target · mark handled.
  */
@@ -24,6 +31,19 @@ const FIELDS = {
 const RISK_STATUSES = ['Low Risk', 'High Risk', 'Off Track'];
 const AT_RISK = new Set(RISK_STATUSES);
 const ON_TRACK = 'On Track';
+
+// The only four flags the notifier treats as a risk, by the phrase it renders for each (its Stamp
+// step 3). Anything else in a verdict is a data-hygiene flag, which never triggers a notification.
+const RISK_FLAG_PATTERNS = {
+  overdue:          /\bOverdue\s+\d+\s*d\b/i,
+  target_within_15: /\bTarget\s+\d+\s*d\b/i,
+  progress_red:     /\bProgress\s+red\b/i,
+  progress_orange:  /\bProgress\s+orange\b/i,
+};
+
+// Verdicts that say "nothing to act on": the reserved literal the notifier writes when the last risk
+// clears, plus `Not tracked`, retired on 2026-09-14 but still sitting on fields written before it.
+const CLEARED_VERDICTS = new Set(['no flags', 'not tracked']);
 
 /** Polaris interval fields arrive as a JSON string {"start":"YYYY-MM-DD","end":"YYYY-MM-DD"} (or an object). */
 function parseInterval(value) {
@@ -62,29 +82,33 @@ function notesPreview(notes) {
   return t.length > NOTES_PREVIEW_CHARS ? `${t.slice(0, NOTES_PREVIEW_CHARS).trimEnd()}…` : t;
 }
 
-/** Build the risk part of a Jira-trigger payload from a searched issue. */
-function riskContextFor(issue) {
-  const f = issue.fields || {};
-  const target = parseInterval(f[FIELDS.TARGET]);
-  return {
-    notification: String(f[FIELDS.NOTIFICATION] || '').trim().slice(0, 255),
-    status: f.status?.name || '',
-    summary: String(f.summary || '').slice(0, 120),
-    targetStart: target?.start || null,
-    targetEnd: target?.end || null,
-    notes: notesPreview(f[FIELDS.NOTES]),
-  };
-}
-
 const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
 
 /**
- * The notifier's text starts with "{Mmm DD} — …" (no year). Resolve it to a date, assuming the
- * current year and rolling back a year if that would land more than 2 days in the future.
- * @returns {Date|null} null when the text doesn't start with a recognisable stamp
+ * Every verdict is "{stamp} — {body}" (space, em-dash, space; the separator is part of the
+ * notifier's contract). Text without one has no stamp and is all body.
+ * @returns {{ stamp: string, body: string }}
  */
-function parseNotificationDate(text, now = new Date()) {
-  const m = /^\s*([A-Za-z]{3})\.?\s+(\d{1,2})\b/.exec(String(text || ''));
+function splitNotification(text) {
+  const t = plainText(text);
+  const m = /^([^\n]*?)\s+—\s+([\s\S]*)$/.exec(t);
+  return m ? { stamp: m[1].trim(), body: m[2].trim() } : { stamp: '', body: t };
+}
+
+/** ISO-8601 stamp, the current format: `2026-09-14T06:03Z` (or `…+03:00`). Missing zone = UTC. */
+function parseIsoStamp(stamp) {
+  const m = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/.exec(stamp);
+  if (!m) return null;
+  const d = new Date(m[1] ? stamp.replace(/([+-]\d{2})(\d{2})$/, '$1:$2') : `${stamp}Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * Legacy "Mmm DD" stamp (pre-2026-09-14, no year). Resolve it assuming the current year, rolling
+ * back a year if that would land more than 2 days in the future.
+ */
+function parseLegacyStamp(stamp, now) {
+  const m = /^([A-Za-z]{3})\.?\s+(\d{1,2})$/.exec(stamp);
   if (!m) return null;
   const month = MONTHS[m[1].toLowerCase()];
   const day = parseInt(m[2], 10);
@@ -95,16 +119,80 @@ function parseNotificationDate(text, now = new Date()) {
 }
 
 /**
- * Is this notification older than `maxAgeDays`? The notifier never clears the field, so an old
- * stamp means "was flagged once, not any more". Unparseable text is treated as fresh (never drop
- * something we can't read) — callers may log it.
- * @returns {{ stale: boolean, ageDays: number|null }}
+ * The stamp on a verdict, and which of the notifier's two formats wrote it.
+ * @returns {{ date: Date|null, format: 'iso'|'legacy'|null }} format null = no recognisable stamp
+ */
+function notificationStamp(text, now = new Date()) {
+  const { stamp } = splitNotification(text);
+  if (!stamp) return { date: null, format: null };
+  const iso = parseIsoStamp(stamp);
+  if (iso) return { date: iso, format: 'iso' };
+  const legacy = parseLegacyStamp(stamp, now);
+  return legacy ? { date: legacy, format: 'legacy' } : { date: null, format: null };
+}
+
+/** @returns {Date|null} when this verdict was written — for an ISO stamp, when the risk began. */
+function parseNotificationDate(text, now = new Date()) {
+  return notificationStamp(text, now).date;
+}
+
+/**
+ * How old is the stamp, and is it a leftover to ignore?
+ *
+ * An ISO stamp is **never** stale, however old: since 2026-09-14 the notifier writes only when the
+ * risk set changes and clears explicitly, so the stamp says when the risk began and a months-old one
+ * means a months-old risk that is still live. The `maxAgeDays` cutoff applies only to legacy
+ * "Mmm DD" stamps, written under the old contract where nothing was ever cleared; they disappear as
+ * the notifier migrates or clears them. Unstamped text is treated as fresh (never drop something we
+ * can't read) — callers may log it.
+ * @returns {{ stale: boolean, ageDays: number|null, format: 'iso'|'legacy'|null }}
  */
 function notificationAge(text, now = new Date(), maxAgeDays = 8) {
-  const d = parseNotificationDate(text, now);
-  if (!d) return { stale: false, ageDays: null };
-  const ageDays = Math.floor((now.getTime() - d.getTime()) / (24 * 3600 * 1000));
-  return { stale: ageDays > maxAgeDays, ageDays };
+  const { date, format } = notificationStamp(text, now);
+  if (!date) return { stale: false, ageDays: null, format: null };
+  const ageDays = Math.floor((now.getTime() - date.getTime()) / (24 * 3600 * 1000));
+  return { stale: format === 'legacy' && ageDays > maxAgeDays, ageDays, format };
+}
+
+/**
+ * Which of the notifier's four risk flags this verdict carries. Only the flag section is read — the
+ * "Action: …" tail repeats the same conditions in different words. An empty result means the verdict
+ * is hygiene-only (or clear): evaluated, but nothing anyone has to act on.
+ * @returns {string[]} subset of overdue | target_within_15 | progress_red | progress_orange
+ */
+function riskFlagsIn(text) {
+  const { body } = splitNotification(text);
+  const flagSection = body.split(/\.\s*Action\s*:/i)[0];
+  return Object.keys(RISK_FLAG_PATTERNS).filter((k) => RISK_FLAG_PATTERNS[k].test(flagSection));
+}
+
+/**
+ * Build the risk part of a Jira-trigger payload from a searched issue. `since` is the day the risk
+ * began, per the notifier's stamp — worth showing, because the verdict no longer moves week to week.
+ */
+function riskContextFor(issue) {
+  const f = issue.fields || {};
+  const target = parseInterval(f[FIELDS.TARGET]);
+  const notification = String(f[FIELDS.NOTIFICATION] || '').trim().slice(0, 255);
+  const since = parseNotificationDate(notification);
+  return {
+    notification,
+    status: f.status?.name || '',
+    summary: String(f.summary || '').slice(0, 120),
+    targetStart: target?.start || null,
+    targetEnd: target?.end || null,
+    notes: notesPreview(f[FIELDS.NOTES]),
+    since: since ? since.toISOString().slice(0, 10) : null,
+  };
+}
+
+/**
+ * Is this the notifier's clearing write — the reserved literal `No flags` (or the retired
+ * `Not tracked`)? It means "we looked and the risk is gone", so nobody should be asked about it.
+ */
+function isClearedNotification(text) {
+  const { body } = splitNotification(text);
+  return CLEARED_VERDICTS.has(body.replace(/[.\s]+$/, '').toLowerCase());
 }
 
 /**
@@ -161,6 +249,7 @@ function buttonCtx(context, slackUserId, extra = {}) {
       summary: (r.summary || '').slice(0, 120),
       targetStart: r.targetStart || null,
       targetEnd: r.targetEnd || null,
+      since: r.since || null,
     },
     ...extra,
   });
@@ -181,7 +270,7 @@ function headerBlocks(context) {
     type: 'context',
     elements: [{
       type: 'mrkdwn',
-      text: `Status: *${r.status || 'unknown'}*  ·  Target: *${r.targetEnd || 'none'}*`,
+      text: `Status: *${r.status || 'unknown'}*  ·  Target: *${r.targetEnd || 'none'}*${r.since ? `  ·  Flagged since: *${r.since}*` : ''}`,
     }],
   });
   blocks.push(notesBlock(r.notes));
@@ -262,7 +351,7 @@ async function sendFyi(client, fyiSlackUserId, context, askedSlackUserId, opsNot
     ? [
       { type: 'section', text: { type: 'mrkdwn', text: `ℹ️ *FYI* — *${link}* was flagged by the weekly R&D Initiative Notifier. I've asked the Dev owner <@${askedSlackUserId}> to act; you'll get a note here when they do.` } },
       ...(r.notification ? [{ type: 'section', text: { type: 'mrkdwn', text: `> ${r.notification}` } }] : []),
-      { type: 'context', elements: [{ type: 'mrkdwn', text: `Status: *${r.status || 'unknown'}*  ·  Target: *${r.targetEnd || 'none'}*` }] },
+      { type: 'context', elements: [{ type: 'mrkdwn', text: `Status: *${r.status || 'unknown'}*  ·  Target: *${r.targetEnd || 'none'}*${r.since ? `  ·  Flagged since: *${r.since}*` : ''}` }] },
       notesBlock(r.notes),
     ]
     : [
@@ -306,4 +395,5 @@ module.exports = {
   parseInterval, riskContextFor, statusChoices, buildRiskReviewBlocks, actionBlocks, afterStatusBlocks,
   sendRiskReview, sendFyi, notesEntry, prependNotes, issueLink, plainText, notesPreview, notesBlock,
   parseNotificationDate, notificationAge, notificationMatches, connectBlocks,
+  RISK_FLAG_PATTERNS, splitNotification, notificationStamp, riskFlagsIn, isClearedNotification,
 };

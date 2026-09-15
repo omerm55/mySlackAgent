@@ -3,12 +3,12 @@
 const rr = require('../src/utils/riskReviewMessage');
 const { registerDmHandler } = require('../src/handlers/dmHandler');
 
-const NOTIF = 'Sep 8 — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress';
+const NOTIF = '2026-09-08T06:03Z — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress';
 
 function ctxFor(status, extra = {}) {
   return {
     askType: 'risk_review', issueKey: 'PR-1234', question: '',
-    risk: { notification: NOTIF, status, summary: 'Smart Alerts', targetStart: '2026-06-01', targetEnd: '2026-08-31' },
+    risk: { notification: NOTIF, status, summary: 'Smart Alerts', targetStart: '2026-06-01', targetEnd: '2026-08-31', since: '2026-09-08' },
     ...extra,
   };
 }
@@ -24,7 +24,7 @@ describe('riskReviewMessage helpers', () => {
 
   test('riskContextFor reads notification, status, summary and target from a searched issue', () => {
     const issue = { key: 'PR-1', fields: { summary: 'S', status: { name: 'On Track' }, [rr.FIELDS.NOTIFICATION]: ` ${NOTIF} `, [rr.FIELDS.TARGET]: '{"start":"2026-06-01","end":"2026-08-31"}' } };
-    expect(rr.riskContextFor(issue)).toEqual({ notification: NOTIF, status: 'On Track', summary: 'S', targetStart: '2026-06-01', targetEnd: '2026-08-31', notes: '' });
+    expect(rr.riskContextFor(issue)).toEqual({ notification: NOTIF, status: 'On Track', summary: 'S', targetStart: '2026-06-01', targetEnd: '2026-08-31', notes: '', since: '2026-09-08' });
   });
 
   test.each([
@@ -227,33 +227,72 @@ describe('Skip after a status change', () => {
   });
 });
 
-describe('notification age', () => {
+describe('notification stamp and flags', () => {
   const NOW = new Date('2026-09-09T12:00:00Z');
-  test('parses the notifier\'s "Mmm DD — …" stamp, assuming the current year', () => {
+
+  test('parses the notifier\'s ISO-8601 UTC stamp, with or without seconds and offset', () => {
+    expect(rr.parseNotificationDate('2026-09-07T06:03Z — Progress red 1%/exp 50%. Action: update progress', NOW).toISOString()).toBe('2026-09-07T06:03:00.000Z');
+    expect(rr.parseNotificationDate('2026-09-07T06:03:41Z — Overdue 5d', NOW).toISOString()).toBe('2026-09-07T06:03:41.000Z');
+    expect(rr.parseNotificationDate('2026-09-07T09:03+03:00 — Overdue 5d', NOW).toISOString()).toBe('2026-09-07T06:03:00.000Z');
+    expect(rr.notificationStamp('2026-09-07T06:03Z — Overdue 5d', NOW).format).toBe('iso');
+  });
+
+  test('still parses the legacy "Mmm DD — …" stamp, assuming the current year', () => {
     expect(rr.parseNotificationDate('Sep 7 — Progress orange 64%/exp 80%. Action: update progress', NOW).toISOString()).toBe('2026-09-07T00:00:00.000Z');
     expect(rr.parseNotificationDate('Jul 06 — Status mismatch. Action: update Status', NOW).toISOString()).toBe('2026-07-06T00:00:00.000Z');
+    expect(rr.notificationStamp('Sep 7 — x', NOW).format).toBe('legacy');
     expect(rr.parseNotificationDate('[Dev Domain] Sep 7 — x', NOW)).toBeNull(); // prefix breaks the stamp → unknown, treated as fresh
     expect(rr.parseNotificationDate('', NOW)).toBeNull();
+    expect(rr.notificationStamp('garbage with no separator', NOW)).toEqual({ date: null, format: null });
   });
-  test('a stamp in the future rolls back a year (December run read in January)', () => {
+
+  test('a legacy stamp in the future rolls back a year (December run read in January)', () => {
     expect(rr.parseNotificationDate('Dec 29 — Overdue 3d', new Date('2027-01-03T00:00:00Z')).toISOString()).toBe('2026-12-29T00:00:00.000Z');
   });
+
   test('notificationMatches: case-insensitive regex, empty = everything, invalid regex = substring', () => {
-    expect(rr.notificationMatches('Sep 8 — Overdue 5d; Progress red 12%/exp 50%. Action: update progress', 'progress red')).toBe(true);
-    expect(rr.notificationMatches('Sep 8 — Progress orange 64%/exp 80%. Action: update progress', 'progress red')).toBe(false);
-    expect(rr.notificationMatches('Sep 8 — Overdue 5d. Action: flag at risk', 'progress red')).toBe(false);
-    expect(rr.notificationMatches('Sep 8 — Overdue 5d', '')).toBe(true);
-    expect(rr.notificationMatches('Sep 8 — Overdue 5d', null)).toBe(true);
-    expect(rr.notificationMatches('Sep 8 — Progress orange 1%', 'progress (red|orange)')).toBe(true);
+    expect(rr.notificationMatches('2026-09-08T06:03Z — Overdue 5d; Progress red 12%/exp 50%. Action: update progress', 'progress red')).toBe(true);
+    expect(rr.notificationMatches('2026-09-08T06:03Z — Progress orange 64%/exp 80%. Action: update progress', 'progress red')).toBe(false);
+    expect(rr.notificationMatches('2026-09-08T06:03Z — Overdue 5d. Action: flag at risk', 'progress red')).toBe(false);
+    expect(rr.notificationMatches('2026-09-08T06:03Z — Overdue 5d', '')).toBe(true);
+    expect(rr.notificationMatches('2026-09-08T06:03Z — Overdue 5d', null)).toBe(true);
+    expect(rr.notificationMatches('2026-09-08T06:03Z — Progress orange 1%', 'progress (red|orange)')).toBe(true);
     expect(rr.notificationMatches('a (b', '(b')).toBe(true); // invalid regex → substring
     expect(rr.notificationMatches(null, 'progress red')).toBe(false);
   });
 
-  test('notificationAge: fresh within 8 days, stale beyond, unparseable = fresh', () => {
-    expect(rr.notificationAge('Sep 7 — x', NOW)).toEqual({ stale: false, ageDays: 2 });
-    expect(rr.notificationAge('Aug 31 — x', NOW)).toEqual({ stale: true, ageDays: 9 });
+  test('an ISO stamp never goes stale — it says when the risk began, not when we last looked', () => {
+    expect(rr.notificationAge('2026-09-07T06:03Z — Progress red 1%/exp 50%', NOW)).toEqual({ stale: false, ageDays: 2, format: 'iso' });
+    expect(rr.notificationAge('2026-06-01T14:05Z — Progress red 1%/exp 50%', NOW)).toEqual({ stale: false, ageDays: 99, format: 'iso' });
+  });
+
+  test('the age cutoff still retires legacy stamps, which the old notifier never cleared', () => {
+    expect(rr.notificationAge('Sep 7 — x', NOW)).toEqual({ stale: false, ageDays: 2, format: 'legacy' });
+    expect(rr.notificationAge('Aug 31 — x', NOW)).toEqual({ stale: true, ageDays: 9, format: 'legacy' });
     expect(rr.notificationAge('Jun 8 — x', NOW).stale).toBe(true);
-    expect(rr.notificationAge('garbage', NOW)).toEqual({ stale: false, ageDays: null });
+    expect(rr.notificationAge('garbage', NOW)).toEqual({ stale: false, ageDays: null, format: null });
     expect(rr.notificationAge('Aug 31 — x', NOW, 14).stale).toBe(false);
+  });
+
+  test('riskFlagsIn: the four risk flags only, read from the flag section', () => {
+    expect(rr.riskFlagsIn('2026-09-08T06:03Z — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress')).toEqual(['overdue', 'progress_red']);
+    expect(rr.riskFlagsIn('2026-09-08T06:03Z — Target 15d. Action: plan closure')).toEqual(['target_within_15']);
+    expect(rr.riskFlagsIn('2026-09-08T06:03Z — Progress orange 64%/exp 80%. Action: update progress')).toEqual(['progress_orange']);
+    // hygiene-only verdicts carry no risk: nobody is asked about them
+    expect(rr.riskFlagsIn('2026-09-08T06:03Z — Missing: Owner, Project Start. Action: populate fields')).toEqual([]);
+    expect(rr.riskFlagsIn('2026-09-08T06:03Z — Status mismatch; Placeholder target. Action: update Status; set new target')).toEqual([]);
+    // the action tail repeats the condition in other words — it must not count as a flag
+    expect(rr.riskFlagsIn('2026-09-08T06:03Z — Missing: Owner. Action: set new target')).toEqual([]);
+    expect(rr.riskFlagsIn('Sep 8 — Progress red 12%/exp 50%')).toEqual(['progress_red']); // legacy stamps too
+    expect(rr.riskFlagsIn(null)).toEqual([]);
+  });
+
+  test('isClearedNotification: the reserved "No flags" literal and the retired "Not tracked"', () => {
+    expect(rr.isClearedNotification('2026-09-21T06:02Z — No flags')).toBe(true);
+    expect(rr.isClearedNotification('2026-09-21T06:02Z — no flags.')).toBe(true);
+    expect(rr.isClearedNotification('Sep 21 — Not tracked')).toBe(true);
+    expect(rr.isClearedNotification('2026-09-21T06:02Z — Missing: Owner. Action: populate fields')).toBe(false);
+    expect(rr.isClearedNotification('2026-09-21T06:02Z — Progress red 1%/exp 50%')).toBe(false);
+    expect(rr.isClearedNotification(null)).toBe(false);
   });
 });

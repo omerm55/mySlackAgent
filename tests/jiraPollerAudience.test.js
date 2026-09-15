@@ -4,9 +4,8 @@ const JiraPoller = require('../src/services/jiraPoller');
 const { resolvePerson, fieldsFor } = JiraPoller;
 const { FIELDS } = require('../src/utils/riskReviewMessage');
 
-// Dated today so the age filter never makes this fixture stale; mentions red progress so the flag filter passes.
-const todayStamp = (() => { const d = new Date(); return `${d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' })} ${d.getUTCDate()}`; })();
-const NOTIF = `${todayStamp} — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress`;
+// The notifier's current stamp: ISO-8601 UTC, and carrying a risk flag the default filter passes.
+const NOTIF = '2026-09-08T06:03Z — Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress';
 const person = (email, name) => ({ emailAddress: email, displayName: name });
 
 describe('resolvePerson', () => {
@@ -257,21 +256,27 @@ describe('poller: pilot list', () => {
   });
 });
 
-describe('poller: stale notifications are skipped', () => {
+describe('poller: which notifications earn a DM', () => {
   const trigger = {
     id: 't4', name: 'Risk', jql: 'x', question: '{link} was flagged.', scope: 'global',
     notify: 'user_field', notify_field_id: FIELDS.DEV_OWNER, ask_type: 'risk_review', watch_field: FIELDS.NOTIFICATION,
     poll_interval_min: 60, last_polled_at: null, fyi_field_id: null,
   };
   const today = new Date();
-  const stamp = (daysAgo) => {
+  // Legacy "Mmm DD" stamp, the format the notifier wrote before 2026-09-14
+  const legacyStamp = (daysAgo, body = 'Progress red 1%/exp 50%. Action: update progress') => {
     const d = new Date(today.getTime() - daysAgo * 24 * 3600 * 1000);
-    return `${d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' })} ${d.getUTCDate()} — Progress red 1%/exp 50%. Action: update progress`;
+    return `${d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' })} ${d.getUTCDate()} — ${body}`;
+  };
+  // Current stamp: ISO-8601 UTC, recording when the risk began
+  const isoStamp = (daysAgo, body = 'Progress red 1%/exp 50%. Action: update progress') => {
+    const d = new Date(today.getTime() - daysAgo * 24 * 3600 * 1000);
+    return `${d.toISOString().slice(0, 16)}Z — ${body}`;
   };
   const issue = (key, notif) => ({ key, fields: { summary: key, status: { name: 'On Track' }, reporter: person('r@x.com', 'R'), [FIELDS.DEV_OWNER]: [person('dev@x.com', 'Dev')], [FIELDS.NOTIFICATION]: notif, [FIELDS.TARGET]: null } });
 
-  test('only the latest run\'s notifications fire; old ones are counted, not recorded', async () => {
-    const jira = { searchIssues: jest.fn().mockResolvedValue([issue('PR-1', stamp(2)), issue('PR-2', stamp(30)), issue('PR-3', stamp(90))]) };
+  const harness = (issues) => {
+    const jira = { searchIssues: jest.fn().mockResolvedValue(issues) };
     const db = {
       getActiveJiraTriggers: jest.fn().mockResolvedValue([trigger]),
       getPromptsForTrigger: jest.fn().mockResolvedValue([]),
@@ -285,23 +290,34 @@ describe('poller: stale notifications are skipped', () => {
       conversations: { open: jest.fn().mockResolvedValue({ channel: { id: 'D' } }) },
     };
     const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
-    const poller = new JiraPoller({ jiraService: jira, db, slackClient: slack, logger });
+    return { db, poller: new JiraPoller({ jiraService: jira, db, slackClient: slack, logger }) };
+  };
+
+  test('an old ISO stamp still fires: it dates the risk, and the notifier retracts explicitly', async () => {
+    const { db, poller } = harness([issue('PR-1', isoStamp(2)), issue('PR-2', isoStamp(30)), issue('PR-3', isoStamp(90))]);
+    const [stats] = await poller.runOnce({ force: true });
+    expect(stats.sent).toBe(3);
+    expect(stats.stale).toBe(0);
+    expect(db.recordPrompt).toHaveBeenCalledTimes(3);
+  });
+
+  test('legacy "Mmm DD" stamps still age out — they predate the clearing write', async () => {
+    const { db, poller } = harness([issue('PR-1', legacyStamp(2)), issue('PR-2', legacyStamp(30)), issue('PR-3', legacyStamp(90))]);
     const [stats] = await poller.runOnce({ force: true });
     expect(stats.sent).toBe(1);
     expect(stats.stale).toBe(2);
-    expect(stats.skipped).toEqual(expect.arrayContaining([expect.stringMatching(/2 stale notification/)]));
+    expect(stats.skipped).toEqual(expect.arrayContaining([expect.stringMatching(/2 legacy notification\(s\) older than/)]));
     expect(db.recordPrompt).toHaveBeenCalledTimes(1);
     expect(db.recordPrompt).toHaveBeenCalledWith('t4', 'PR-1', 'UDEV', expect.anything());
   });
 
-  test('only notifications about "progress red" fire; other flags are counted, not recorded', async () => {
-    const fresh = (flags) => stamp(1).replace('Progress red 1%/exp 50%. Action: update progress', flags);
-    const jira = { searchIssues: jest.fn().mockResolvedValue([
-      issue('PR-1', fresh('Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress')),
-      issue('PR-2', fresh('Progress orange 64%/exp 80%. Action: update progress')),
-      issue('PR-3', fresh('Status mismatch. Action: update Status')),
-      issue('PR-4', fresh('Overdue 3d. Action: flag at risk')),
-    ]) };
+  test('the clearing write is a retraction, not an ask — even with the flag filter off', async () => {
+    const prev = process.env.RISK_NOTIFICATION_MATCH;
+    process.env.RISK_NOTIFICATION_MATCH = ''; // review every risk flag; must still not ask about a cleared one
+    jest.resetModules();
+    const Poller = require('../src/services/jiraPoller');
+    const issues = [issue('PR-1', isoStamp(1)), issue('PR-2', isoStamp(1, 'No flags')), issue('PR-3', 'Sep 1 — Not tracked')];
+    const jira = { searchIssues: jest.fn().mockResolvedValue(issues) };
     const db = {
       getActiveJiraTriggers: jest.fn().mockResolvedValue([trigger]),
       getPromptsForTrigger: jest.fn().mockResolvedValue([]),
@@ -315,7 +331,38 @@ describe('poller: stale notifications are skipped', () => {
       conversations: { open: jest.fn().mockResolvedValue({ channel: { id: 'D' } }) },
     };
     const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
-    const poller = new JiraPoller({ jiraService: jira, db, slackClient: slack, logger });
+    const [stats] = await new Poller({ jiraService: jira, db, slackClient: slack, logger }).runOnce({ force: true });
+    if (prev === undefined) delete process.env.RISK_NOTIFICATION_MATCH; else process.env.RISK_NOTIFICATION_MATCH = prev;
+    jest.resetModules();
+    expect(stats.sent).toBe(1);
+    expect(stats.cleared).toBe(2);
+    expect(stats.skipped).toEqual(expect.arrayContaining([expect.stringMatching(/2 notification\(s\) the notifier has since cleared/)]));
+    expect(db.recordPrompt).toHaveBeenCalledTimes(1);
+    expect(db.recordPrompt).toHaveBeenCalledWith('t4', 'PR-1', 'UDEV', expect.anything());
+  });
+
+  test('hygiene-only verdicts carry no risk flag and are counted, not recorded', async () => {
+    const { db, poller } = harness([
+      issue('PR-1', isoStamp(1, 'Overdue 5d; Missing: Owner. Action: flag at risk; populate fields')),
+      issue('PR-2', isoStamp(1, 'Missing: Owner, Project Start. Action: populate fields')),
+      issue('PR-3', isoStamp(1, 'Status mismatch. Action: update Status')),
+      issue('PR-4', isoStamp(1, 'Placeholder target. Action: set new target')),
+    ]);
+    const [stats] = await poller.runOnce({ force: true });
+    expect(stats.noRisk).toBe(3);
+    expect(stats.skipped).toEqual(expect.arrayContaining([expect.stringMatching(/3 notification\(s\) with no risk flag/)]));
+    expect(stats.sent).toBe(0); // PR-1 has a risk, but Overdue is not "progress red"
+    expect(stats.offTopic).toBe(1);
+    expect(db.recordPrompt).not.toHaveBeenCalled();
+  });
+
+  test('only notifications about "progress red" fire; other risk flags are counted, not recorded', async () => {
+    const { db, poller } = harness([
+      issue('PR-1', isoStamp(1, 'Overdue 5d; Progress red 12%/exp 50%. Action: flag at risk; update progress')),
+      issue('PR-2', isoStamp(1, 'Progress orange 64%/exp 80%. Action: update progress')),
+      issue('PR-3', isoStamp(1, 'Target 15d. Action: plan closure')),
+      issue('PR-4', isoStamp(1, 'Overdue 3d. Action: flag at risk')),
+    ]);
     const [stats] = await poller.runOnce({ force: true });
     expect(stats.sent).toBe(1);
     expect(stats.offTopic).toBe(3);

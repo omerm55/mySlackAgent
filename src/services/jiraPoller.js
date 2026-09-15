@@ -2,12 +2,17 @@
 
 const { sendDmQuestion } = require('../utils/dmQuestion');
 const { issueLink, issueLinkLabelled } = require('../utils/jiraLink');
-const { FIELDS: RISK_FIELDS, riskContextFor, sendFyi, notificationAge, notificationMatches } = require('../utils/riskReviewMessage');
+const {
+  FIELDS: RISK_FIELDS, riskContextFor, sendFyi, notificationAge, notificationMatches,
+  riskFlagsIn, isClearedNotification,
+} = require('../utils/riskReviewMessage');
 const { collectContextFor, ROADMAP_FIELDS } = require('../utils/collectMessage');
 const { pauseState, describePause } = require('../utils/pauseState');
 
-// Risk reviews only act on a notification from the latest weekly notifier run; older stamps are
-// leftovers the notifier never clears (env RISK_NOTIFICATION_MAX_AGE_DAYS, default 8).
+// Legacy "Mmm DD" stamps predate the notifier's 2026-09-14 contract, which never cleared the field;
+// ignore those once they are older than this (env RISK_NOTIFICATION_MAX_AGE_DAYS, default 8). Current
+// ISO-stamped verdicts are never aged out — the stamp says when the risk *began*, and the notifier
+// retracts explicitly with a clearing write.
 const RISK_MAX_AGE_DAYS = Math.max(1, parseInt(process.env.RISK_NOTIFICATION_MAX_AGE_DAYS || '8', 10) || 8);
 // …and only when the notification is about the condition we focus on (case-insensitive regex; set the
 // env var to an empty string to review every flagged Initiative).
@@ -177,7 +182,7 @@ class JiraPoller {
 
   async _evaluateTrigger(trigger) {
     const tag = `[jiraPoller/${trigger.name}]`;
-    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, fyi: 0, pilotSkipped: 0, stale: 0, offTopic: 0, dayCapped: 0, skipped: [], sentTo: [], queuedFor: [] };
+    const stats = { trigger, matched: 0, fresh: 0, sent: 0, queued: 0, fyi: 0, pilotSkipped: 0, cleared: 0, noRisk: 0, stale: 0, offTopic: 0, dayCapped: 0, skipped: [], sentTo: [], queuedFor: [] };
     const prefCache = new Map();
     // Pilot list: only these Slack users are asked / FYI'd while it is set
     const pilot = Array.isArray(trigger.pilot_slack_user_ids) && trigger.pilot_slack_user_ids.length
@@ -260,15 +265,29 @@ class JiraPoller {
         break;
       }
 
-      // Risk review: ignore notifications older than the latest weekly run (not recorded, so a
-      // fresh stamp next week asks normally)
+      // Risk review: only a live risk earns a DM. None of these skips is recorded, so an Initiative
+      // that goes back into the red next week is asked about normally.
       if (trigger.ask_type === 'risk_review') {
         const text = issue.fields?.[RISK_FIELDS.NOTIFICATION];
-        const { stale, ageDays } = notificationAge(text, new Date(), RISK_MAX_AGE_DAYS);
-        if (ageDays === null) this.logger.warn(`${tag} ${issue.key}: notification has no recognisable date stamp — treating as fresh: "${String(text).slice(0, 60)}"`);
+        // The clearing write ("… — No flags", or the retired "Not tracked"): the notifier looked and
+        // the risk is gone. Checked before RISK_MATCH, which an empty pattern would wave through.
+        if (isClearedNotification(text)) {
+          stats.cleared += 1;
+          this.logger.info(`${tag} ${issue.key}: notifier has cleared the risk — skipping: "${String(text).slice(0, 60)}"`);
+          continue;
+        }
+        // Hygiene-only verdicts (Missing: …, Status mismatch, Placeholder target) reach the field
+        // only as a passenger on a risk; alone they describe a gap in the record, not a risk.
+        if (!riskFlagsIn(text).length) {
+          stats.noRisk += 1;
+          this.logger.info(`${tag} ${issue.key}: notification carries no risk flag — skipping: "${String(text).slice(0, 80)}"`);
+          continue;
+        }
+        const { stale, ageDays, format } = notificationAge(text, new Date(), RISK_MAX_AGE_DAYS);
+        if (format === null) this.logger.warn(`${tag} ${issue.key}: notification has no recognisable date stamp — treating as fresh: "${String(text).slice(0, 60)}"`);
         if (stale) {
           stats.stale += 1;
-          this.logger.info(`${tag} ${issue.key}: notification is ${ageDays}d old (> ${RISK_MAX_AGE_DAYS}d) — skipping`);
+          this.logger.info(`${tag} ${issue.key}: legacy stamp is ${ageDays}d old (> ${RISK_MAX_AGE_DAYS}d) — skipping`);
           continue;
         }
         if (!notificationMatches(text, RISK_MATCH)) {
@@ -400,7 +419,9 @@ class JiraPoller {
     }
     stats.sent = sent;
     if (stats.pilotSkipped) stats.skipped.push(`${stats.pilotSkipped} outside the pilot list (not recorded)`);
-    if (stats.stale) stats.skipped.push(`${stats.stale} stale notification(s) older than ${RISK_MAX_AGE_DAYS} days (not recorded)`);
+    if (stats.cleared) stats.skipped.push(`${stats.cleared} notification(s) the notifier has since cleared (not recorded)`);
+    if (stats.noRisk) stats.skipped.push(`${stats.noRisk} notification(s) with no risk flag — data hygiene only (not recorded)`);
+    if (stats.stale) stats.skipped.push(`${stats.stale} legacy notification(s) older than ${RISK_MAX_AGE_DAYS} days (not recorded)`);
     if (stats.offTopic) stats.skipped.push(`${stats.offTopic} notification(s) not about "${RISK_MATCH}" (not recorded)`);
     return stats;
   }
