@@ -1529,11 +1529,49 @@ the old `DATABASE_URL`, and loses anything written after the cutover). Then dele
 its service-role key.
 
 **Network reality.** A database on a private network is only reachable from inside it. Render's
-builders and dynos are on the public internet, so a private RDS/VPC endpoint means the *application*
-must move at the same time; a provider endpoint with TLS and a firewall (Azure Flexible Server,
-Supabase) can be reached from Render as it stands. That choice belongs with the hosting decision —
-open item 1 of the security review (`SECURITY_SUMMARY.md` §5), the same boundary that keeps Render from
-reaching GitLab (§11.4).
+builders and dynos are on the public internet, so a private endpoint means the *application* must move
+at the same time. That is the same boundary that keeps Render from reaching GitLab (§11.4), and it is
+why the destination below is a single move rather than two.
+
+### 12.7a The agreed destination (Sept 2026, pending design review)
+
+Settled in the security thread with Abhishek Rath and then with David Shato (DevOps). **Nothing here is
+built yet** — Security asked for a design first, reviewed by them, with someone from R&D architecting it.
+
+| Today | Becomes | Who provides it |
+|---|---|---|
+| Supabase Postgres | A Postgres instance in Sisense AWS | DevOps |
+| Render (PaaS) | Kubernetes | DevOps, including CI/CD |
+| Azure OpenAI (GPT-5.1) | AWS Bedrock | DevOps provides access; the provider is ours to write |
+| GitHub push mirror (§11.4) | Deleted — CI/CD builds from GitLab | DevOps |
+
+The reasoning recorded by Security: the more that sits inside Sisense infrastructure and under its own
+controls, the shorter the review — monitoring and alerting already exist, and there is no added vendor
+cost. Moving the LLM to Bedrock also closes open item 2 (the Azure OpenAI data flow) by keeping
+inference in the same account.
+
+**What this costs us in code** (none of it done): a Bedrock provider in `llmService.js` (SigV4, a
+different request shape, new model ids, and re-validating prompts written for GPT-5.1 — §8); an
+advisory lock around the poller and digest ticks (§16.1); graceful SIGTERM shutdown (§16.1); and
+removing the Render-specific pieces (`keepAlive.js`, the `PORT` fallback in `callbackServer.js`).
+
+**One thing the move must not break.** The service is outbound-only *except* `GET /oauth/callback`:
+Atlassian redirects the **user's browser** there when someone connects their Jira account, from
+whatever browser they are using, including Slack on a phone off the corporate network. It is a
+once-per-user flow — after connecting, everything runs through Slack's own infrastructure and nothing
+inbound is needed — but it recurs on token-refresh failure, Disconnect, a scope change, and for every
+new person. An internal-only hostname would therefore make per-user consent unreachable for some
+people, and that consent is the control the authorization model rests on (§14 #31). The deployment
+needs **a stable public hostname with TLS routing that one path**, with no SSO or ZTNA gate in front of
+it (the redirect is an unauthenticated browser GET) and no source-IP allowlist (the request comes from
+the user's browser, not Atlassian's servers). The public surface is exactly that one GET: every other
+path returns 404 and `tests/callbackServer.test.js` pins it. The hostname must be fixed before launch —
+it is registered as the redirect URI in the Atlassian app and must match exactly (§9.3).
+
+**Open with DevOps:** which Postgres (RDS or in-cluster) and its backup/PITR story; the public ingress
+above; rollout strategy and whether anything could scale the service past one replica; how secrets are
+injected; how the pod authenticates to Bedrock and which models are enabled; whether our four CI gates
+(§11.2a) run in their pipeline; and egress for Slack's WebSocket, Jira and Bedrock.
 
 ## 13. Testing
 
@@ -1769,7 +1807,6 @@ Chronological, with rationale (see `git log` for commits):
     `SUPABASE_URL` and `SUPABASE_SECRET_KEY` were then deleted from Render and the key revoked
     (§9.4). The store is now portable: what remains for the security review's migration condition is
     choosing the destination, not changing the code.
-
 42. **The notifier's field became a risk channel, and the 8-day cutoff became wrong (§2.9).** On
     2026-09-14 the `rd-initiative-notifier` skill split its weekly work into a global STAMP pass and a
     per-domain digest, and changed three things this bot depends on. The stamp is now a full ISO-8601 UTC
@@ -1793,6 +1830,26 @@ Chronological, with rationale (see `git log` for commits):
     The DM and the FYI gained a **Flagged since** date, which is only worth showing because the stamp
     now holds still while a risk persists. Both formats are still parsed on read: the notifier rewrites
     a superseded value only when that Initiative next carries a risk, so legacy text lingers meanwhile.
+
+43. **The destination: inside Sisense AWS — provided Postgres, Kubernetes, Bedrock (§12.7a).** Two
+    conversations settled it. Security (Abhishek Rath) ruled out Azure Postgres and pointed at AWS
+    inside Sisense's own infrastructure — monitoring and alerting already exist there, there is no added
+    vendor cost, and the less that sits outside their controls the shorter the review; he asked for a
+    design reviewed by his team, architected with someone from R&D, before anything is built. DevOps
+    (David Shato) then named the pieces: they provide the Postgres instance, Kubernetes replaces Render,
+    they provide the CI/CD, and **the LLM moves from Azure OpenAI to Bedrock** — which was not in any
+    plan before that message and is a provider rewrite, not a configuration change. The shape is worth
+    stating because it collapses several open findings into one move: Supabase as an unapproved
+    processor, Render hosting with secrets in its environment (open item 1), the Azure OpenAI data flow
+    (open item 2), and the GitHub mirror, which exists only because Render cannot reach GitLab (§11.4)
+    and dies the moment CI/CD builds from GitLab. Two things we owe before it lands, both ours rather
+    than DevOps': an advisory lock around the poller and digest ticks, because Kubernetes makes the
+    latent single-instance assumption (§15) real — Slack's Socket Mode is fine with several
+    connections, but two pods on in-process timers would DM the same person the same ask twice — and
+    graceful SIGTERM shutdown, because pods are recycled routinely where a Render instance was not.
+    The one thing the move must not break is the OAuth callback: a once-per-user browser redirect that
+    nonetheless has to work from any browser, including a phone off the network, or per-user consent —
+    the control the whole authorization model rests on (#31) — becomes unreachable for some people.
 
 ---
 
@@ -1822,6 +1879,15 @@ Chronological, with rationale (see `git log` for commits):
   `jira_triggers.notification_match` column + modal input — deferred until a second trigger exists.
 - **LLM output** is validated structurally, not semantically; reasons are shown to users as-is. Every
   LLM-derived change is confirmed by the person before it is written (reply preview, collect preview).
+- **The service assumes a single running instance.** The Jira poller and the digest scheduler are
+  plain in-process timers with no lock or leader election, and the dedup cache and per-channel rate
+  limiter are in memory. Two instances would DM the same person the same ask twice — the poller
+  reads which issues were already asked, sends, and only then records (`recordPrompt`), so the
+  second write is swallowed by `on conflict do nothing` and the duplicate is invisible in the audit
+  trail. The per-trigger daily cap and the hourly channel limit would likewise be evaluated per
+  instance. Slack's Socket Mode is *not* part of this limitation — it supports several concurrent
+  connections and delivers each event once. Render runs one instance, so this is latent today; it
+  becomes real on Kubernetes (§12.7a), which is why the advisory lock is listed in §16.1.
 - **Database TLS is `require`, not verified:** traffic to Postgres is encrypted, but the server's
   certificate chain is not checked, so it defends against eavesdropping and not against an active
   man-in-the-middle. `DATABASE_CA_CERT` (§10) turns on full verification; it is deliberately unset
@@ -1837,8 +1903,20 @@ Ordered by value ÷ effort; each item is independently shippable.
 
 ### 16.1 Reliability & hosting
 - Move to a non-sleeping host (Render Starter or equivalent) and add an external uptime monitor on `/health`.
-- Graceful shutdown (drain in-flight handlers on SIGTERM — `DbService.close()` already exists for it)
-  and a startup self-check (Slack auth test, Jira `/myself`, database ping) posted to ops. The
+- **Graceful shutdown on SIGTERM** (stop the timers, drain in-flight handlers, `DbService.close()`,
+  which already exists for it). On Render a restart simply dropped in-flight work; on Kubernetes pods
+  are recycled routinely, so this stops being cosmetic (§12.7a).
+- **An advisory lock around the poller and digest ticks** — `select pg_try_advisory_lock($1)` at the
+  top of each tick, skip if another instance holds it. About ten lines, and it removes the
+  single-instance assumption in §15 entirely: replica count and rollout strategy stop mattering, and
+  an accidental scale-up or an overlapping pod during a rolling update can no longer duplicate asks.
+  Worth doing **before** the move to Kubernetes rather than after.
+- **A Bedrock provider in `llmService.js`** (§12.7a): SigV4 signing, the Converse/InvokeModel request
+  shape, model ids, pod credentials rather than an API key — plus re-validating the §8 prompts, which
+  are written for GPT-5.1. Sized as its own piece of work, not a configuration change.
+- Remove the Render-specific pieces once off Render: `keepAlive.js` (free-tier anti-sleep self-ping)
+  and the `PORT` fallback in `callbackServer.js`.
+- A startup self-check (Slack auth test, Jira `/myself`, database ping) posted to ops. The
   database line matters more since §14.41: without `DATABASE_URL` the bot boots healthy but degraded
   (in-memory tokens, static triggers, no poller), and today the only evidence is
   `Loaded N token(s) from the database` in the host's logs rather than a line in the ops channel.
