@@ -7,6 +7,20 @@
  */
 const { registerDmHandler } = require('../src/handlers/dmHandler');
 
+// The suggester derives the *Alternative* from "which release window contains today"
+// (fixVersionSuggester's `now`), and the calendar fixture below is August and September 2026. The
+// sibling unit test passes `now` explicitly; here the call sits inside dmHandler, so the clock is
+// pinned instead. Without this the Alternative silently disappeared once the real date left those
+// windows — the test passed all September and started failing on 1 October 2026.
+// Only Date is faked: withTimeout and the handler's progress updates need real timers.
+const NOW = new Date('2026-09-08T10:00:00Z'); // → current = 2026.4.0, matching fixVersionSuggester.test
+const REAL_TIMERS = ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate',
+  'clearImmediate', 'nextTick', 'queueMicrotask', 'performance', 'hrtime',
+  'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback'];
+
+beforeAll(() => jest.useFakeTimers({ now: NOW, doNotFake: REAL_TIMERS }));
+afterAll(() => jest.useRealTimers());
+
 function setup({ updateImpl } = {}) {
   const handlers = {};
   const app = {
