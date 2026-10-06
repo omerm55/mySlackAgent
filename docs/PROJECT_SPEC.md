@@ -1589,10 +1589,21 @@ built yet** — Security asked for a design first, reviewed by them, with someon
 
 | Today | Becomes | Who provides it |
 |---|---|---|
-| Supabase Postgres | A Postgres instance in Sisense AWS | DevOps |
-| Render (PaaS) | Kubernetes | DevOps, including CI/CD |
-| Azure OpenAI (GPT-5.1) | AWS Bedrock | DevOps provides access; the provider is ours to write |
+| Supabase Postgres | **RDS**, in Sisense AWS | DevOps, managed by them |
+| Render (PaaS) | **Kubernetes**, static single replica, no HPA or autoscaling | DevOps, including CI/CD |
+| Azure OpenAI (GPT-5.1) | **AWS Bedrock**. Claude is available; DevOps prefer the in-house Amazon models on cost, so the model is decided by an evaluation against the §8 prompts | DevOps provide access; the provider is ours to write |
 | GitHub push mirror (§11.4) | Deleted — CI/CD builds from GitLab | DevOps |
+
+Confirmed with DevOps (David Shato) on 6 Oct 2026: RDS managed by them; a static single replica per
+component with no autoscaling, which makes the §15 duplicate-ask risk a deploy-overlap question rather
+than a scaling one; Claude available on Bedrock with the in-house models preferred on cost; and **a
+token budget is required** — a cap on how much the LLM may consume, which is new work (§16.1). The
+design still goes through Security before anything is built. The open item is the public endpoint:
+DevOps want to understand why it is needed and whether it can be avoided, which §12.7a answers below
+and the design document states in full.
+
+The design document shared with Security lives at
+`https://claude.ai/code/artifact/3486ba46-3da3-4f81-be5a-ce2d742c49f4`.
 
 The reasoning recorded by Security: the more that sits inside Sisense infrastructure and under its own
 controls, the shorter the review — monitoring and alerting already exist, and there is no added vendor
@@ -1983,6 +1994,10 @@ Ordered by value ÷ effort; each item is independently shippable.
 - **A Bedrock provider in `llmService.js`** (§12.7a): SigV4 signing, the Converse/InvokeModel request
   shape, model ids, pod credentials rather than an API key — plus re-validating the §8 prompts, which
   are written for GPT-5.1. Sized as its own piece of work, not a configuration change.
+- **Token accounting and a cap**, which DevOps asked for as a condition of Bedrock access. Per-call
+  usage recorded, a ceiling enforced, and the ceiling reported to ops when it bites — the same shape as
+  the per-trigger volume caps in §5.3. Current pilot volume is on the order of 3M tokens a month, which
+  is what the first ceiling should be set against.
 - Remove the Render-specific pieces once off Render: `keepAlive.js` (free-tier anti-sleep self-ping)
   and the `PORT` fallback in `callbackServer.js`.
 - A startup self-check (Slack auth test, Jira `/myself`, database ping) posted to ops. The
