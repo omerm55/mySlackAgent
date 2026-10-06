@@ -9,7 +9,7 @@
 > truth: `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (moved from GitHub, §11.4). Trunk:
 > `main`. Render deploys `main` through the GitHub push mirror — Render cannot reach the internal
 > GitLab (§11.4).
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (301 tests, 30 suites; 13
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (305 tests, 31 suites; 13
 > of them need a Postgres and skip without one — §13).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
@@ -367,12 +367,13 @@ src/
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6); applied by scripts/apply-schema.js
-tests/                         Jest (301 tests, 30 suites; the database suite needs TEST_DATABASE_URL)
+tests/                         Jest (305 tests, 31 suites; the database suite needs TEST_DATABASE_URL)
 config/*.example.json          Local-dev config templates (legacy path)
 .github/workflows/ci.yml       CI on GitHub: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
 .gitlab-ci.yml                 The same four gates on GitLab (for the move to gitlab.rnd.sisense.com)
 scripts/scan-secrets.sh        Secret scan over tracked files (Slack / Atlassian / Supabase / OpenAI / keys)
 scripts/apply-schema.js        Applies supabase/*.sql to any Postgres in dependency order (§12.7)
+scripts/backfill-reply-markers.js  Applies reply markers to threads answered before they were configured (§12.2c)
 render.yaml  Dockerfile  docker-compose.yml  ecosystem.config.js  .env.example
 ```
 
@@ -1369,8 +1370,21 @@ One-off setup, in this order:
    ```
 
 The phrases match the scheduled review's replies (":robot_face: Auto-verified: …",
-":triangular_flag_on_post: Needs a decision: …"); if its wording changes, change the markers. Nothing
-is back-filled: posts answered before the markers were saved stay unmarked.
+:triangular_flag_on_post: Needs a decision: …"); if its wording changes, change the markers.
+
+Posts answered before the markers were saved are marked by a one-off backfill, run **with the bot
+token** (a person's 👍 would be read as an approval and write PM Reviewed). Dry run first; `--since`
+filters on the *root post's* date, and the review also answered posts from before it started:
+
+```
+SLACK_BOT_TOKEN=xoxb-… node scripts/backfill-reply-markers.js --channel C0AMJMZHTE2 --since 2026-06-01 \
+  --marker 'Auto-verified => :thumbsup:' --marker 'Needs a decision => :question:'          # dry run
+… the same … --apply
+```
+
+It applies the live rules (keyed root posts, every matching reply except the bot's own, one reaction
+per emoji, already-marked posts skipped) but not scope or allowlist, and prints a per-post line and a
+summary, including posts that get both marks (flagged, then auto-verified on a later run).
 
 ### 12.3 SQL snippets used
 
@@ -1624,7 +1638,7 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 301 tests in 30 suites:
+`npm test` → Jest, `tests/*.test.js`, 305 tests in 31 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1642,6 +1656,7 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 | `dmReplyPreview` | Modal submit previews and writes nothing (ops "proposed", not "decision"); Confirm applies transition + comment + assignee and reports to ops; Cancel restores the Yes/No/Reply ask; Edit reply reopens the modal prefilled; `no_action` finalises without buttons; LLM failure keeps the ask actionable; the preview button value stays under Slack's 2000-char cap; `describeDecision` renders each change kind |
 | `dmRequireOauth` | Attribution: a bot-account write from a DM ask comments naming the person and the change (Yes, risk status, collect save), a write as the user does not, and a failing comment never breaks the write; Yes without token/fallback → nothing written, ask restored with its buttons + Connect, prompt kept, ops told; with fallback → bot writes + nudge; with token → user writes; a second nudge does not stack; Reply / Update Notes / Answer without token → modal not opened; Notes modal submitted without token → ask rebuilt from ctx; risk status with fallback / token; No and Handled still work; all three ctx builders carry `allowFallback` |
 | `replyMarkers` | Marker parsing (`=>` / `→`, colons optional, blank lines), bad line / non-emoji → error, empty = none, format round-trip, case-insensitive first match; handler: "Auto-verified" → 👍 and "Needs a decision" → ❓ on the root with no Jira write and no thread message, works on a reaction-only trigger and for another app's reply, an ordinary reply still sets the field, the bot's own replies ignored, `already_reacted` quiet, `missing_scope` → ops naming `reactions:write`, personal scope respected |
+| `backfillReplyMarkers` | Dry run lists would-mark / already-marked and reacts to nothing; `--apply` reacts on keyed root posts only, never for the bot's own replies; a Slack refusal is reported per post; argument parsing |
 | `triggerModalSave` | Trigger modals save before ack: channel-trigger reply markers saved as a list and named in the ops line, a bad marker line → inline error and nothing saved; DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; a new trigger with no scope choice defaults to `personal`; save-time run posts the Run-now summary with queued matches called out; Jira identity checkbox → `allow_bot_fallback` on both trigger kinds (default false; ops line says OAuth required / bot may act) |
 | `pauseSwitch` | `pauseState`: DB flag, `BOT_PAUSED` override, DB failure reads as running, 30 s cache + `invalidate`, `setPaused` records who, `describePause` wording; poller evaluates nothing and warns ops once; DM paths (Yes, risk status, collect Save, Reply modal) write nothing and keep the ask and prompt; reaction answers in-thread; Home banner and admin-only Pause / Resume, both audited; not paused → the same click goes through |
 | `auditEvents` | Every notifier method writes a row mirroring the ops line (kind, user, issue, identity, structured detail); failures recorded with `ok:false` and the error; bot-account identity captured; proposed vs applied LLM decisions are distinct kinds; a plain `post` is kind `ops`; a failing sink never breaks the message; rows are written even with no ops channel; insert truncates long text; the query filters by issue / user / kind / time |
@@ -1939,8 +1954,8 @@ Chronological, with rationale (see `git log` for commits):
   again on the next notifier run if the field is rewritten (by design — new run, new ask).
 - **Digest slots are fixed** (09:00 / 15:00); no per-user time choice yet.
 - **Reply markers are one-way and phrase-based.** A ❓ stays after a PM settles the bug with 👍 (the
-  bot does not swap it), nothing is back-filled for replies posted before the markers were configured,
-  and a person who quotes "Auto-verified" in a reply marks the post too.
+  bot does not swap it), replies posted before the markers were configured need the manual backfill
+  (§12.2c), and a person who quotes "Auto-verified" in a reply marks the post too.
 - **Collect asks write plain-text fields only** (values sent as strings in one PUT). Selects, users
   and dates need per-field type handling; no marker field / expiry yet (§16.10).
 - **The risk-review flag filter is global** (`RISK_NOTIFICATION_MATCH` applies to every `risk_review`
