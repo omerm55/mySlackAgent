@@ -7,7 +7,8 @@
 -- environment can be provisioned from the repository (§12.7); it is the same DDL as §6.2.
 --
 -- `allow_bot_fallback` is also added by require_oauth.sql (`add column if not exists`), which is
--- idempotent — the column is defined here because the live table has it.
+-- idempotent — the column is defined here because the live table has it. The same holds for
+-- `reply_markers` and reply_markers.sql.
 
 create table if not exists public.integrations (
   id                 uuid not null default gen_random_uuid(),
@@ -22,6 +23,7 @@ create table if not exists public.integrations (
   jira_field_type    text null default 'select',
   triggers           text[] not null,                   -- {'reaction','reply'}
   allow_bot_fallback boolean not null default false,    -- admin exception: bot account may act for unconnected users
+  reply_markers      jsonb not null default '[]'::jsonb, -- [{match, emoji}]: reply phrase → bot reacts on the root, no Jira write
   active             boolean null default true,
   created_at         timestamptz null default now(),
   constraint integrations_pkey primary key (id)

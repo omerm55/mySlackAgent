@@ -168,6 +168,27 @@ describe('Channel trigger modal save', () => {
     expect(ops.post).toHaveBeenLastCalledWith(expect.stringMatching(/bot account may act/));
   });
 
+  test('channel trigger: reply markers saved as a list and named to ops; a bad line keeps the modal open', async () => {
+    const { app, handlers } = fakeApp();
+    const db = { upsertIntegration: jest.fn().mockResolvedValue({}) };
+    const ops = { channelId: 'COPS', post: jest.fn().mockResolvedValue(undefined) };
+    registerTriggerHandler(app, { db, opsNotifier: ops, integrationCache: { getAll: jest.fn().mockResolvedValue([]), invalidate: jest.fn() } });
+    const client = { views: { publish: jest.fn().mockResolvedValue({}) }, conversations: { join: jest.fn().mockResolvedValue({}) }, chat: { postMessage: jest.fn().mockResolvedValue({}) } };
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    const markers = 'Auto-verified => :thumbsup:\nNeeds a decision => :question:';
+    await handlers.create_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: { ...values, markers_block: { value: txt(markers) } } } }, client, logger });
+    expect(db.upsertIntegration).toHaveBeenCalledWith(expect.objectContaining({
+      reply_markers: [{ match: 'Auto-verified', emoji: 'thumbsup' }, { match: 'Needs a decision', emoji: 'question' }],
+    }));
+    expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/"Auto-verified" → :thumbsup:, "Needs a decision" → :question: only mark the post/));
+
+    const ack = jest.fn();
+    db.upsertIntegration.mockClear();
+    await handlers.create_trigger_modal({ ack, body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: { ...values, markers_block: { value: txt('Auto-verified thumbsup') } } } }, client, logger });
+    expect(ack).toHaveBeenCalledWith({ response_action: 'errors', errors: { markers_block: expect.stringMatching(/text => :emoji:/) } });
+    expect(db.upsertIntegration).not.toHaveBeenCalled();
+  });
+
   test('DB rejects → modal stays open with the reason', async () => {
     const { app, handlers } = fakeApp();
     const db = { upsertIntegration: jest.fn().mockRejectedValue(new Error('boom')) };

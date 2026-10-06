@@ -3,20 +3,56 @@
 const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 const { issueLink } = require('../utils/jiraLink');
 const { pauseState, describePause } = require('../utils/pauseState');
+const { findReplyMarker } = require('../utils/replyMarkers');
 
 function registerReplyHandler(app, jiraService, attributionService, services) {
   const { dedupCache, rateLimiter, auditLog, userCache, integrationCache } = services;
 
-  app.message(async ({ message, client, logger }) => {
+  /** React on the root message for each matched marker; scope and allowlist apply as for writes. */
+  async function applyMarkers(marking, message, issueKeys, client, logger) {
+    const added = new Set();
+    for (const { integration, marker } of marking) {
+      const { name, scope, createdBy, allowedSlackUserIds } = integration;
+      const tag = `[${name}/marker]`;
+      if (scope === 'personal' && message.user !== createdBy) continue;
+      if (allowedSlackUserIds.length > 0 && !allowedSlackUserIds.includes(message.user)) continue;
+      if (added.has(marker.emoji)) continue;
+      if (dedupCache.isDuplicate(`marker:${name}:${message.channel}:${message.thread_ts}:${message.ts}`)) continue;
+      added.add(marker.emoji);
+      try {
+        await client.reactions.add({ channel: message.channel, timestamp: message.thread_ts, name: marker.emoji });
+        logger.info(`${tag} "${marker.match}" reply on ${issueKeys.join(', ')} → :${marker.emoji}: on the root message`);
+      } catch (err) {
+        const code = err.data?.error || err.message;
+        if (code === 'already_reacted') continue;
+        logger.error(`${tag} Could not add :${marker.emoji}: in ${message.channel}: ${code}`);
+        await services.opsNotifier?.post?.(
+          `⚠️ *${name}*: a "${marker.match}" reply on ${issueKeys.map(issueLink).join(', ')} should have marked the post :${marker.emoji}:, but Slack refused: \`${code}\`${code === 'missing_scope' ? ' — the app needs the `reactions:write` scope (reinstall it).' : '.'}`,
+          { kind: 'reply_marker_failed', user: message.user },
+        );
+      }
+    }
+  }
+
+  app.message(async ({ message, client, logger, context }) => {
     try {
       if (!message.thread_ts || message.thread_ts === message.ts) return;
-      if (message.bot_id) return;
+      const own = (context?.botUserId && message.user === context.botUserId)
+        || (context?.botId && message.bot_id === context.botId);
+      if (own) return;
 
       const all = await integrationCache.getAll();
-      const matching = all.filter(
-        (i) => i.triggers.includes('reply') && i.slackChannelId === message.channel,
+      const inChannel = all.filter((i) => i.slackChannelId === message.channel);
+      // A reply matching a trigger's marker only marks the root message; it never writes the field.
+      const marking = inChannel
+        .map((integration) => ({ integration, marker: findReplyMarker(integration.replyMarkers, message.text) }))
+        .filter((m) => m.marker);
+      const marked = new Set(marking.map((m) => m.integration));
+      // Field writes stay human-only; markers also follow other apps' replies (e.g. a scheduled review).
+      const matching = message.bot_id ? [] : inChannel.filter(
+        (i) => i.triggers.includes('reply') && !marked.has(i),
       );
-      if (matching.length === 0) return;
+      if (matching.length === 0 && marking.length === 0) return;
 
       const result = await client.conversations.replies({
         channel: message.channel,
@@ -30,14 +66,19 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
       const issueKeys = extractJiraIssueKeys(rootMessage.text);
       if (issueKeys.length === 0) return;
 
-      // Global pause: say so once in the thread, write nothing.
+      // Global pause: say so once in the thread, write nothing. A marker-only reply has nobody to tell.
       const pause = await pauseState(services.db);
       if (pause.paused) {
         logger.info('[reply] Paused — no Jira update');
-        await client.chat.postMessage({ channel: message.channel, thread_ts: message.thread_ts, text: `⏸ <@${message.user}> — I'm paused by an admin, so I haven't changed anything. Reply again once I'm back.` }).catch(() => {});
+        if (matching.length > 0) {
+          await client.chat.postMessage({ channel: message.channel, thread_ts: message.thread_ts, text: `⏸ <@${message.user}> — I'm paused by an admin, so I haven't changed anything. Reply again once I'm back.` }).catch(() => {});
+        }
         await services.opsNotifier?.post?.(`⏸ <@${message.user}> replied while paused — nothing written. ${describePause(pause)}`, { kind: 'paused_refusal', user: message.user });
         return;
       }
+
+      await applyMarkers(marking, message, issueKeys, client, logger);
+      if (matching.length === 0) return;
 
       const actorName = await userCache.getName(client, message.user);
 

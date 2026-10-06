@@ -270,6 +270,23 @@ describe('reactionHandler', () => {
     expect(jira.updateIssueField).not.toHaveBeenCalled();
   });
 
+  test("ignores the bot's own 👍 (a reply marker), even without Bolt's ignoreSelf", async () => {
+    const app = makeApp();
+    const jira = makeJira();
+    const client = makeClient(REAL_MESSAGE);
+    register(app, jira, config, makeServices());
+
+    await app._trigger('reaction_added', {
+      event: { reaction: 'thumbsup', user: 'UBOT', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
+      client,
+      logger,
+      context: { botUserId: 'UBOT' },
+    });
+
+    expect(client.conversations.history).not.toHaveBeenCalled();
+    expect(jira.updateIssueField).not.toHaveBeenCalled();
+  });
+
   test('does nothing if the message has no Jira key', async () => {
     const app = makeApp();
     const jira = makeJira();

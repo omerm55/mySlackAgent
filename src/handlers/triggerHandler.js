@@ -3,6 +3,7 @@
 const { isAdmin, canManage } = require('../utils/admins');
 const { publishHome } = require('./homeHandler');
 const { parseCollectFields, formatCollectFields, describeCollectFields } = require('../utils/collectMessage');
+const { parseReplyMarkers, formatReplyMarkers } = require('../utils/replyMarkers');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Block Kit helpers
@@ -126,6 +127,10 @@ function buildChannelTriggerModal(admin, existing = null) {
     }),
     input('field_name_block', 'Field display name (optional)', textInput('e.g. PM Reviewed', { initial: existing?.jiraFieldName }), { optional: true }),
     input('field_value_block', 'Value to set', textInput('e.g. Yes', { initial: existing?.jiraFieldValue })),
+    input('markers_block', 'Reply markers (optional)', textInput('Auto-verified => :thumbsup:\nNeeds a decision => :question:', { multiline: true, initial: formatReplyMarkers(existing?.replyMarkers) }), {
+      optional: true,
+      hint: plain('One per line. A thread reply containing the text makes me react with the emoji on the original post — and write nothing to Jira. Works with or without 💬 Thread reply.'),
+    }),
   ];
   if (admin) {
     blocks.push(input('scope_block', 'Who does this trigger apply to?', radios(
@@ -209,8 +214,10 @@ function registerTriggerHandler(app, services) {
     const jiraFieldId = v.field_id_block.value.value?.trim();
     const jiraFieldName = v.field_name_block.value.value?.trim() || jiraFieldId;
     const jiraFieldValue = v.field_value_block.value.value?.trim();
+    const markersParsed = parseReplyMarkers(v.markers_block?.value?.value);
 
     const errors = {};
+    if (markersParsed.error) errors.markers_block = markersParsed.error.slice(0, 250);
     if (!channelId) errors.channel_block = 'Pick a channel or paste a channel ID below.';
     if (manualChannelId && !/^[CG][A-Z0-9]{8,}$/.test(manualChannelId)) {
       errors.channel_id_block = 'That does not look like a Slack channel ID (should start with C or G).';
@@ -244,6 +251,7 @@ function registerTriggerHandler(app, services) {
       jira_field_name: jiraFieldName,
       jira_field_value: jiraFieldValue,
       jira_field_type: 'select',
+      reply_markers: markersParsed.markers,
       scope,
     };
 
@@ -284,8 +292,11 @@ function registerTriggerHandler(app, services) {
       await publishHome(client, userId, services, logger);
 
       const when = triggers.map((t) => (t === 'reaction' ? '👍 reactions' : '💬 thread replies')).join(' and ');
+      const marks = markersParsed.markers.length
+        ? ` Replies containing ${markersParsed.markers.map((m) => `"${m.match}" → :${m.emoji}:`).join(', ')} only mark the post.`
+        : '';
       const identity = allowBotFallback ? ' 🤖 The bot account may act for people who haven\'t connected Jira.' : ' 🔐 OAuth required: people who haven\'t connected are asked to connect first.';
-      await notifyOps(services, client, userId, `✅ Trigger *${name}* ${editId ? 'updated' : 'created'}! It fires on ${when} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${identity}${joinNote}`);
+      await notifyOps(services, client, userId, `✅ Trigger *${name}* ${editId ? 'updated' : 'created'}! It fires on ${when} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${marks}${identity}${joinNote}`);
     } catch (err) {
       // Saved fine; only the follow-ups (join / Home refresh / ops) hiccuped
       logger.warn(`[trigger] Post-save step failed for "${name}": ${errDetail(err)}`);

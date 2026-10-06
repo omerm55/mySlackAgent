@@ -10,9 +10,11 @@ const isThumbsUp = (r) => THUMBS_UP_EMOJIS.has(r) || THUMBS_UP_EMOJIS.has(r.spli
 function registerReactionHandler(app, jiraService, attributionService, services) {
   const { dedupCache, rateLimiter, auditLog, userCache, integrationCache } = services;
 
-  app.event('reaction_added', async ({ event, client, logger }) => {
+  app.event('reaction_added', async ({ event, client, logger, context }) => {
     try {
       if (!isThumbsUp(event.reaction)) return;
+      // The bot's own 👍 (a reply marker) is a mark, not an approval.
+      if (context?.botUserId && event.user === context.botUserId) return;
       if (event.item.type !== 'message') return;
 
       const all = await integrationCache.getAll();

@@ -19,7 +19,19 @@ function normalizeRow(row) {
     scope: row.scope || 'global',
     createdBy: row.created_by,
     allowBotFallback: row.allow_bot_fallback === true,
+    replyMarkers: parseJsonArray(row.reply_markers),
   };
+}
+
+function parseJsonArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string' || !value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 /**

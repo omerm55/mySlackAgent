@@ -21,6 +21,7 @@ const { TokenCrypto } = require('../utils/tokenCrypto');
  * passed through as JS arrays.
  */
 const JSONB_COLUMNS = {
+  integrations: new Set(['reply_markers']),
   jira_triggers: new Set(['collect_fields']),
   jira_prompts: new Set(['payload']),
   audit_events: new Set(['detail']),
