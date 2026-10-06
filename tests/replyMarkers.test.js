@@ -129,3 +129,99 @@ describe('replyHandler with reply markers', () => {
     expect(client.reactions.add).not.toHaveBeenCalled();
   });
 });
+
+describe('settled posts: an approval marker means a person\'s 👍 or reply writes nothing', () => {
+  const { registerReactionHandler } = require('../src/handlers/reactionHandler');
+  const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+  const trigger = {
+    name: 'PM Reviewed', slackChannelId: 'C_WATCH', triggers: ['reaction', 'reply'], scope: 'global',
+    createdBy: 'UOMER', allowedSlackUserIds: [], rateLimitPerHour: 20,
+    jiraFieldId: 'customfield_1', jiraFieldName: 'PM Reviewed', jiraFieldValue: 'Yes', jiraFieldType: 'select',
+    replyMarkers: MARKERS,
+  };
+
+  function services(overrides = {}) {
+    return {
+      dedupCache: new DedupCache(),
+      rateLimiter: new RateLimiter(),
+      auditLog: { addEntry: jest.fn() },
+      userCache: { getName: jest.fn().mockResolvedValue('PM') },
+      opsNotifier: { post: jest.fn(), jiraTriggered: jest.fn(), reactionFiltered: jest.fn() },
+      integrationCache: { getAll: async () => [{ ...trigger, ...overrides }] },
+    };
+  }
+
+  function react(root, thread = [], overrides = {}) {
+    const handlers = {};
+    const app = { event: (name, fn) => { handlers[name] = fn; } };
+    const jira = { updateIssueField: jest.fn().mockResolvedValue({}) };
+    const svc = services(overrides);
+    registerReactionHandler(app, jira, { postAttributionComment: jest.fn() }, svc);
+    const client = {
+      conversations: {
+        history: jest.fn().mockResolvedValue({ messages: [{ ts: '111.000', text: ROOT, ...root }] }),
+        replies: jest.fn().mockResolvedValue({ messages: [{ ts: '111.000', text: ROOT }, ...thread] }),
+      },
+      chat: { postMessage: jest.fn().mockResolvedValue({}) },
+    };
+    const run = handlers.reaction_added({
+      event: { reaction: '+1', user: 'UPM', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
+      client, logger, context: { botUserId: 'UBOT', botId: 'BBOT' },
+    });
+    return run.then(() => ({ jira, client, ops: svc.opsNotifier }));
+  }
+
+  test('👍 on a post the bot already marked 👍 → nothing written, no thread message, no thread fetch', async () => {
+    const { jira, client, ops } = await react({ reply_count: 1, reactions: [{ name: 'thumbsup', users: ['UBOT'], count: 1 }] });
+    expect(jira.updateIssueField).not.toHaveBeenCalled();
+    expect(client.chat.postMessage).not.toHaveBeenCalled();
+    expect(client.conversations.replies).not.toHaveBeenCalled();
+    expect(ops.reactionFiltered).toHaveBeenCalledWith(expect.objectContaining({ reason: expect.stringMatching(/already "Auto-verified"/) }));
+  });
+
+  test('👍 on an auto-verified post the bot has not marked yet → nothing written', async () => {
+    const { jira, client } = await react({ reply_count: 1 }, [{ ts: '222.000', user: 'UOMER', text: VERIFIED }]);
+    expect(jira.updateIssueField).not.toHaveBeenCalled();
+    expect(client.chat.postMessage).not.toHaveBeenCalled();
+  });
+
+  test('👍 on a "Needs a decision" post is the decision → the field is set', async () => {
+    const { jira } = await react({ reply_count: 1, reactions: [{ name: 'question', users: ['UBOT'], count: 1 }] }, [{ ts: '222.000', user: 'UOMER', text: UNSAFE }]);
+    expect(jira.updateIssueField).toHaveBeenCalledWith('SNS-134117', 'customfield_1', 'Yes', 'select');
+  });
+
+  test('a person\'s own 👍 or the bot echoing the phrase does not settle a post', async () => {
+    const { jira } = await react(
+      { reply_count: 1, reactions: [{ name: '+1', users: ['USOMEONE'], count: 1 }] },
+      [{ ts: '222.000', user: 'UBOT', bot_id: 'BBOT', text: 'Auto-verified echo' }],
+    );
+    expect(jira.updateIssueField).toHaveBeenCalled();
+  });
+
+  test('a trigger without an approval marker behaves as before', async () => {
+    const { jira, client } = await react({ reply_count: 1 }, [{ ts: '222.000', user: 'UOMER', text: VERIFIED }], { replyMarkers: [{ match: 'Needs a decision', emoji: 'question' }] });
+    expect(jira.updateIssueField).toHaveBeenCalled();
+    expect(client.conversations.replies).not.toHaveBeenCalled();
+  });
+
+  test('a reply on an auto-verified thread ("I disagree…") writes nothing', async () => {
+    const handlers = {};
+    const app = { message: (fn) => { handlers.message = fn; } };
+    const jira = { updateIssueField: jest.fn().mockResolvedValue({}) };
+    const svc = services();
+    registerReplyHandler(app, jira, { postAttributionComment: jest.fn() }, svc);
+    const thread = [{ ts: '111.000', text: ROOT, reply_count: 2 }, { ts: '222.000', user: 'UOMER', text: VERIFIED }, { ts: '333.000', user: 'UPM', text: 'I disagree, this needs a note' }];
+    const client = {
+      conversations: { replies: jest.fn().mockResolvedValue({ messages: thread }) },
+      chat: { postMessage: jest.fn().mockResolvedValue({}) },
+      reactions: { add: jest.fn() },
+    };
+    await handlers.message({
+      message: { channel: 'C_WATCH', ts: '333.000', thread_ts: '111.000', user: 'UPM', text: 'I disagree, this needs a note' },
+      client, logger, context: { botUserId: 'UBOT', botId: 'BBOT' },
+    });
+    expect(jira.updateIssueField).not.toHaveBeenCalled();
+    expect(client.chat.postMessage).not.toHaveBeenCalled();
+    expect(svc.opsNotifier.reactionFiltered).toHaveBeenCalledWith(expect.objectContaining({ reason: expect.stringMatching(/already "Auto-verified"/) }));
+  });
+});

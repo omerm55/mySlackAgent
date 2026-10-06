@@ -3,7 +3,7 @@
 const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 const { issueLink } = require('../utils/jiraLink');
 const { pauseState, describePause } = require('../utils/pauseState');
-const { findReplyMarker } = require('../utils/replyMarkers');
+const { findReplyMarker, threadReader, findSettlingMarker } = require('../utils/replyMarkers');
 
 function registerReplyHandler(app, jiraService, attributionService, services) {
   const { dedupCache, rateLimiter, auditLog, userCache, integrationCache } = services;
@@ -49,7 +49,7 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
         .filter((m) => m.marker);
       const marked = new Set(marking.map((m) => m.integration));
       // Field writes stay human-only; markers also follow other apps' replies (e.g. a scheduled review).
-      const matching = message.bot_id ? [] : inChannel.filter(
+      let matching = message.bot_id ? [] : inChannel.filter(
         (i) => i.triggers.includes('reply') && !marked.has(i),
       );
       if (matching.length === 0 && marking.length === 0) return;
@@ -65,6 +65,20 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
 
       const issueKeys = extractJiraIssueKeys(rootMessage.text);
       if (issueKeys.length === 0) return;
+
+      // Already approved (e.g. auto-verified): a reply there — agreement or disagreement — writes nothing.
+      if (matching.length > 0) {
+        const readThread = threadReader(client, message.channel, message.thread_ts);
+        const unsettled = [];
+        for (const i of matching) {
+          const settled = await findSettlingMarker({ root: rootMessage, markers: i.replyMarkers, botUserId: context?.botUserId, botId: context?.botId, readThread });
+          if (!settled) { unsettled.push(i); continue; }
+          logger.info(`[${i.name}/reply] ${issueKeys.join(', ')} already settled ("${settled.match}") — nothing written`);
+          await services.opsNotifier?.reactionFiltered({ slackUserId: message.user, reason: `reply on ${issueKeys.join(', ')}, which is already "${settled.match}" — nothing written`, integration: i.name });
+        }
+        matching = unsettled;
+        if (matching.length === 0 && marking.length === 0) return;
+      }
 
       // Global pause: say so once in the thread, write nothing. A marker-only reply has nobody to tell.
       const pause = await pauseState(services.db);

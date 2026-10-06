@@ -8,9 +8,15 @@
  * already set the field) or ":triangular_flag_on_post: Needs a decision …" (the field must stay unset),
  * and the channel should show at a glance which posts are done (👍) and which wait on a person (❓).
  *
+ * A marker whose emoji is itself an approval (👍 / ✅) *settles* the post: it is already approved, so a
+ * person's 👍 or reply there writes nothing — see findSettlingMarker.
+ *
  * Trigger config: integrations.reply_markers jsonb = [{ match, emoji }].
  * In the trigger modal it is typed one marker per line: `Auto-verified => :thumbsup:`.
  */
+
+const APPROVAL_REACTIONS = new Set(['+1', 'thumbsup', 'thumbs_up', 'white_check_mark']);
+const isApprovalReaction = (name) => APPROVAL_REACTIONS.has(name) || APPROVAL_REACTIONS.has(String(name).split('::')[0]);
 
 const SEPARATOR = /\s*(?:=>|→)\s*/;
 const EMOJI = /^[a-z0-9_+'-]+(?:::skin-tone-[2-6])?$/;
@@ -47,4 +53,48 @@ function findReplyMarker(markers, text) {
   return (markers || []).find((m) => haystack.includes(m.match.toLowerCase())) || null;
 }
 
-module.exports = { parseReplyMarkers, formatReplyMarkers, findReplyMarker };
+/** Memoised reader for a thread's messages (root included), so several triggers share one fetch. */
+function threadReader(client, channel, ts) {
+  let pending = null;
+  return () => {
+    pending = pending || (async () => {
+      const out = [];
+      let cursor;
+      do {
+        const res = await client.conversations.replies({ channel, ts, cursor, limit: 200 });
+        out.push(...(res.messages || []));
+        cursor = res.response_metadata?.next_cursor;
+      } while (cursor);
+      return out;
+    })();
+    return pending;
+  };
+}
+
+/**
+ * The approval marker that already settles this post, or null: the bot reacted on the root with an
+ * approval marker's emoji, or a reply in the thread (not the bot's own) matches one. Fetches the thread
+ * only when the trigger has an approval marker and the root carries no bot approval.
+ * @param {{ root: object, markers: Array, botUserId?: string, botId?: string, readThread: () => Promise<object[]> }} args
+ */
+async function findSettlingMarker({ root, markers, botUserId, botId, readThread }) {
+  const approvals = (markers || []).filter((m) => isApprovalReaction(m.emoji));
+  if (!approvals.length || !root) return null;
+  if (botUserId) {
+    const mine = (root.reactions || []).filter((r) => isApprovalReaction(r.name) && (r.users || []).includes(botUserId));
+    const byEmoji = mine.map((r) => approvals.find((m) => m.emoji === r.name.split('::')[0])).find(Boolean);
+    if (byEmoji) return byEmoji;
+  }
+  if (!root.reply_count) return null;
+  const replies = (await readThread()).filter((r) => r.ts !== root.ts
+    && !(botUserId && r.user === botUserId) && !(botId && r.bot_id === botId));
+  for (const reply of replies) {
+    const marker = findReplyMarker(approvals, reply.text);
+    if (marker) return marker;
+  }
+  return null;
+}
+
+module.exports = {
+  parseReplyMarkers, formatReplyMarkers, findReplyMarker, isApprovalReaction, threadReader, findSettlingMarker,
+};

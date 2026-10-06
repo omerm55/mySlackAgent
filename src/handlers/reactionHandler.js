@@ -3,9 +3,7 @@
 const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 const { issueLink } = require('../utils/jiraLink');
 const { pauseState, describePause } = require('../utils/pauseState');
-
-const THUMBS_UP_EMOJIS = new Set(['+1', 'thumbsup', 'thumbs_up', 'white_check_mark']);
-const isThumbsUp = (r) => THUMBS_UP_EMOJIS.has(r) || THUMBS_UP_EMOJIS.has(r.split('::')[0]);
+const { isApprovalReaction: isThumbsUp, threadReader, findSettlingMarker } = require('../utils/replyMarkers');
 
 function registerReactionHandler(app, jiraService, attributionService, services) {
   const { dedupCache, rateLimiter, auditLog, userCache, integrationCache } = services;
@@ -18,7 +16,7 @@ function registerReactionHandler(app, jiraService, attributionService, services)
       if (event.item.type !== 'message') return;
 
       const all = await integrationCache.getAll();
-      const matching = all.filter(
+      let matching = all.filter(
         (i) => i.triggers.includes('reaction') && i.slackChannelId === event.item.channel,
       );
       if (matching.length === 0) {
@@ -45,6 +43,18 @@ function registerReactionHandler(app, jiraService, attributionService, services)
         }
         return;
       }
+
+      // Already approved (e.g. auto-verified): the 👍 adds nothing — no write, no thread message.
+      const readThread = threadReader(client, event.item.channel, message.ts);
+      const unsettled = [];
+      for (const i of matching) {
+        const settled = await findSettlingMarker({ root: message, markers: i.replyMarkers, botUserId: context?.botUserId, botId: context?.botId, readThread });
+        if (!settled) { unsettled.push(i); continue; }
+        logger.info(`[${i.name}/reaction] ${issueKeys.join(', ')} already settled ("${settled.match}") — nothing written`);
+        await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: `${issueKeys.join(', ')} is already "${settled.match}" — nothing written`, integration: i.name });
+      }
+      matching = unsettled;
+      if (matching.length === 0) return;
 
       // Global pause: say so once in the thread, write nothing.
       const pause = await pauseState(services.db);
