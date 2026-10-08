@@ -8,7 +8,7 @@
 --
 -- `allow_bot_fallback` is also added by require_oauth.sql (`add column if not exists`), which is
 -- idempotent — the column is defined here because the live table has it. The same holds for
--- `reply_markers` and reply_markers.sql.
+-- `reply_markers` and reply_markers.sql, and for `decision` and thread_decision.sql.
 
 create table if not exists public.integrations (
   id                 uuid not null default gen_random_uuid(),
@@ -24,6 +24,7 @@ create table if not exists public.integrations (
   triggers           text[] not null,                   -- {'reaction','reply'}
   allow_bot_fallback boolean not null default false,    -- admin exception: bot account may act for unconnected users
   reply_markers      jsonb not null default '[]'::jsonb, -- [{match, emoji}]: reply phrase → bot reacts on the root, no Jira write
+  decision           jsonb null,                         -- {fieldId, fieldName, options}: a decider's reply in a ❓ thread → proposal
   active             boolean null default true,
   created_at         timestamptz null default now(),
   constraint integrations_pkey primary key (id)

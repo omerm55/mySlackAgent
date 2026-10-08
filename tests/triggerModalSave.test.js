@@ -189,6 +189,27 @@ describe('Channel trigger modal save', () => {
     expect(db.upsertIntegration).not.toHaveBeenCalled();
   });
 
+  test('channel trigger: decision field saved and named to ops; a bad line keeps the modal open', async () => {
+    const { app, handlers } = fakeApp();
+    const db = { upsertIntegration: jest.fn().mockResolvedValue({}) };
+    const ops = { channelId: 'COPS', post: jest.fn().mockResolvedValue(undefined) };
+    registerTriggerHandler(app, { db, opsNotifier: ops, integrationCache: { getAll: jest.fn().mockResolvedValue([]), invalidate: jest.fn() } });
+    const client = { views: { publish: jest.fn().mockResolvedValue({}) }, conversations: { join: jest.fn().mockResolvedValue({}) }, chat: { postMessage: jest.fn().mockResolvedValue({}) } };
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    const line = 'customfield_11228 | Include Release Notes | Public, Internal, No';
+    await handlers.create_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: { ...values, decision_block: { value: txt(line) } } } }, client, logger });
+    expect(db.upsertIntegration).toHaveBeenCalledWith(expect.objectContaining({
+      decision: { fieldId: 'customfield_11228', fieldName: 'Include Release Notes', options: ['Public', 'Internal', 'No'] },
+    }));
+    expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/proposal for \*Include Release Notes\* \(Public \/ Internal \/ No\)/));
+
+    const ack = jest.fn();
+    db.upsertIntegration.mockClear();
+    await handlers.create_trigger_modal({ ack, body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: { ...values, decision_block: { value: txt('Include Release Notes') } } } }, client, logger });
+    expect(ack).toHaveBeenCalledWith({ response_action: 'errors', errors: { decision_block: expect.stringMatching(/field id/) } });
+    expect(db.upsertIntegration).not.toHaveBeenCalled();
+  });
+
   test('DB rejects → modal stays open with the reason', async () => {
     const { app, handlers } = fakeApp();
     const db = { upsertIntegration: jest.fn().mockRejectedValue(new Error('boom')) };

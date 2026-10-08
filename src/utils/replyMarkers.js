@@ -73,19 +73,23 @@ function threadReader(client, channel, ts) {
 
 /**
  * The approval marker that already settles this post, or null: the bot reacted on the root with an
- * approval marker's emoji, or a reply in the thread (not the bot's own) matches one. Fetches the thread
- * only when the trigger has an approval marker and the root carries no bot approval.
+ * approval emoji (a marker's 👍, or ✅ after a recorded decision), or a reply in the thread (not the
+ * bot's own) matches an approval marker. Fetches the thread only when the trigger has an approval
+ * marker and the root carries no bot approval.
  * @param {{ root: object, markers: Array, botUserId?: string, botId?: string, readThread: () => Promise<object[]> }} args
  */
 async function findSettlingMarker({ root, markers, botUserId, botId, readThread }) {
+  if (!root) return null;
   const approvals = (markers || []).filter((m) => isApprovalReaction(m.emoji));
-  if (!approvals.length || !root) return null;
   if (botUserId) {
+    // The bot's own approval on the root: an approval marker's 👍, or the ✅ of a recorded decision.
     const mine = (root.reactions || []).filter((r) => isApprovalReaction(r.name) && (r.users || []).includes(botUserId));
-    const byEmoji = mine.map((r) => approvals.find((m) => m.emoji === r.name.split('::')[0])).find(Boolean);
-    if (byEmoji) return byEmoji;
+    if (mine.length) {
+      return mine.map((r) => approvals.find((m) => m.emoji === r.name.split('::')[0])).find(Boolean)
+        || { match: 'decided', emoji: mine[0].name };
+    }
   }
-  if (!root.reply_count) return null;
+  if (!approvals.length || !root.reply_count) return null;
   const replies = (await readThread()).filter((r) => r.ts !== root.ts
     && !(botUserId && r.user === botUserId) && !(botId && r.bot_id === botId));
   for (const reply of replies) {

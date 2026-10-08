@@ -4,6 +4,7 @@ const { isAdmin, canManage } = require('../utils/admins');
 const { publishHome } = require('./homeHandler');
 const { parseCollectFields, formatCollectFields, describeCollectFields } = require('../utils/collectMessage');
 const { parseReplyMarkers, formatReplyMarkers } = require('../utils/replyMarkers');
+const { parseDecisionConfig, formatDecisionConfig } = require('../utils/threadDecision');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Block Kit helpers
@@ -131,6 +132,10 @@ function buildChannelTriggerModal(admin, existing = null) {
       optional: true,
       hint: plain('One per line. A thread reply containing the text makes me react with the emoji on the original post — and write nothing to Jira. Works with or without 💬 Thread reply.'),
     }),
+    input('decision_block', 'Decision field (optional)', textInput('customfield_11228 | Include Release Notes | Public, Internal, No', { initial: formatDecisionConfig(existing?.decision) }), {
+      optional: true,
+      hint: plain('For posts flagged with a non-👍 marker (e.g. ❓): when someone mentioned in the flag replies, I propose this field + the value above, they confirm, and ❓ becomes ✅.'),
+    }),
   ];
   if (admin) {
     blocks.push(input('scope_block', 'Who does this trigger apply to?', radios(
@@ -215,9 +220,11 @@ function registerTriggerHandler(app, services) {
     const jiraFieldName = v.field_name_block.value.value?.trim() || jiraFieldId;
     const jiraFieldValue = v.field_value_block.value.value?.trim();
     const markersParsed = parseReplyMarkers(v.markers_block?.value?.value);
+    const decisionParsed = parseDecisionConfig(v.decision_block?.value?.value);
 
     const errors = {};
     if (markersParsed.error) errors.markers_block = markersParsed.error.slice(0, 250);
+    if (decisionParsed.error) errors.decision_block = decisionParsed.error.slice(0, 250);
     if (!channelId) errors.channel_block = 'Pick a channel or paste a channel ID below.';
     if (manualChannelId && !/^[CG][A-Z0-9]{8,}$/.test(manualChannelId)) {
       errors.channel_id_block = 'That does not look like a Slack channel ID (should start with C or G).';
@@ -252,6 +259,7 @@ function registerTriggerHandler(app, services) {
       jira_field_value: jiraFieldValue,
       jira_field_type: 'select',
       reply_markers: markersParsed.markers,
+      decision: decisionParsed.decision,
       scope,
     };
 
@@ -295,8 +303,11 @@ function registerTriggerHandler(app, services) {
       const marks = markersParsed.markers.length
         ? ` Replies containing ${markersParsed.markers.map((m) => `"${m.match}" → :${m.emoji}:`).join(', ')} only mark the post.`
         : '';
+      const decides = decisionParsed.decision
+        ? ` In a flagged thread, a reply from someone the flag mentions becomes a proposal for *${decisionParsed.decision.fieldName}* (${decisionParsed.decision.options.join(' / ')}) they confirm.`
+        : '';
       const identity = allowBotFallback ? ' 🤖 The bot account may act for people who haven\'t connected Jira.' : ' 🔐 OAuth required: people who haven\'t connected are asked to connect first.';
-      await notifyOps(services, client, userId, `✅ Trigger *${name}* ${editId ? 'updated' : 'created'}! It fires on ${when} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${marks}${identity}${joinNote}`);
+      await notifyOps(services, client, userId, `✅ Trigger *${name}* ${editId ? 'updated' : 'created'}! It fires on ${when} in <#${channelId}>, setting *${jiraFieldName}* = *${jiraFieldValue}*.${marks}${decides}${identity}${joinNote}`);
     } catch (err) {
       // Saved fine; only the follow-ups (join / Home refresh / ops) hiccuped
       logger.warn(`[trigger] Post-save step failed for "${name}": ${errDetail(err)}`);

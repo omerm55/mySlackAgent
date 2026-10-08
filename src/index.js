@@ -7,6 +7,7 @@ const JiraService = require('./services/jiraService');
 const AttributionService = require('./services/attributionService');
 const { registerReplyHandler } = require('./handlers/replyHandler');
 const { registerReactionHandler } = require('./handlers/reactionHandler');
+const { registerDecisionHandler } = require('./handlers/decisionHandler');
 const { registerTriggerHandler, registerJiraTriggerHandler } = require('./handlers/triggerHandler');
 const JiraPoller = require('./services/jiraPoller');
 const { DigestScheduler } = require('./services/digestScheduler');
@@ -122,6 +123,7 @@ const services = {
 // Single generic handlers — each queries integrationCache at event time
 registerReactionHandler(app, jiraService, attributionService, services);
 registerReplyHandler(app, jiraService, attributionService, services);
+registerDecisionHandler(app, jiraService, services);
 registerDmHandler(app, jiraService, services);
 registerHomeHandler(app, jiraService, services);
 registerTriggerHandler(app, services);

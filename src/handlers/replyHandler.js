@@ -4,6 +4,8 @@ const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 const { issueLink } = require('../utils/jiraLink');
 const { pauseState, describePause } = require('../utils/pauseState');
 const { findReplyMarker, threadReader, findSettlingMarker } = require('../utils/replyMarkers');
+const { findOpenFlag } = require('../utils/threadDecision');
+const { proposeDecision } = require('./decisionHandler');
 
 function registerReplyHandler(app, jiraService, attributionService, services) {
   const { dedupCache, rateLimiter, auditLog, userCache, integrationCache } = services;
@@ -52,7 +54,9 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
       let matching = message.bot_id ? [] : inChannel.filter(
         (i) => i.triggers.includes('reply') && !marked.has(i),
       );
-      if (matching.length === 0 && marking.length === 0) return;
+      // Triggers that can read a decision out of a reply in a flagged (❓) thread.
+      const decisionCandidates = message.bot_id ? [] : inChannel.filter((i) => i.decision && !marked.has(i));
+      if (matching.length === 0 && marking.length === 0 && decisionCandidates.length === 0) return;
 
       const result = await client.conversations.replies({
         channel: message.channel,
@@ -66,9 +70,27 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
       const issueKeys = extractJiraIssueKeys(rootMessage.text);
       if (issueKeys.length === 0) return;
 
+      const readThread = threadReader(client, message.channel, message.thread_ts);
+      const who = { botUserId: context?.botUserId, botId: context?.botId };
+
+      // An open ❓ thread is decided through a confirmed proposal, never by a raw reply — whoever writes it.
+      const deciding = [];
+      for (const i of decisionCandidates) {
+        if (await findSettlingMarker({ root: rootMessage, markers: i.replyMarkers, ...who, readThread })) continue;
+        const flag = findOpenFlag({ thread: await readThread(), root: rootMessage, markers: i.replyMarkers, ...who });
+        if (!flag) continue;
+        matching = matching.filter((m) => m !== i);
+        if (!flag.deciders.includes(message.user)) {
+          logger.info(`[${i.name}/decision] ${issueKeys[0]}: reply by ${message.user}, not among the flag's deciders — ignored`);
+          continue;
+        }
+        if (dedupCache.isDuplicate(`decision:${i.name}:${message.channel}:${message.ts}`)) continue;
+        deciding.push({ integration: i, flag });
+      }
+      if (matching.length === 0 && marking.length === 0 && deciding.length === 0) return;
+
       // Already approved (e.g. auto-verified): a reply there — agreement or disagreement — writes nothing.
       if (matching.length > 0) {
-        const readThread = threadReader(client, message.channel, message.thread_ts);
         const unsettled = [];
         for (const i of matching) {
           const settled = await findSettlingMarker({ root: rootMessage, markers: i.replyMarkers, botUserId: context?.botUserId, botId: context?.botId, readThread });
@@ -77,7 +99,7 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
           await services.opsNotifier?.reactionFiltered({ slackUserId: message.user, reason: `reply on ${issueKeys.join(', ')}, which is already "${settled.match}" — nothing written`, integration: i.name });
         }
         matching = unsettled;
-        if (matching.length === 0 && marking.length === 0) return;
+        if (matching.length === 0 && marking.length === 0 && deciding.length === 0) return;
       }
 
       // Global pause: say so once in the thread, write nothing. A marker-only reply has nobody to tell.
@@ -92,6 +114,9 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
       }
 
       await applyMarkers(marking, message, issueKeys, client, logger);
+      for (const { integration, flag } of deciding) {
+        await proposeDecision({ integration, message, root: rootMessage, flag, issueKey: issueKeys[0], client, logger, services, jiraService });
+      }
       if (matching.length === 0) return;
 
       const actorName = await userCache.getName(client, message.user);

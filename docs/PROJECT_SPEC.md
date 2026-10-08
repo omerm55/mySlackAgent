@@ -9,7 +9,7 @@
 > truth: `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (moved from GitHub, §11.4). Trunk:
 > `main`. Render deploys `main` through the GitHub push mirror — Render cannot reach the internal
 > GitLab (§11.4).
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (311 tests, 31 suites; 13
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (330 tests, 32 suites; 13
 > of them need a Postgres and skip without one — §13).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
@@ -98,6 +98,19 @@ on that issue and confirms in the thread.
   the root, **or** a reply in the thread matches the phrase even if the post was never marked. A reply
   there is usually agreement or the review's own "if you disagree… reply here", and neither should set
   the field; disagreement is acted on by changing Include Release Notes in Jira.
+- **Decisions in a flagged thread** (optional *decision field* per trigger, e.g.
+  `customfield_11228 | Include Release Notes | Public, Internal, No`). A post with an open
+  non-approval marker (❓ "Needs a decision", no later "Auto-verified", no ✅ yet) is decided only
+  through the bot. When someone **mentioned in that flag** (today: Omer, Ayton and the relevant PM)
+  replies, the LLM reads the reply (§8.5); if it states a decision, the bot posts in the thread
+  "<@PM> I read your reply as *Include Release Notes* = *Public* (now *Internal*) and *PM Reviewed* =
+  *Yes* on SNS-…" with **✅ Apply / Not quite**. Questions, reminders and "WDYT?" produce nothing; a
+  reply from anyone else is ignored. Only the decider's click writes — both fields in one PUT, as
+  them via OAuth (the bot account only if the trigger allows it) — then the bot **reads the issue
+  back** and, only if both fields hold the decided values, swaps ❓ for ✅. A mismatch (e.g. a Jira
+  automation rewrote the field) or a refusal leaves ❓ and says why. A raw reply never writes in an
+  open ❓ thread, even with 💬 Thread reply on. A 👍 on a ❓ post is a decision too: after its write
+  succeeds the bot swaps ❓ for ✅. A ✅ from the bot settles the post like an approval marker does.
 - Bot auto-joins public channels when a trigger is created; private channels need `/invite`.
 
 ### 2.2 Jira triggers (JQL condition → DM the right person → act on their answer)
@@ -356,6 +369,7 @@ src/
     dmHandler.js               Yes / No / Reply, LLM execution, Fix Version offer + picker, risk review, collect
     homeHandler.js             App Home builder (publishHome / buildHomeBlocks)
     triggerHandler.js          Create/Edit/Delete/Run/Re-ask for channel + Jira triggers (modals, menus)
+    decisionHandler.js         Decisions in flagged threads: proposal (LLM) + Apply / Not quite
     preferencesHandler.js      Notification frequency select
   services/
     jiraService.js             Jira REST: issues, fields, comments, transitions, search (paginated), versions, changelog
@@ -369,12 +383,12 @@ src/
     attributionService.js      Comment on Jira naming the human, whenever the service account acts for them
   server/callbackServer.js     HTTP: /oauth/callback, /health (and nothing else)
   utils/
-    pauseState.js (global kill switch)  opsNotifier.js (ops channel + audit_events)  dmQuestion.js  riskReviewMessage.js  collectMessage.js  replyMarkers.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
+    pauseState.js (global kill switch)  opsNotifier.js (ops channel + audit_events)  dmQuestion.js  riskReviewMessage.js  collectMessage.js  replyMarkers.js  threadDecision.js  jiraLink.js  jiraLinkParser.js  keepAlive.js  withTimeout.js
     tokenCrypto.js (AES-256-GCM for OAuth tokens at rest, key rotation)
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6); applied by scripts/apply-schema.js
-tests/                         Jest (311 tests, 31 suites; the database suite needs TEST_DATABASE_URL)
+tests/                         Jest (330 tests, 32 suites; the database suite needs TEST_DATABASE_URL)
 config/*.example.json          Local-dev config templates (legacy path)
 .github/workflows/ci.yml       CI on GitHub: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
 .gitlab-ci.yml                 The same four gates on GitLab (for the move to gitlab.rnd.sisense.com)
@@ -411,11 +425,12 @@ beyond Bolt, and no ORM — the database is addressed in SQL.
 
 | File | Slack entry points | Responsibility |
 |---|---|---|
-| `reactionHandler.js` | `reaction_added` | Ignore the bot's own reactions (reply markers); match channel triggers by channel; drop triggers for which the post is **settled** (`findSettlingMarker`: bot's approval reaction on the root, else a matching reply in the thread — fetched only for triggers with an approval marker) → ops `reactionFiltered`, no write, no thread message, before the pause check and the OAuth gate; fetch message; extract issue keys; per-trigger scope/allowlist/**OAuth gate** (no token and `allowBotFallback` false → thread reply "connect, then react again" + auth DM + ops `reactionFiltered`, nothing written)/rate/dedup; update field via user OAuth (or the service account when the trigger allows it, with attribution comment); thread confirmation; audit + ops. |
-| `replyHandler.js` | `message` (thread replies; never the bot's own) | **Reply markers first:** a reply whose text contains a trigger's marker phrase → `reactions.add` with that emoji on the root message, scope/allowlist/dedup applied, no Jira write, no thread message (`already_reacted` is quiet; any other Slack error → ops `reply_marker_failed`); markers also follow other apps' replies. Otherwise, for non-bot replies on triggers with `reply`: settled posts are dropped the same way as for reactions (one memoised thread fetch per event), then the same as reactions (root message holds the issue key), including the OAuth gate — which is only resolved when a write is coming. While paused a marker-only reply gets no thread message. |
+| `reactionHandler.js` | `reaction_added` | Ignore the bot's own reactions (reply markers); match channel triggers by channel; drop triggers for which the post is **settled** (`findSettlingMarker`: bot's approval reaction on the root, else a matching reply in the thread — fetched only for triggers with an approval marker) → ops `reactionFiltered`, no write, no thread message, before the pause check and the OAuth gate; after a successful write on a post carrying the bot's non-approval marker (❓), swap it for ✅ (`reactions.remove` + `reactions.add`); fetch message; extract issue keys; per-trigger scope/allowlist/**OAuth gate** (no token and `allowBotFallback` false → thread reply "connect, then react again" + auth DM + ops `reactionFiltered`, nothing written)/rate/dedup; update field via user OAuth (or the service account when the trigger allows it, with attribution comment); thread confirmation; audit + ops. |
+| `replyHandler.js` | `message` (thread replies; never the bot's own) | **Reply markers first:** a reply whose text contains a trigger's marker phrase → `reactions.add` with that emoji on the root message, scope/allowlist/dedup applied, no Jira write, no thread message (`already_reacted` is quiet; any other Slack error → ops `reply_marker_failed`); markers also follow other apps' replies. **Decisions:** for triggers with a `decision` and an open flag (`findOpenFlag`), the trigger is removed from the raw-reply path; a reply from one of the flag's deciders (deduped per message) goes to `proposeDecision` after the pause check, anyone else's is ignored. Otherwise, for non-bot replies on triggers with `reply`: settled posts are dropped the same way as for reactions (one memoised thread fetch per event), then the same as reactions (root message holds the issue key), including the OAuth gate — which is only resolved when a write is coming. While paused a marker-only reply gets no thread message. |
 | `dmHandler.js` | **`attributeIfBot`** adds the attribution comment after any successful write made by the bot account (never when the user's own token was used; a failed comment never fails the action) · actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_reply_confirm`, `jira_reply_edit`, `jira_reply_cancel`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text is **preview-then-confirm** (`buildReplyPreviewBlocks` → `executeDecision`; the LLM never writes unconfirmed); Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); **`resolveJira(user, client, ctx)`** returns the user's client, the service account only when `ctx.allowFallback`, else `null` → **`needsConnect`** re-renders the ask (the message's own blocks, or rebuilt from ctx) with a Connect nudge and leaves `jira_prompts` alone; modal openers check `canWrite` before opening; clears `jira_prompts` on failure so the poller re-asks. Pino logs carry issue keys, actions and text *lengths* only — never the user's text or extracted values (those go to the ops channel). |
 | `homeHandler.js` | `app_home_opened`; actions `home_disconnect_jira`, `home_pause_bot`, `home_resume_bot`; view `home_disconnect_jira_modal` | Builds the Home view (connection with Connect / Disconnect, notifications, how it works, persistent recent activity; trigger sections **admin-only**); Disconnect → confirm modal → `oauthService.disconnect` → DM + ops line + Home refresh; exports `publishHome` for other handlers to refresh it. |
-| `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (channel-trigger modal: optional **Reply markers** box, one `text => :emoji:` per line, parsed by `replyMarkers` with an inline error on a bad line; both modals: admin-only **Jira identity** checkbox `allow_bot_fallback`, default off; Jira-trigger modal: ask type yes/no / risk review / collect (+ field list, one per line), notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; runs the trigger once right after saving and posts the same summary as Run now (`runSummaryLines`: matched · not yet asked · already asked or waiting in a digest · sent · queued, with 🔔 lines for matches held for a digest); Run now / Re-ask; all outcomes reported to **ops** (not DM). |
+| `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (channel-trigger modal: optional **Decision field** line `customfield_… | name | value, value, …` parsed by `threadDecision.parseDecisionConfig`, inline error on a bad line, named in the ops line; optional **Reply markers** box, one `text => :emoji:` per line, parsed by `replyMarkers` with an inline error on a bad line; both modals: admin-only **Jira identity** checkbox `allow_bot_fallback`, default off; Jira-trigger modal: ask type yes/no / risk review / collect (+ field list, one per line), notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; runs the trigger once right after saving and posts the same summary as Run now (`runSummaryLines`: matched · not yet asked · already asked or waiting in a digest · sent · queued, with 🔔 lines for matches held for a digest); Run now / Re-ask; all outcomes reported to **ops** (not DM). |
+| `decisionHandler.js` | actions `decision_apply`, `decision_dismiss`; `proposeDecision` (called by `replyHandler`) | **Propose:** reads the decision field's current value (service account, read-only), `llmService.interpretDecision`, validates the answer against the options, posts the proposal in the thread with both buttons carrying the context (issue, decider, field ids/values, flag emoji, `allowFallback`) + ops `decision_proposed`; LLM error → ops `decision_failed`, nothing posted; no decision → log only. **Apply** (decider only — anyone else gets an ephemeral note): pause → proposal kept with a note; OAuth as the decider (bot account only if `allowFallback`), else Connect DM + proposal kept + ops; one `updateIssueFields` PUT (decision field + the trigger's field); `getIssue` read-back — match → `reactions.remove` flag, `reactions.add` ✅, proposal replaced by "✅ Done … checked in Jira", ops `decision_applied`; mismatch → ❓ kept, ops `decision_unverified`; Jira error → proposal kept with the reason, ops `decision_failed`. Attribution comment for bot-account writes; activity entry. **Not quite:** proposal closed, nothing written, ops `decision_dismissed`. Pino logs carry keys, ids and lengths only. |
 | `preferencesHandler.js` | action `home_set_digest` | Saves digest frequency + Slack tz; flushes queue when switching to immediate. |
 
 Button/menu payloads: the full context (issue key, proposed action, user, question ≤300 chars,
@@ -546,7 +561,7 @@ Returns `{pick, reason, alternative, acceptedAt, statusName, candidates, childre
 "current" = window containing today (or `CURRENT_RELEASE_VERSION`).
 
 **`llmService.js`** — `fromEnv()` picks provider by key precedence OpenAI → Gemini → Anthropic.
-`interpretJiraResponse(...)`, `suggestFixVersion(...)`, `tidyNote(...)` and `extractFields(...)` all call
+`interpretJiraResponse(...)`, `suggestFixVersion(...)`, `tidyNote(...)`, `extractFields(...)` and `interpretDecision(...)` all call
 `_callJson(systemPrompt, user)` and parse strict JSON. Azure OpenAI is detected by `OPENAI_BASE_URL` (uses `api-key` header,
 `OPENAI_DEPLOYMENT` as model, `max_completion_tokens`). Prompts in §8.
 
@@ -559,7 +574,7 @@ row pauses; a DB error reads as running), `opsNotifier` funnels every message th
 `tokenCrypto.TokenCrypto` (`encrypt` → `enc:v1:<iv>:<tag>:<data>` base64url, `decrypt` with legacy plaintext passthrough and previous-key fallback, `isEncrypted`, `isCurrent`, `fromEnv`), `opsNotifier` (all ops messages, incl. `riskReviewAction` and `collectAction`), `dmQuestion` (`sendDmQuestion`, `buildYesNoBlocks`, `connectBlocks`, `describeDecision` → human-readable list of an LLM decision's effects, `buildReplyPreviewBlocks` → preview + Confirm/Edit/Cancel with a compacted decision in the button value) (builds
 the Yes/No/Reply message, optional Connect block, no key prefix if the question already names the
 issue), `jiraLink` (`issueUrl`, `issueLink`, `issueLinkLabelled` with link-safe labels — `|`→`∣`,
-`<>&` escaped), `jiraLinkParser.extractJiraIssueKeys`, `replyMarkers` (`parseReplyMarkers` → `{markers, error}` from the modal text, `=>` or `→`, colons optional; `formatReplyMarkers`; `findReplyMarker(markers, text)` → first case-insensitive substring match; `isApprovalReaction` — the 👍 / ✅ set, skin tones included, shared with the reaction handler; `threadReader(client, channel, ts)` → memoised paginated thread fetch; `findSettlingMarker({root, markers, botUserId, botId, readThread})` → the approval marker that settles the post, or null), `keepAlive` (self-GET `/health` every 5 min),
+`<>&` escaped), `jiraLinkParser.extractJiraIssueKeys`, `replyMarkers` (`parseReplyMarkers` → `{markers, error}` from the modal text, `=>` or `→`, colons optional; `formatReplyMarkers`; `findReplyMarker(markers, text)` → first case-insensitive substring match; `isApprovalReaction` — the 👍 / ✅ set, skin tones included, shared with the reaction handler; `threadReader(client, channel, ts)` → memoised paginated thread fetch; `findSettlingMarker({root, markers, botUserId, botId, readThread})` → the approval marker that settles the post — or `{match: 'decided'}` for any bot approval reaction such as a decision's ✅ — or null), `threadDecision` (`parseDecisionConfig` / `formatDecisionConfig`, `mentionedUsers(text)`, `findOpenFlag({thread, root, markers, botUserId, botId})` → `{reply, marker, deciders}` for the latest non-bot non-approval marker reply not followed by an approval one, `normaliseDecision(value, options)`, `buildProposalBlocks(ctx, {current, reason})`, `buildOutcomeBlocks(text)`, `DONE_EMOJI` = `white_check_mark`), `keepAlive` (self-GET `/health` every 5 min),
 `withTimeout`/`withTimeoutOr`, `admins.isAdmin/canManage` (`ADMIN_SLACK_USER_IDS`), `dedupCache`,
 `rateLimiter`, `auditLog` (in-memory list for the daily ops summary **plus** fire-and-forget persistence
 to `activity_log`; `recentFor(user)` feeds the Home tab), `alerting` (error threshold → ops), `userCache`,
@@ -612,6 +627,7 @@ create table public.integrations (
   triggers         text[] not null,             -- {'reaction','reply'}
   allow_bot_fallback boolean not null default false, -- admin exception: bot account may act for unconnected users
   reply_markers    jsonb not null default '[]'::jsonb, -- [{match, emoji}]: reply phrase → bot reacts on the root, no Jira write
+  decision         jsonb null,                         -- {fieldId, fieldName, options}: decider's reply in a ❓ thread → proposal
   active           boolean null default true,
   created_at       timestamptz null default now(),
   constraint integrations_pkey primary key (id)
@@ -624,6 +640,12 @@ create index if not exists integrations_channel_idx on public.integrations (chan
 
 ```sql
 alter table public.integrations add column if not exists reply_markers jsonb not null default '[]'::jsonb;
+```
+
+`decision` is added by `supabase/thread_decision.sql` (Oct 2026); null = off:
+
+```sql
+alter table public.integrations add column if not exists decision jsonb null;
 ```
 
 ### 6.3 `jira_triggers` + `jira_prompts` — JQL-driven DMs (`supabase/jira_triggers.sql`)
@@ -847,6 +869,19 @@ root has a Jira key ─► per trigger: findSettlingMarker
   ─► settled ─► ops reactionFiltered "already "Auto-verified" — nothing written"; skip the trigger
 ```
 
+Decision in a flagged thread (§2.1):
+
+```
+reply in thread ─► trigger has `decision`, post not settled, findOpenFlag → {flag, deciders}
+  ─► (trigger leaves the raw-reply path) ─► replier ∈ deciders? else ignore
+  ─► not paused ─► getIssue(current value) ─► llmService.interpretDecision ─► value ∈ options?
+  ─► thread: "I read your reply as … [✅ Apply] [Not quite]"  (ops: decision_proposed)
+decision_apply (decider only) ─► OAuth as decider (or bot if allowed; else Connect, keep proposal)
+  ─► updateIssueFields({decision field, review field}) ─► getIssue read-back matches?
+  ─► yes: ❓ removed, ✅ added, "✅ Done … checked in Jira" (ops: decision_applied)
+  ─► no:  ❓ stays, warning in thread + ops (decision_unverified)
+```
+
 ### 7.2 Jira trigger → DM → action
 
 ```
@@ -1055,6 +1090,26 @@ value if any) and the author's text verbatim. The result is merged with the moda
 (explicit wins) and always shown as a preview before the single PUT; a `note` is rendered in italics
 under the preview. Any error → preview without extracted values and a "couldn't read that
 automatically" note.
+
+### 8.5 Decision in a flagged thread (`DECISION_PROMPT`)
+
+```
+You read one reply in a Slack thread where a reviewer was asked to decide how a resolved bug is
+documented. You are given the bug post, the review's flag asking for a decision, the decision field with
+its allowed values and its current value, and the reply. Rules:
+- Return one of the allowed values only when the reply clearly states how the bug should be documented.
+  "Keep it", "the decision stands", "fine as is" or "agree with the bot" means the current value.
+- Questions, reminders, pings, "let me check", "WDYT", partial or conditional answers → null.
+- Never infer a decision the author did not make, and never pick a value that is not in the list.
+
+Respond ONLY with valid JSON (no markdown fences):
+{ "decision": "<one allowed value, or null>", "reason": "<one short sentence on what in the reply decided it>" }
+```
+
+User message: the bug key, the root post (first 2,500 chars), the flag reply (first 1,500 chars), the
+decision field's name, allowed values and current value, and the reply verbatim. The answer is matched
+case-insensitively against the allowed values; anything else (including null) means "no decision" and
+nothing is posted. The value is only ever shown as a proposal — the decider's Apply writes it.
 
 ---
 
@@ -1385,6 +1440,16 @@ One-off setup, in this order:
    Needs a decision => :question:
    ```
 
+4. Run `supabase/thread_decision.sql`, then set **Decision field** on the same trigger:
+
+   ```
+   customfield_11228 | Include Release Notes | Public, Internal, No
+   ```
+
+   Leave **💬 Thread reply** off: decisions in ❓ threads go through the proposal, and an auto-verified
+   or decided post ignores further replies anyway. Writes need the decider's own Jira connection unless
+   the trigger's Jira identity box is ticked.
+
 The phrases match the scheduled review's replies (":robot_face: Auto-verified: …",
 :triangular_flag_on_post: Needs a decision: …"); if its wording changes, change the markers.
 
@@ -1457,6 +1522,8 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | Reaction ignored, log "no integration matches (known channels: …)" | Bot not in channel / wrong channel id | `/invite @bot`; check channel id in trigger |
 | An "Auto-verified" / "Needs a decision" reply left the post unmarked; ops says "Slack refused: `missing_scope`" | `reactions:write` missing from the installed bot token | §12.2c step 2 |
 | A PM 👍'd (or replied on) a bug post and nothing happened; ops says "already "Auto-verified" — nothing written" | Expected: the review already set PM Reviewed (§2.1, settled posts) | None. To overrule the review, change Include Release Notes in Jira |
+| A PM replied in a ❓ thread and the bot said nothing | The reply stated no decision (a question, "let me check"), the PM isn't mentioned in the flag reply, the trigger has no Decision field, or no AI is configured (ops says so) | Expected for questions. Otherwise check the flag mentions them and §12.2c step 4; they can always 👍 the post instead |
+| Apply pressed, ❓ stayed, thread says "Jira now shows …" | The write landed but the read-back differs — usually a Jira automation (e.g. the Rovo documentation rule) rewrote `Include Release Notes` | Check the issue history; set the value in Jira and 👍 the post |
 | Same, and nothing in ops | The markers aren't saved on the trigger, the phrase changed, or the reply was in a different channel | Edit the trigger and check the Reply markers box against the review's wording (§12.2c) |
 | Slack shows ⚠️ on a click, nothing happens | App not connected (Render asleep or redeploying) | Wait for deploy / keep-alive; retry |
 | "You don't have access to this app" on Atlassian consent | OAuth app not shared | Distribution → Sharing |
@@ -1655,7 +1722,7 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 311 tests in 31 suites:
+`npm test` → Jest, `tests/*.test.js`, 330 tests in 32 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1674,7 +1741,8 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 | `dmRequireOauth` | Attribution: a bot-account write from a DM ask comments naming the person and the change (Yes, risk status, collect save), a write as the user does not, and a failing comment never breaks the write; Yes without token/fallback → nothing written, ask restored with its buttons + Connect, prompt kept, ops told; with fallback → bot writes + nudge; with token → user writes; a second nudge does not stack; Reply / Update Notes / Answer without token → modal not opened; Notes modal submitted without token → ask rebuilt from ctx; risk status with fallback / token; No and Handled still work; all three ctx builders carry `allowFallback` |
 | `replyMarkers` | Marker parsing (`=>` / `→`, colons optional, blank lines), bad line / non-emoji → error, empty = none, format round-trip, case-insensitive first match; handler: "Auto-verified" → 👍 and "Needs a decision" → ❓ on the root with no Jira write and no thread message, works on a reaction-only trigger and for another app's reply, an ordinary reply still sets the field, the bot's own replies ignored, `already_reacted` quiet, `missing_scope` → ops naming `reactions:write`, personal scope respected; settled posts: a 👍 on a post the bot marked 👍 writes nothing (no thread message, no thread fetch) and tells ops, an auto-verified post not yet marked likewise, a 👍 on a "Needs a decision" post sets the field, a person's 👍 or the bot echoing the phrase doesn't settle a post, a trigger without an approval marker never fetches the thread, a reply ("I disagree…") on an auto-verified thread writes nothing |
 | `backfillReplyMarkers` | Dry run lists would-mark / already-marked and reacts to nothing; `--apply` reacts on keyed root posts only, never for the bot's own replies; a Slack refusal is reported per post; argument parsing |
-| `triggerModalSave` | Trigger modals save before ack: channel-trigger reply markers saved as a list and named in the ops line, a bad marker line → inline error and nothing saved; DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; a new trigger with no scope choice defaults to `personal`; save-time run posts the Run-now summary with queued matches called out; Jira identity checkbox → `allow_bot_fallback` on both trigger kinds (default false; ops line says OAuth required / bot may act) |
+| `threadDecision` | Decision config parse/format/errors, mentions, value normalisation; `findOpenFlag` (latest flag open, later approval closes, bot's own ignored); bot ✅ settles; `interpretDecision` prompt + message; reply path: decider → LLM with current value + flag → proposal with Apply / Not quite and full ctx, nothing written; non-decider → no LLM call; no decision or a value outside the options → nothing posted; with 💬 Thread reply on, replies in an open ❓ thread never write; a ✅ thread gets no proposal; Apply: one PUT as the decider, read-back, ❓ → ✅, proposal closed, ops; another user → ephemeral, nothing written; read-back mismatch → ❓ kept + ops warning; Jira refusal → proposal kept with the reason; not connected → Connect DM, buttons kept; Not quite → closed, nothing written; 👍 on a ❓ post → write then ❓ → ✅ |
+| `triggerModalSave` | Trigger modals save before ack: channel-trigger decision field saved and named in the ops line, a bad decision line → inline error; channel-trigger reply markers saved as a list and named in the ops line, a bad marker line → inline error and nothing saved; DB failure → inline modal error + ops line, no follow-ups; success → plain ack, Home refresh, pilot list persisted; editing someone else's trigger → inline error; collect: bad field list → inline error, valid → `collect_fields` JSON + default question; a new trigger with no scope choice defaults to `personal`; save-time run posts the Run-now summary with queued matches called out; Jira identity checkbox → `allow_bot_fallback` on both trigger kinds (default false; ops line says OAuth required / bot may act) |
 | `pauseSwitch` | `pauseState`: DB flag, `BOT_PAUSED` override, DB failure reads as running, 30 s cache + `invalidate`, `setPaused` records who, `describePause` wording; poller evaluates nothing and warns ops once; DM paths (Yes, risk status, collect Save, Reply modal) write nothing and keep the ask and prompt; reaction answers in-thread; Home banner and admin-only Pause / Resume, both audited; not paused → the same click goes through |
 | `auditEvents` | Every notifier method writes a row mirroring the ops line (kind, user, issue, identity, structured detail); failures recorded with `ok:false` and the error; bot-account identity captured; proposed vs applied LLM decisions are distinct kinds; a plain `post` is kind `ops`; a failing sink never breaks the message; rows are written even with no ops channel; insert truncates long text; the query filters by issue / user / kind / time |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), Connect (async URL) vs Disconnect by connection state, persistent recent activity from the database, in-memory fallback, `addEntry` persistence |
@@ -1961,6 +2029,19 @@ Chronological, with rationale (see `git log` for commits):
     waiting for the backfill. The ops line stays, so a PM asking "why didn't my 👍 do anything?" has an
     answer.
 
+46. **Decisions in a flagged thread: propose, confirm, verify (§2.1).** Unticking 💬 Thread reply
+    closed the hole where a reminder or "WDYT?" in a ❓ thread set PM Reviewed = Yes, but it also meant
+    a PM who *answered* in the thread was ignored. The answer is the repo's standing LLM rule — read,
+    propose, never write unconfirmed (#32): the reply is interpreted against the decision field's
+    allowed values, the bot proposes both writes in the thread, and only the decider's click applies
+    them, as them. Three choices worth keeping. **Deciders are the people the flag mentions**, read from
+    the flag reply itself, so the review decides who is asked and nobody else's reply can be mistaken for
+    a decision. **The read-back gates the ✅**: `Include Release Notes` is also written by a Rovo
+    automation (pr-sns-knowledge), and a ✅ over a value Jira no longer holds would be worse than the ❓ it
+    replaced. **An open ❓ thread leaves the raw-reply path entirely**, so the hazard stays closed even if
+    someone re-ticks Thread reply. A 👍 on the post remains the one-click route and gets the same ❓ → ✅.
+    A bot ✅ settles the post, so a later 👍 is the same no-op as on an auto-verified post.
+
 ---
 
 ## 15. Known limitations
@@ -1985,6 +2066,10 @@ Chronological, with rationale (see `git log` for commits):
 - **Reply markers are one-way and phrase-based.** A ❓ stays after a PM settles the bug with 👍 (the
   bot does not swap it), replies posted before the markers were configured need the manual backfill
   (§12.2c), and a person who quotes "Auto-verified" in a reply marks the post too.
+- **Thread decisions write to the first Jira key on the post** (the bug); the 👍 path still writes every
+  key it finds, including issues merely mentioned in the description (e.g. "fixed by SNS-130587").
+  Proposals are not re-checked against later replies: an Apply pressed after the PM changed their mind
+  in a newer reply still writes the older reading (they can press Not quite instead).
 - **Collect asks write plain-text fields only** (values sent as strings in one PUT). Selects, users
   and dates need per-field type handling; no marker field / expiry yet (§16.10).
 - **The risk-review flag filter is global** (`RISK_NOTIFICATION_MATCH` applies to every `risk_review`

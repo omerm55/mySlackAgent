@@ -4,6 +4,7 @@ const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
 const { issueLink } = require('../utils/jiraLink');
 const { pauseState, describePause } = require('../utils/pauseState');
 const { isApprovalReaction: isThumbsUp, threadReader, findSettlingMarker } = require('../utils/replyMarkers');
+const { DONE_EMOJI } = require('../utils/threadDecision');
 
 function registerReactionHandler(app, jiraService, attributionService, services) {
   const { dedupCache, rateLimiter, auditLog, userCache, integrationCache } = services;
@@ -141,7 +142,7 @@ function registerReactionHandler(app, jiraService, attributionService, services)
 
         logger.info(`${tag} 👍 by ${actorName} → updating: ${issueKeys.join(', ')}`);
 
-        await Promise.all(issueKeys.map(async (key) => {
+        const outcomes = await Promise.all(issueKeys.map(async (key) => {
           let success = true;
           let errorMsg;
           try {
@@ -173,7 +174,17 @@ function registerReactionHandler(app, jiraService, attributionService, services)
             issueKey: key, fieldName: jiraFieldName, fieldValue: jiraFieldValue,
             success, error: errorMsg, usingOAuth,
           });
+          return success;
         }));
+
+        // A 👍 on a flagged (❓) post is the decision: once written, swap the bot's ❓ for ✅.
+        const flagEmojis = new Set((integration.replyMarkers || []).filter((m) => !isThumbsUp(m.emoji)).map((m) => m.emoji));
+        const botFlag = (message.reactions || []).find((r) => flagEmojis.has(r.name) && (r.users || []).includes(context?.botUserId));
+        if (botFlag && outcomes.every(Boolean)) {
+          await client.reactions.remove({ channel: event.item.channel, timestamp: message.ts, name: botFlag.name }).catch(() => {});
+          await client.reactions.add({ channel: event.item.channel, timestamp: message.ts, name: DONE_EMOJI }).catch(() => {});
+          logger.info(`${tag} ${issueKeys.join(', ')}: decided by 👍 — :${botFlag.name}: → :${DONE_EMOJI}:`);
+        }
       }
     } catch (err) {
       logger.error(`[reaction] Unexpected error: ${err.message}`);

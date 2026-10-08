@@ -40,6 +40,7 @@ const FILES = [
   'pilot_users.sql',
   'require_oauth.sql',
   'reply_markers.sql',
+  'thread_decision.sql',
 ];
 
 /**

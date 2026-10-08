@@ -20,7 +20,14 @@ function normalizeRow(row) {
     createdBy: row.created_by,
     allowBotFallback: row.allow_bot_fallback === true,
     replyMarkers: parseJsonArray(row.reply_markers),
+    decision: parseDecision(row.decision),
   };
+}
+
+function parseDecision(value) {
+  let d = value;
+  if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return null; } }
+  return d && d.fieldId && Array.isArray(d.options) && d.options.length ? d : null;
 }
 
 function parseJsonArray(value) {

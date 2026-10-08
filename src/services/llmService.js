@@ -70,6 +70,17 @@ Initiative. You are given the list of fields wanted (id, name, hint) and the aut
 Respond ONLY with valid JSON (no markdown fences):
 { "values": { "<field id>": "<value or null>", ... }, "note": "<one short sentence if something was ambiguous, else null>" }`;
 
+const DECISION_PROMPT = `You read one reply in a Slack thread where a reviewer was asked to decide how a resolved bug is
+documented. You are given the bug post, the review's flag asking for a decision, the decision field with
+its allowed values and its current value, and the reply. Rules:
+- Return one of the allowed values only when the reply clearly states how the bug should be documented.
+  "Keep it", "the decision stands", "fine as is" or "agree with the bot" means the current value.
+- Questions, reminders, pings, "let me check", "WDYT", partial or conditional answers → null.
+- Never infer a decision the author did not make, and never pick a value that is not in the list.
+
+Respond ONLY with valid JSON (no markdown fences):
+{ "decision": "<one allowed value, or null>", "reason": "<one short sentence on what in the reply decided it>" }`;
+
 class LlmService {
   /**
    * @param {'anthropic'|'gemini'} provider
@@ -152,6 +163,22 @@ class LlmService {
       `\n\nAuthor's text (verbatim): "${userText}"\n\n` +
       `Return the value for each field id, or null when the text does not state it.`;
     return this._callJson(COLLECT_FIELDS_PROMPT, userMessage);
+  }
+
+  /**
+   * Read a reviewer's reply in a flagged thread (reply markers, §2.1). Callers validate the value
+   * against the options and show a preview; nothing is written without the reviewer's click.
+   * @returns {Promise<{ decision: string|null, reason?: string }>}
+   */
+  async interpretDecision({ issueKey, post, flag, fieldName, options, current, reply }) {
+    const userMessage =
+      `Bug: ${issueKey}\n` +
+      `Bug post (verbatim, may be long):\n${String(post || '').slice(0, 2500)}\n\n` +
+      `Review's flag (verbatim):\n${String(flag || '').slice(0, 1500)}\n\n` +
+      `Decision field: "${fieldName}". Allowed values: ${options.map((o) => `"${o}"`).join(', ')}. Current value: ${current ? `"${current}"` : 'empty'}.\n\n` +
+      `Reply (verbatim): "${reply}"\n\n` +
+      `Does the reply state a decision? Return the allowed value, or null.`;
+    return this._callJson(DECISION_PROMPT, userMessage);
   }
 
   async _callJson(systemPrompt, userMessage) {
@@ -243,3 +270,4 @@ class LlmService {
 
 module.exports = LlmService;
 module.exports.COLLECT_FIELDS_PROMPT = COLLECT_FIELDS_PROMPT;
+module.exports.DECISION_PROMPT = DECISION_PROMPT;
