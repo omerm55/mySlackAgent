@@ -19,6 +19,22 @@ class OAuthStateError extends Error {
 }
 
 /**
+ * Thrown by handleCallback when the Atlassian account that consented is not the one that belongs to the
+ * Slack user who started the flow (security review SNS-133715, condition 1). `state` proves who
+ * *started* the flow; this proves who *consented*. Nothing is stored when it is thrown.
+ * Reasons: mismatch (the lookup found someone else), not_found (no Jira user for the Slack e-mail),
+ * ambiguous (more than one), no_slack_email, lookup_failed (an API call failed), not_configured.
+ */
+class AccountBindingError extends Error {
+  constructor(reason, slackUserId) {
+    super(`OAuth account binding failed: ${reason}`);
+    this.code = 'account_mismatch';
+    this.reason = reason;
+    this.slackUserId = slackUserId;
+  }
+}
+
+/**
  * Manages Atlassian OAuth 2.0 3LO tokens on a per-Slack-user basis.
  *
  * Flow:
@@ -26,7 +42,9 @@ class OAuthStateError extends Error {
  *      memory when there is no DB) → link shown in Home / DM
  *   2. User consents → Atlassian redirects to OAUTH_REDIRECT_URI?code=...&state=<random>
  *   3. handleCallback(code, state) → state consumed (unknown / expired / used → OAuthStateError)
- *      → exchanges code for tokens + resolves cloudId → stored for the mapped Slack user
+ *      → exchanges code for tokens + resolves cloudId → account binding checked (the consenting
+ *      accountId must be the Jira user found for the Slack user's e-mail, else AccountBindingError)
+ *      → stored for the mapped Slack user
  *   4. getJiraService(slackUserId) → returns a JiraService instance authed as that user
  *
  * Tokens are cached in memory and persisted in Postgres (see loadFromDb).
@@ -38,13 +56,18 @@ class OAuthService {
    * @param {string} opts.clientSecret   JIRA_OAUTH_CLIENT_SECRET
    * @param {string} opts.redirectUri    OAUTH_REDIRECT_URI (must match Atlassian dev console)
    * @param {string} opts.jiraBaseUrl    JIRA_BASE_URL — used to match the right cloud resource
+   * @param {import('./jiraService')} opts.serviceJira  the service account, for the user lookup by e-mail
+   * @param {object} opts.slackClient   Bolt's WebClient, for the Slack user's e-mail
+   *   Without both, every callback is rejected (binding `not_configured`): the check is not optional.
    */
-  constructor({ clientId, clientSecret, redirectUri, jiraBaseUrl, db = null }) {
+  constructor({ clientId, clientSecret, redirectUri, jiraBaseUrl, db = null, serviceJira = null, slackClient = null }) {
     this.clientId = clientId;
     this.clientSecret = clientSecret;
     this.redirectUri = redirectUri;
     this.jiraBaseUrl = jiraBaseUrl;
     this.db = db;
+    this.serviceJira = serviceJira;
+    this.slackClient = slackClient;
     // In-memory cache — populated from the database at startup and on each write
     this.tokens = new Map();
     // Pending OAuth states when there is no DB (single process, lost on restart)
@@ -141,7 +164,8 @@ class OAuthService {
   /**
    * Exchange an authorization code for tokens and store them.
    * Called by the callback HTTP server. The `state` is consumed first (OAuthStateError if it is
-   * unknown, expired or already used) and tells us which Slack user the tokens belong to.
+   * unknown, expired or already used) and tells us which Slack user the tokens belong to. The tokens
+   * are stored only if the consenting account is that user's own (AccountBindingError otherwise).
    * @param {string} code   authorization code from Atlassian
    * @param {string} state  the random `state` echoed back by Atlassian
    */
@@ -157,6 +181,7 @@ class OAuthService {
     const { access_token, refresh_token, expires_in } = tokenRes.data;
 
     const cloudId = await this._resolveCloudId(access_token);
+    await this._verifyAccount(slackUserId, access_token, cloudId);
 
     const tokenData = {
       accessToken: access_token,
@@ -194,6 +219,69 @@ class OAuthService {
 
     const current = this.tokens.get(slackUserId);
     return JiraService.fromOAuthToken(current.accessToken, current.cloudId);
+  }
+
+  /**
+   * Check that the account behind `accessToken` belongs to `slackUserId`: its accountId (Jira
+   * `/myself`, with the user's own token — same accountId as `api.atlassian.com/me`, without the extra
+   * `read:me` scope) must be the single Jira user the service account finds for the Slack e-mail.
+   * @returns {Promise<string>} the bound accountId
+   * @throws {AccountBindingError}
+   */
+  async _verifyAccount(slackUserId, accessToken, cloudId) {
+    if (!this.serviceJira || !this.slackClient) throw new AccountBindingError('not_configured', slackUserId);
+
+    let consenting; let email; let candidates;
+    try {
+      const me = await axios.get(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/myself`, {
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+      });
+      consenting = me.data?.accountId;
+      const info = await this.slackClient.users.info({ user: slackUserId });
+      email = info.user?.profile?.email;
+      if (!email) throw new AccountBindingError('no_slack_email', slackUserId);
+      candidates = await this.serviceJira.findAccountIdsByEmail(email);
+    } catch (err) {
+      if (err instanceof AccountBindingError) throw err;
+      logger.warn(`[oauth] Account binding lookup failed for ${slackUserId}: ${err.message}`);
+      throw new AccountBindingError('lookup_failed', slackUserId);
+    }
+
+    if (!consenting) throw new AccountBindingError('lookup_failed', slackUserId);
+    if (candidates.length === 0) throw new AccountBindingError('not_found', slackUserId);
+    if (candidates.length > 1) throw new AccountBindingError('ambiguous', slackUserId);
+    if (candidates[0] !== consenting) throw new AccountBindingError('mismatch', slackUserId);
+    return consenting;
+  }
+
+  /**
+   * Run the binding check over every stored token — connections made before the check existed were
+   * never verified. A `mismatch` (the token is provably someone else's account) is disconnected; every
+   * other failure is only reported, because it cannot tell a hijack from a hidden or aliased e-mail and
+   * removing it would lock a legitimate user out. The operator decides those (spec §12.4).
+   * @returns {Promise<{checked: number, ok: number, removed: string[], unverified: {slackUserId: string, reason: string}[]}>}
+   */
+  async verifyStoredBindings() {
+    const result = { checked: 0, ok: 0, removed: [], unverified: [] };
+    for (const slackUserId of [...this.tokens.keys()]) {
+      result.checked += 1;
+      try {
+        const token = this.tokens.get(slackUserId);
+        if (Date.now() > token.expiresAt - 5 * 60 * 1000) await this._refreshToken(slackUserId, token);
+        const current = this.tokens.get(slackUserId);
+        await this._verifyAccount(slackUserId, current.accessToken, current.cloudId);
+        result.ok += 1;
+      } catch (err) {
+        if (err.reason === 'mismatch') {
+          await this.disconnect(slackUserId).catch((e) => logger.warn(`[oauth] Could not remove ${slackUserId}: ${e.message}`));
+          result.removed.push(slackUserId);
+        } else {
+          result.unverified.push({ slackUserId, reason: err.reason || 'refresh_failed' });
+        }
+      }
+    }
+    logger.info(`[oauth] Account binding of stored tokens: ${result.ok}/${result.checked} ok, ${result.removed.length} removed, ${result.unverified.length} unverified`);
+    return result;
   }
 
   /**
@@ -249,4 +337,5 @@ class OAuthService {
 
 module.exports = OAuthService;
 module.exports.OAuthStateError = OAuthStateError;
+module.exports.AccountBindingError = AccountBindingError;
 module.exports.STATE_TTL_MS = STATE_TTL_MS;

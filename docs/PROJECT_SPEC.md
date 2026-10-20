@@ -9,7 +9,7 @@
 > truth: `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (moved from GitHub, §11.4). Trunk:
 > `main`. Render deploys `main` through the GitHub push mirror — Render cannot reach the internal
 > GitLab (§11.4).
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (330 tests, 32 suites; 13
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (341 tests, 33 suites; 13
 > of them need a Postgres and skip without one — §13).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
@@ -165,7 +165,12 @@ versions). Required *Resolution* is auto-filled (Done → Fixed → Resolved).
 Users connect once (App Home → Connect Jira, or the button in a DM). Every Connect link carries a
 **random, single-use `state`** that maps to the Slack user server-side and expires after 24 hours; a
 reused, stale or forged link gets a "This link has expired or was already used" page and nothing is
-stored. Tokens persist in Postgres **encrypted at rest** (AES-256-GCM, key only in the runtime
+stored. **The consenting account must be the person's own** (account binding, since Oct 2026 — security
+review SNS-133715, condition 1): after the code exchange the bot reads the consenting `accountId`
+(Jira `/myself`, with the new token) and requires it to be the one Jira user the service account finds
+for the Slack user's e-mail. Otherwise — someone else's account, no match, several matches, no Slack
+e-mail, or a lookup error — the callback shows "This Atlassian account is not yours", tells ops the
+reason (never the addresses) and stores nothing. Tokens persist in Postgres **encrypted at rest** (AES-256-GCM, key only in the runtime
 environment — `TOKEN_ENCRYPTION_KEY`), refresh automatically, and survive restarts. **Disconnect** in
 App Home forgets the tokens at any time (Atlassian-side revocation is a link in the confirmation). **Writes
 need the person's own token**: without one the bot asks them to connect and keeps the ask open; only
@@ -388,7 +393,7 @@ src/
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6); applied by scripts/apply-schema.js
-tests/                         Jest (330 tests, 32 suites; the database suite needs TEST_DATABASE_URL)
+tests/                         Jest (341 tests, 33 suites; the database suite needs TEST_DATABASE_URL)
 config/*.example.json          Local-dev config templates (legacy path)
 .github/workflows/ci.yml       CI on GitHub: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
 .gitlab-ci.yml                 The same four gates on GitLab (for the move to gitlab.rnd.sisense.com)
@@ -417,7 +422,8 @@ beyond Bolt, and no ORM — the database is addressed in SQL.
 5. Build a `services` bag (with getters for late-bound `alerting`, `opsNotifier`, `jiraPoller`,
    `digestScheduler`) and register **one** handler per concern.
 6. `await app.start()`; then create `Alerting`, `OpsNotifier`; `oauthService.loadFromDb()`; start
-   the callback HTTP server; report the Jira service identity to ops (`whoAmI`, warns on a
+   the callback HTTP server; check the account binding of every stored token (`verifyStoredBindings`,
+   result to ops when anything failed); report the Jira service identity to ops (`whoAmI`, warns on a
    `JIRA_SERVICE_ACCOUNT_EMAIL` mismatch); start `JiraPoller` and `DigestScheduler` (if `DATABASE_URL`); start
    keep-alive; schedule daily summary.
 
@@ -442,7 +448,10 @@ carry it in `private_metadata`.
 **`jiraService.js`** — `getIssue`, `updateIssueField(key, fieldId, value, type)` (`select` → `{value}`,
 `text`, `array` → `[{name}]`, `raw`), `updateIssueFields(key, {fieldId: value})` (several fields, one PUT,
 values sent as given), `addComment` (ADF paragraphs), `findUser(ByEmail)`, `assignIssue`,
-`whoAmI()` (`/myself` — the identity reported at boot),
+`whoAmI()` (`/myself` — the identity reported at boot), `findAccountIdsByEmail(email)` (every active
+human account `user/search` returns for the address — a returned e-mail that differs is dropped as a
+prefix match, a hidden one kept; throws on API errors, unlike `findUserByEmail`; used by the OAuth
+account binding),
 `searchIssues(jql, fields, max=1000)` (POST `/rest/api/3/search/jql`, follows `nextPageToken`, flags
 `truncated`), `getTransitions` (with `expand=transitions.fields`), `transitionIssue(key, status)`
 (matches destination or transition name; auto-fills required Resolution; names unfillable required
@@ -454,11 +463,17 @@ stored in `oauth_states` with a 24 h expiry — memory Map when there is no DB; 
 `read:jira-user write:jira-work read:jira-work offline_access`; `prompt=consent`),
 `handleCallback(code, state)` (`_consumeState` burns the state atomically → Slack user id, else throws
 `OAuthStateError` with `code: 'invalid_state'`; then exchange, resolve cloudId matching `JIRA_BASE_URL`,
-persist; prunes old states fire-and-forget), `hasToken`, `getJiraService(slackUserId)` (refresh if
+`_verifyAccount`, persist; prunes old states fire-and-forget), `_verifyAccount(slackUserId, accessToken,
+cloudId)` (the account binding of §2.5: `/myself` with the user's token vs `serviceJira.findAccountIdsByEmail`
+of the Slack e-mail from `slackClient.users.info`; throws `AccountBindingError` — `code: 'account_mismatch'`,
+`reason` one of `mismatch` / `not_found` / `ambiguous` / `no_slack_email` / `lookup_failed` /
+`not_configured`; the constructor's `serviceJira` and `slackClient` are required for any connect to
+succeed), `verifyStoredBindings()` (runs the same check over every cached token at boot; a `mismatch`
+is disconnected, anything else is kept and reported — see §12.4), `hasToken`, `getJiraService(slackUserId)` (refresh if
 <5 min to expiry), `loadFromDb()` (loads decrypted rows; rewrites any row that is plaintext or under a
 previous key — lazy migration and rotation; rethrows `encryption_key_missing` so boot fails instead of
 running with unreadable tokens), `disconnect(slackUserId)` (memory + `deleteToken`). In-memory Map is a
-cache over the `oauth_tokens` table. Exports `OAuthStateError` and `STATE_TTL_MS`.
+cache over the `oauth_tokens` table. Exports `OAuthStateError`, `AccountBindingError` and `STATE_TTL_MS`.
 
 **`dbService.js`** — Postgres over the wire protocol (`pg`). One pool: `max: 5`, 10 s connection and
 statement timeouts, `application_name=slack-jira-bot`, and an `error` handler so a dropped idle
@@ -916,7 +931,10 @@ Switching preference to immediate ─► deliverTo(user) flushes the queue now.
 Home "Connect Jira" / DM "🔗 Connect Jira" (URL button) ─► generateAuthUrl: random state → oauth_states (24 h)
   ─► auth.atlassian.com/authorize?state=<random> ─► Atlassian consent ─► GET /oauth/callback?code&state
   ─► consumeOauthState (atomic; unknown / expired / used → 400 "expired or already used" page, nothing stored)
-  ─► exchange ─► accessible-resources → cloudId ─► oauth_tokens upsert for the mapped Slack user
+  ─► exchange ─► accessible-resources → cloudId
+  ─► account binding: /myself (user's token) == the one Jira user for the Slack e-mail (service account)
+       ✗ → 403 "This Atlassian account is not yours" page + ops line with the reason, nothing stored
+  ─► oauth_tokens upsert for the mapped Slack user
   ─► HTML "You can close this tab" ─► next Home open shows ✅ connected
 ```
 
@@ -1147,7 +1165,9 @@ nothing is posted. The value is only ever shown as a proposal — the decider's 
   the switchover steps are in [`JIRA_SERVICE_ACCOUNT.md`](JIRA_SERVICE_ACCOUNT.md). At boot the bot calls
   `myself` and posts its Jira identity to the ops channel, warning when it differs from
   `JIRA_SERVICE_ACCOUNT_EMAIL` — that is how a personal account left in place gets noticed. Reporter/assignee **email visibility** to this account is required for Jira triggers
-  to resolve Slack users (Atlassian profile privacy may hide it).
+  to resolve Slack users (Atlassian profile privacy may hide it). The account must also be able to
+  **find users by e-mail** (`user/search`, *Browse users and groups*): the OAuth account binding (§2.5)
+  depends on it, and without it nobody can connect.
 - Existing Jira Automation for epics: when all children are Done → move epic to *Acceptance*.
   Its Slack-notification action should be removed once the bot asks instead.
 
@@ -1527,6 +1547,8 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | Same, and nothing in ops | The markers aren't saved on the trigger, the phrase changed, or the reply was in a different channel | Edit the trigger and check the Reply markers box against the review's wording (§12.2c) |
 | Slack shows ⚠️ on a click, nothing happens | App not connected (Render asleep or redeploying) | Wait for deploy / keep-alive; retry |
 | "You don't have access to this app" on Atlassian consent | OAuth app not shared | Distribution → Sharing |
+| "This Atlassian account is not yours" after consent; ops says "Jira connect rejected for @x: …" | Account binding (§2.5). `the Atlassian account belongs to someone else`: they were signed in to Atlassian as another person. `no Jira user matches their Slack e-mail`: their Slack and Atlassian addresses differ, or the service account cannot search by e-mail. `could not complete`: a Slack or Jira API error | Sign in to Atlassian as themselves and Connect again. For an address mismatch, the fix is in Slack or Atlassian profile data, not in the bot. A lookup error on everyone means the service account lost *Browse users and groups* (§9.3) |
+| At boot, ops lists "Could not verify — kept, decide by hand" | A token stored before the account binding existed failed the check for a reason other than a proven mismatch (usually the address cases above) | Ask the person. If it is not their account: `delete from public.oauth_tokens where slack_user_id = 'U…';` (or they press Disconnect). Proven mismatches are disconnected automatically and listed as such |
 | Ops says "hit its daily cap (50 asks / 24 h)" and matches are left unasked | The trigger has already recorded 50 prompts in the last 24 h (`JIRA_MAX_PROMPTS_PER_DAY`) | Expected safety valve. The matches are asked as the window rolls; raise the variable in Render if a trigger legitimately needs more |
 | Someone pressed Yes / High Risk / Save and got "🔐 Connect Jira first, then press the button again" | They have no Jira connection and the trigger does not allow the bot account to act for them (the default) | Expected: they connect (10 s) and press the same button; nothing was written. If the bot *should* act for unconnected people on this trigger, an admin ticks the Jira identity checkbox |
 | 👍 reaction answered with "I've DM'd you a link to connect Jira" and no update | Same, for channel triggers | Same |
@@ -1680,7 +1702,22 @@ builders and dynos are on the public internet, so a private endpoint means the *
 at the same time. That is the same boundary that keeps Render from reaching GitLab (§11.4), and it is
 why the destination below is a single move rather than two.
 
-### 12.7a The agreed destination (Sept 2026, pending design review)
+### 12.7a The agreed destination (Sept 2026; design approved with conditions, 19 Oct 2026)
+
+**Security approved the design on 19 Oct 2026** (Vahagn Israyelyan, SNS-133715), with final sign-off
+after they verify these on the AWS deployment, before cutover:
+
+| # | Condition | Status |
+|---|---|---|
+| 1 | Account binding on the OAuth callback (consenting account == Jira lookup by the Slack user's e-mail; reject and store nothing otherwise) | Built (§2.5, §14 #47) |
+| 2 | Callback on its own hostname; only `/oauth/callback` reachable from the internet, `/health` internal | Open — DevOps ingress, plus `/health` on an internal port |
+| 3 | Remove the bot-account write exception (`allow_bot_fallback`) | Open |
+| 4 | Scoped service account (`JIRA_SERVICE_ACCOUNT.md`) in place before cutover; personal admin token not carried into AWS, revoked | Open — IT |
+| 5 | At cutover rotate every secret that lived in Render (Slack bot/app tokens, signing secret, Atlassian client secret, Jira token); revoke the Azure OpenAI key | Open — cutover runbook |
+
+Also settled: no Bedrock model restriction; the Supabase due-diligence ticket closes when the Supabase
+project is **deleted** (after the rollback week); recertification owner Omer, reviewers Security, first
+one due 90 days after cutover, with the date posted on SNS-133715 once cutover is set.
 
 Settled in the security thread with Abhishek Rath and then with David Shato (DevOps). **Nothing here is
 built yet** — Security asked for a design first, reviewed by them, with someone from R&D architecting it.
@@ -1722,7 +1759,7 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 330 tests in 32 suites:
+`npm test` → Jest, `tests/*.test.js`, 341 tests in 33 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1746,10 +1783,11 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 | `pauseSwitch` | `pauseState`: DB flag, `BOT_PAUSED` override, DB failure reads as running, 30 s cache + `invalidate`, `setPaused` records who, `describePause` wording; poller evaluates nothing and warns ops once; DM paths (Yes, risk status, collect Save, Reply modal) write nothing and keep the ask and prompt; reaction answers in-thread; Home banner and admin-only Pause / Resume, both audited; not paused → the same click goes through |
 | `auditEvents` | Every notifier method writes a row mirroring the ops line (kind, user, issue, identity, structured detail); failures recorded with `ok:false` and the error; bot-account identity captured; proposed vs applied LLM decisions are distinct kinds; a plain `post` is kind `ops`; a failing sink never breaks the message; rows are written even with no ops channel; insert truncates long text; the query filters by issue / user / kind / time |
 | `homeVisibility` | Admin vs regular-user Home sections (no DB calls for hidden sections), Connect (async URL) vs Disconnect by connection state, persistent recent activity from the database, in-memory fallback, `addEntry` persistence |
-| `callbackServer` | Public HTTP surface is exactly `/health` (200) and `/oauth/callback` (400 without code/state, else `handleCallback(code, state)`; `invalid_state` → 400 "expired or already used" page, not 500); `/send-dm` and unknown paths → 404 |
+| `callbackServer` | Public HTTP surface is exactly `/health` (200) and `/oauth/callback` (400 without code/state, else `handleCallback(code, state)`; `invalid_state` → 400 "expired or already used" page, not 500); `/send-dm` and unknown paths → 404; `account_mismatch` → 403 "not yours" page and an ops line with the reason, not a 500 |
 | `tokenCrypto` | Round trip, prefixed random ciphertext, legacy plaintext passthrough, wrong key / tampering / malformed detected, rotation (previous key decrypts, `isCurrent` distinguishes), `fromEnv` |
 | `oauthTokens` | `upsertToken` stores ciphertext and reads back plaintext; `loadFromDb` re-encrypts legacy plaintext rows exactly once; previous-key rows rewritten under the current key; encrypted rows without a key → `encryption_key_missing`; plaintext-only without a key still loads (local dev); `disconnect` forgets memory + DB |
 | `oauthState` | Memory mode: URL carries a random state (never the user id), fresh per call, accepted once, replay / unknown / malformed / expired rejected before any token exchange; database mode: state inserted, consumed atomically through the DB, tokens persisted for the mapped user, prune called |
+| `oauthAccountBinding` | The consenting account matches → stored, `users.info` and the lookup called for that user, `/myself` read with the user's token; `mismatch`, `not_found`, `ambiguous`, `no_slack_email` → `AccountBindingError` and nothing stored in memory or the database; a failing lookup → `lookup_failed`; no dependencies → `not_configured`; `verifyStoredBindings` keeps the ok token, disconnects the mismatch, keeps and reports the unverifiable one; `findAccountIdsByEmail` drops prefix matches, app and inactive accounts, keeps a hidden e-mail, throws on API errors |
 | `noContentLogging` | A sentinel typed into the reply modal / collect modal reaches the ops channel but never any pino log call |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
 
@@ -2041,6 +2079,20 @@ Chronological, with rationale (see `git log` for commits):
     replaced. **An open ❓ thread leaves the raw-reply path entirely**, so the hazard stays closed even if
     someone re-ticks Thread reply. A 👍 on the post remains the one-click route and gets the same ❓ → ✅.
     A bot ✅ settles the post, so a later 👍 is the same no-op as on an auto-verified post.
+
+47. **OAuth account binding (§2.5; SNS-133715, condition 1).** Security's approval of the AWS design
+    (19 Oct 2026) pointed out that `state` proves who *started* a connect, not who *consented*: someone
+    forwarded a Connect link, or signed in to Atlassian as another account, would have bound that
+    account's token to the Slack user. The callback now requires the consenting `accountId` to be the one
+    Jira user the service account finds for the Slack user's e-mail. Two deliberate departures from the
+    letter of the condition, both told to Security: the `accountId` comes from Jira's `/myself` rather
+    than `api.atlassian.com/me`, because `/me` needs the extra `read:me` scope and returns the same id;
+    and the check **fails closed** — a missing dependency, an API error, several matches or no match all
+    reject — since a check that passes when it cannot run is not a check. The cost is that a person whose
+    Slack and Atlassian addresses differ cannot connect until the profile data is fixed. Tokens stored
+    before the check are verified at every boot; only a *proven* mismatch is disconnected automatically,
+    because the other failures cannot tell a hijack from an alias and deleting them would lock out pilot
+    users the operator can ask in person.
 
 ---
 

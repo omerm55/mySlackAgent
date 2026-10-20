@@ -195,6 +195,25 @@ class JiraService {
   }
 
   /**
+   * Every human Jira account matching an e-mail address — for the OAuth account binding, which must
+   * tell "nobody" from "more than one". `user/search` matches the query as a prefix of the display name
+   * or e-mail, so a returned e-mail that differs is dropped; one hidden by profile privacy is kept (the
+   * search still matched on it). Unlike findUserByEmail this throws on API errors.
+   * @param {string} email
+   * @returns {Promise<string[]>} accountIds
+   */
+  async findAccountIdsByEmail(email) {
+    const wanted = email.trim().toLowerCase();
+    const response = await this.client.get('/rest/api/3/user/search', {
+      params: { query: wanted, maxResults: 10 },
+    });
+    return (response.data || [])
+      .filter((u) => u.accountType === 'atlassian' && u.active !== false)
+      .filter((u) => !u.emailAddress || u.emailAddress.toLowerCase() === wanted)
+      .map((u) => u.accountId);
+  }
+
+  /**
    * Search for a Jira user by display name or email.
    * Returns the first match's accountId, or null if not found.
    * @param {string} nameOrEmail

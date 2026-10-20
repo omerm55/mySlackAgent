@@ -6,13 +6,20 @@ const axios = require('axios');
 const OAuthService = require('../src/services/oauthService');
 const { OAuthStateError, STATE_TTL_MS } = OAuthService;
 
-const opts = { clientId: 'cid', clientSecret: 'sec', redirectUri: 'https://bot/oauth/callback', jiraBaseUrl: 'https://x.atlassian.net' };
+// Account binding (tests/oauthAccountBinding.test.js) passes for everyone here: one Jira user, 'acc-1'.
+const opts = {
+  clientId: 'cid', clientSecret: 'sec', redirectUri: 'https://bot/oauth/callback', jiraBaseUrl: 'https://x.atlassian.net',
+  serviceJira: { findAccountIdsByEmail: jest.fn().mockResolvedValue(['acc-1']) },
+  slackClient: { users: { info: jest.fn().mockResolvedValue({ user: { profile: { email: 'a@x.com' } } }) } },
+};
 const stateOf = (url) => new URL(url).searchParams.get('state');
 
 beforeEach(() => {
   axios.post.mockReset(); axios.get.mockReset();
   axios.post.mockResolvedValue({ data: { access_token: 'at', refresh_token: 'rt', expires_in: 3600 } });
-  axios.get.mockResolvedValue({ data: [{ id: 'cloud-1', url: 'https://x.atlassian.net' }] });
+  axios.get.mockImplementation(async (url) => (url.endsWith('/myself')
+    ? { data: { accountId: 'acc-1' } }
+    : { data: [{ id: 'cloud-1', url: 'https://x.atlassian.net' }] }));
 });
 
 describe('OAuth state — memory mode (no database)', () => {

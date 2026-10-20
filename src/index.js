@@ -23,7 +23,7 @@ const OAuthService = require('./services/oauthService');
 const DbService = require('./services/dbService');
 const IntegrationCache = require('./services/integrationCache');
 const LlmService = require('./services/llmService');
-const { startCallbackServer } = require('./server/callbackServer');
+const { startCallbackServer, BINDING_REASONS } = require('./server/callbackServer');
 const { registerDmHandler } = require('./handlers/dmHandler');
 const { registerHomeHandler } = require('./handlers/homeHandler');
 const { logger, boltLogger } = require('./utils/logger');
@@ -80,6 +80,8 @@ const oauthService = process.env.JIRA_OAUTH_CLIENT_ID
     redirectUri: process.env.OAUTH_REDIRECT_URI,
     jiraBaseUrl: process.env.JIRA_BASE_URL,
     db,
+    serviceJira: jiraService, // account binding: Jira user lookup by the Slack user's e-mail
+    slackClient: app.client,
   })
   : null;
 
@@ -152,8 +154,21 @@ registerPreferencesHandler(app, services);
       throw err;
     }
     const oauthPort = parseInt(process.env.OAUTH_PORT || '3000', 10);
-    startCallbackServer(oauthService, oauthPort, logger);
+    startCallbackServer(oauthService, oauthPort, logger, opsNotifier);
     logger.info({ redirectUri: process.env.OAUTH_REDIRECT_URI }, '[oauth] Impersonation enabled');
+
+    // Tokens connected before the account binding existed were never checked (SNS-133715, condition 1).
+    oauthService.verifyStoredBindings()
+      .then(async ({ checked, ok, removed, unverified }) => {
+        if (!removed.length && !unverified.length) return;
+        await opsNotifier?.post(
+          `🔐 Jira account binding: ${ok}/${checked} stored connection(s) verified.` +
+          (removed.length ? `\n• Disconnected (account belongs to someone else): ${removed.map((u) => `<@${u}>`).join(', ')}` : '') +
+          (unverified.length ? `\n• Could not verify — kept, decide by hand (§12.4): ${unverified.map((x) => `<@${x.slackUserId}> (${BINDING_REASONS[x.reason] || x.reason})`).join(', ')}` : ''),
+          { kind: 'oauth_binding_check', detail: { checked, ok, removed, unverified } },
+        );
+      })
+      .catch((err) => logger.warn(`[oauth] Account binding check failed: ${err.message}`));
   }
 
   // Which Jira identity are we polling (and, where a trigger allows it, writing) as? A personal admin

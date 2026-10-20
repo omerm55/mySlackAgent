@@ -57,3 +57,30 @@ describe('callback server surface', () => {
     expect(res.body).toMatch(/expired or was already used/);
   });
 });
+
+describe('callback server — account binding rejected (SNS-133715, condition 1)', () => {
+  let server; let port;
+  const oauth = { handleCallback: jest.fn() };
+  const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+  const opsNotifier = { post: jest.fn().mockResolvedValue(undefined) };
+
+  beforeAll(async () => {
+    delete process.env.PORT;
+    server = startCallbackServer(oauth, 0, logger, opsNotifier);
+    await new Promise((r) => server.once('listening', r));
+    port = server.address().port;
+  });
+  afterAll(() => new Promise((r) => server.close(r)));
+
+  test('→ 403 "not yours" page, reason (never e-mails) to ops', async () => {
+    oauth.handleCallback.mockRejectedValueOnce(Object.assign(new Error('binding'), { code: 'account_mismatch', reason: 'mismatch', slackUserId: 'U1' }));
+    const res = await get(port, '/oauth/callback?code=abc&state=s');
+    expect(res.status).toBe(403);
+    expect(res.body).toMatch(/not yours/);
+    expect(opsNotifier.post).toHaveBeenCalledWith(
+      expect.stringMatching(/<@U1>: the Atlassian account belongs to someone else/),
+      { kind: 'oauth_binding_rejected', user: 'U1', ok: false, detail: { reason: 'mismatch' } },
+    );
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+});

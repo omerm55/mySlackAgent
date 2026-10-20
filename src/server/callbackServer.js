@@ -14,9 +14,10 @@ const http = require('http');
  * @param {import('../services/oauthService')} oauthService
  * @param {number} oauthPort  Fallback port (from OAUTH_PORT env var)
  * @param {import('pino').Logger} logger
+ * @param {import('../utils/opsNotifier')} [opsNotifier]  told about every rejected account binding
  * @returns {http.Server}
  */
-function startCallbackServer(oauthService, oauthPort, logger) {
+function startCallbackServer(oauthService, oauthPort, logger, opsNotifier = null) {
   // Render (and most PaaS) set PORT; fall back to the configured OAUTH_PORT for local dev.
   const port = process.env.PORT ? parseInt(process.env.PORT, 10) : oauthPort;
 
@@ -59,6 +60,23 @@ function startCallbackServer(oauthService, oauthPort, logger) {
         res.end(page('⏳ This link has expired or was already used', 'Open the bot\'s Home tab in Slack and press <b>Connect Jira</b> again to get a fresh link.'));
         return;
       }
+      if (err.code === 'account_mismatch') {
+        // The person consented as an Atlassian account that is not theirs (or we could not prove it is).
+        // Nothing was stored. Reason only — never the e-mail addresses involved.
+        logger.warn(`[oauth] Callback rejected for ${err.slackUserId}: account ${err.reason}`);
+        opsNotifier?.post(
+          `⛔ Jira connect rejected for <@${err.slackUserId}>: ${BINDING_REASONS[err.reason] || err.reason}. Nothing was stored.`,
+          { kind: 'oauth_binding_rejected', user: err.slackUserId, ok: false, detail: { reason: err.reason } },
+        ).catch(() => {});
+        res.writeHead(403, { 'Content-Type': 'text/html' });
+        res.end(page(
+          '⛔ This Atlassian account is not yours',
+          'The Atlassian account you signed in with does not match your Slack account, so nothing was connected. ' +
+          'Sign in to Atlassian with your own Sisense account and press <b>Connect Jira</b> again in the bot\'s Home tab. ' +
+          'If you already did, your Slack and Atlassian e-mail addresses may differ — ask the bot\'s owner (PH Ops).',
+        ));
+        return;
+      }
       logger.error({ err: err.message }, '[oauth] Callback error');
       res.writeHead(500, { 'Content-Type': 'text/html' });
       res.end(page('❌ Authorization failed', 'Something went wrong. Please try connecting again.'));
@@ -73,10 +91,20 @@ function startCallbackServer(oauthService, oauthPort, logger) {
   return server;
 }
 
+// Ops-channel wording for AccountBindingError reasons (oauthService).
+const BINDING_REASONS = {
+  mismatch: 'the Atlassian account belongs to someone else',
+  not_found: 'no Jira user matches their Slack e-mail',
+  ambiguous: 'more than one Jira user matches their Slack e-mail',
+  no_slack_email: 'their Slack profile has no e-mail',
+  lookup_failed: 'the account check could not complete (Slack or Jira API error)',
+  not_configured: 'the account check is not configured',
+};
+
 function page(heading, body) {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>${heading}</title>
 <style>body{font-family:system-ui,sans-serif;max-width:480px;margin:80px auto;padding:0 24px;color:#1a1f2e}h1{font-size:1.5rem}p{color:#5a6478}</style>
 </head><body><h1>${heading}</h1><p>${body}</p></body></html>`;
 }
 
-module.exports = { startCallbackServer };
+module.exports = { startCallbackServer, BINDING_REASONS };
