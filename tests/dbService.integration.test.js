@@ -204,6 +204,17 @@ withDb('DbService against a real Postgres', () => {
     expect(await db.getUserPreference('U-nobody')).toBeNull();
   });
 
+  test('withTickLock: a second holder of the same name is refused until the first finishes', async () => {
+    let inner;
+    const outer = await db.withTickLock('slack-jira-bot:test', async () => {
+      inner = await db.withTickLock('slack-jira-bot:test', async () => 'should not run'); // another session
+      return 'ran';
+    });
+    expect(outer).toEqual({ ran: true, result: 'ran' });
+    expect(inner).toEqual({ ran: false });
+    expect(await db.withTickLock('slack-jira-bot:test', async () => 'again')).toEqual({ ran: true, result: 'again' }); // released
+  });
+
   test('release calendar dates are YYYY-MM-DD strings, ordered by branch-out', async () => {
     const rows = await db.getReleaseCalendar();
     expect(rows.length).toBeGreaterThan(0);

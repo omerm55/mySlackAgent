@@ -102,16 +102,25 @@ class DigestScheduler {
   async runOnce(now = new Date()) {
     if (this._running) return [];
     this._running = true;
-    const delivered = [];
     try {
-      const users = await this.db.getDigestUsers();
-      for (const pref of users) {
-        if (!isDigestDue(pref, now)) continue;
-        const n = await this.deliverTo(pref.slack_user_id, pref);
-        delivered.push({ slackUserId: pref.slack_user_id, count: n });
-      }
+      // Same single-evaluator rule as the poller: a digest delivered twice is two identical DMs.
+      const { ran, result } = this.db.withTickLock
+        ? await this.db.withTickLock('slack-jira-bot:digest', () => this._deliverDue(now))
+        : { ran: true, result: await this._deliverDue(now) };
+      if (!ran) this.logger.info('[digest] Another instance holds the digest lock — tick skipped');
+      return ran ? result : [];
     } finally {
       this._running = false;
+    }
+  }
+
+  async _deliverDue(now) {
+    const delivered = [];
+    const users = await this.db.getDigestUsers();
+    for (const pref of users) {
+      if (!isDigestDue(pref, now)) continue;
+      const n = await this.deliverTo(pref.slack_user_id, pref);
+      delivered.push({ slackUserId: pref.slack_user_id, count: n });
     }
     return delivered;
   }

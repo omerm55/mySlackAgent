@@ -133,6 +133,32 @@ class DbService {
     );
   }
 
+  /**
+   * Run `fn` only if no other instance is running the same tick. A session-level advisory lock on one
+   * dedicated connection (`pg_try_advisory_lock(hashtext(name))`): the second instance during a rolling
+   * deploy, or an accidental second replica, skips instead of asking the same people twice. The lock dies
+   * with the session, so a crashed process cannot leave it held.
+   * @template T
+   * @param {string} name   lock name, e.g. 'slack-jira-bot:poller'
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<{ ran: boolean, result?: T }>}
+   */
+  async withTickLock(name, fn) {
+    if (typeof this.pool.connect !== 'function') return { ran: true, result: await fn() }; // test doubles
+    const client = await this.pool.connect();
+    try {
+      const { rows } = await client.query('select pg_try_advisory_lock(hashtext($1)) as locked', [name]);
+      if (!rows[0]?.locked) return { ran: false };
+      try {
+        return { ran: true, result: await fn() };
+      } finally {
+        await client.query('select pg_advisory_unlock(hashtext($1))', [name]).catch(() => {});
+      }
+    } finally {
+      client.release();
+    }
+  }
+
   /** Release every connection — called on shutdown so the process can exit cleanly. */
   async close() {
     await this.pool.end();

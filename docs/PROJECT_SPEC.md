@@ -9,7 +9,7 @@
 > truth: `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (moved from GitHub, §11.4). Trunk:
 > `main`. Render deploys `main` through the GitHub push mirror — Render cannot reach the internal
 > GitLab (§11.4).
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (341 tests, 33 suites; 13
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (347 tests, 34 suites; 13
 > of them need a Postgres and skip without one — §13).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
@@ -393,7 +393,7 @@ src/
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6); applied by scripts/apply-schema.js
-tests/                         Jest (341 tests, 33 suites; the database suite needs TEST_DATABASE_URL)
+tests/                         Jest (347 tests, 34 suites; the database suite needs TEST_DATABASE_URL)
 config/*.example.json          Local-dev config templates (legacy path)
 .github/workflows/ci.yml       CI on GitHub: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
 .gitlab-ci.yml                 The same four gates on GitLab (for the move to gitlab.rnd.sisense.com)
@@ -484,6 +484,9 @@ hosted provider's `sslmode=require` means), `verify`, or `disable`; `DATABASE_CA
 the chain properly. Constructed with an optional `tokenCrypto` (`TokenCrypto.fromEnv()`): `upsertToken`
 encrypts `access_token` / `refresh_token`, `getToken` / `getAllTokens` decrypt (`getAllTokens` also flags
 `needsRewrite`); reading an `enc:` row without a key throws `encryption_key_missing`.
+`withTickLock(name, fn)` runs `fn` only if this process wins `pg_try_advisory_lock(hashtext(name))` on one
+dedicated connection (unlocked and released in `finally`; the lock dies with the session if the process
+does) and returns `{ ran, result }` — the single-evaluator guard for the poller and digest ticks (§14 #48).
 Methods per table (see §6): tokens (`upsertToken` — `insert … on conflict (slack_user_id) do update`,
 `getToken`, `getAllTokens`, `deleteToken`),
 oauth_states (`insertOauthState`, `consumeOauthState` — one statement, `update … set used_at = now()
@@ -512,7 +515,8 @@ genuine `text[]` and are passed through as arrays; that distinction is what
 **`integrationCache.js`** — merges static integrations with `integrations` rows (normalised to
 camelCase, incl. `allowBotFallback`), refreshes every 60 s, `invalidate()` on writes.
 
-**`jiraPoller.js`** — tick every `JIRA_POLL_INTERVAL_SEC` (60). For each active Jira trigger due per
+**`jiraPoller.js`** — tick every `JIRA_POLL_INTERVAL_SEC` (60), under `withTickLock('slack-jira-bot:poller')`
+(another instance holding it → the tick is skipped and logged; Run now included). For each active Jira trigger due per
 its `poll_interval_min`/`last_polled_at`: `searchIssues(jql, fieldsFor(trigger))`, decide which issues
 are new (see below), for each resolve the person via `resolvePerson` — `reporter` | `assignee` |
 `user_field` (`notify_field_id`, first user of an array; fallback assignee → reporter) — → email →
@@ -560,7 +564,7 @@ under Slack's 3000-char cap), `readCollectModal` (explicit values only where typ
 `previewBlocks(ctx, user, values, {note})` → Save / Edit (carries values + free text) / Cancel, Save
 withheld while a required field is missing. `sendDmQuestion` delegates when `askType === 'collect'`.
 
-**`digestScheduler.js`** — tick every 60 s. For each `user_preferences` row with
+**`digestScheduler.js`** — tick every 60 s, under `withTickLock('slack-jira-bot:digest')`. For each `user_preferences` row with
 `digest_frequency != immediate`, compute the latest slot (hourly: top of hour; daily: 09:00 local;
 twice_daily: 09:00/15:00 local; time zone from Slack profile) and deliver pending prompts if
 `last_digest_at < slot`. Delivery = header DM + one `sendDmQuestion` per prompt (so existing button
@@ -1734,9 +1738,9 @@ controls, the shorter the review — monitoring and alerting already exist, and 
 cost. Moving the LLM to Bedrock also closes open item 2 (the Azure OpenAI data flow) by keeping
 inference in the same account.
 
-**What this costs us in code** (none of it done): a Bedrock provider in `llmService.js` (SigV4, a
-different request shape, new model ids, and re-validating prompts written for GPT-5.1 — §8); an
-advisory lock around the poller and digest ticks (§16.1); graceful SIGTERM shutdown (§16.1); and
+**What this costs us in code:** a Bedrock provider in `llmService.js` (SigV4, a
+different request shape, new model ids, and re-validating prompts written for GPT-5.1 — §8); ~~an
+advisory lock around the poller and digest ticks~~ (done, §14 #48); graceful SIGTERM shutdown (§16.1); and
 removing the Render-specific pieces (`keepAlive.js`, the `PORT` fallback in `callbackServer.js`).
 
 **One thing the move must not break.** The service is outbound-only *except* `GET /oauth/callback`:
@@ -1759,13 +1763,13 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 341 tests in 33 suites:
+`npm test` → Jest, `tests/*.test.js`, 347 tests in 34 suites:
 
 | Suite | Covers |
 |---|---|
 | `reactionHandler`, `replyHandler` | The bot's own 👍 is ignored; trigger matching, allowlist, rate limit, dedup, personal scope, emoji variants, audit/alerting; OAuth gate: no token + no fallback → thread reply + auth DM + ops, nothing written; fallback allowed → bot writes with attribution; token → user writes, no attribution |
 | `jiraService` | Field payload shapes, JQL pagination/truncation/errors, transition matching, Resolution auto-fill, unfillable fields |
-| `dbService.integration` | **Needs a Postgres** (`TEST_DATABASE_URL`; skipped without one, which is the default on a laptop). Applies the whole schema, then exercises the real SQL: token upsert stores ciphertext and replaces rather than duplicates; `consumeOauthState` succeeds exactly once and refuses expired states; pruning keeps recent ones; `integrations.triggers` stays a `text[]` and `collect_fields` / `payload` / `detail` / `value` stay jsonb; one prompt per (trigger, issue); the durable daily count; digest queue and `uuid[]` delivery; `markPromptAnswered` for one user or all; audit filters newest-first; activity mapping; digest users exclude `immediate`; release-calendar dates come back as `YYYY-MM-DD` strings |
+| `dbService.integration` | **Needs a Postgres** (`TEST_DATABASE_URL`; skipped without one, which is the default on a laptop). Applies the whole schema, then exercises the real SQL: token upsert stores ciphertext and replaces rather than duplicates; `consumeOauthState` succeeds exactly once and refuses expired states; pruning keeps recent ones; `integrations.triggers` stays a `text[]` and `collect_fields` / `payload` / `detail` / `value` stay jsonb; one prompt per (trigger, issue); the durable daily count; digest queue and `uuid[]` delivery; `markPromptAnswered` for one user or all; audit filters newest-first; activity mapping; digest users exclude `immediate`; release-calendar dates come back as `YYYY-MM-DD` strings; `withTickLock` refuses a second session the same lock until the first finishes |
 | `fixVersionSuggester` | Candidate filtering, calendar windows, timeline/current, LLM adjudication + fallbacks, stage timeouts, progress |
 | `digestScheduler` | Time-zone helpers, slot computation, due logic, delivery, flush |
 | `jiraPollerQueue` | Send vs queue by preference |
@@ -1788,6 +1792,7 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 | `oauthTokens` | `upsertToken` stores ciphertext and reads back plaintext; `loadFromDb` re-encrypts legacy plaintext rows exactly once; previous-key rows rewritten under the current key; encrypted rows without a key → `encryption_key_missing`; plaintext-only without a key still loads (local dev); `disconnect` forgets memory + DB |
 | `oauthState` | Memory mode: URL carries a random state (never the user id), fresh per call, accepted once, replay / unknown / malformed / expired rejected before any token exchange; database mode: state inserted, consumed atomically through the DB, tokens persisted for the mapped user, prune called |
 | `oauthAccountBinding` | The consenting account matches → stored, `users.info` and the lookup called for that user, `/myself` read with the user's token; `mismatch`, `not_found`, `ambiguous`, `no_slack_email` → `AccountBindingError` and nothing stored in memory or the database; a failing lookup → `lookup_failed`; no dependencies → `not_configured`; `verifyStoredBindings` keeps the ok token, disconnects the mismatch, keeps and reports the unverifiable one; `findAccountIdsByEmail` drops prefix matches, app and inactive accounts, keeps a hidden e-mail, throws on API errors |
+| `tickLock` | `withTickLock`: lock won → runs, unlocks and releases the same connection; held elsewhere → does not run, never unlocks, still releases; the work throws → unlocked and released, error surfaces; the poller and digest scheduler skip their tick (nothing loaded or delivered) when the lock is held elsewhere |
 | `noContentLogging` | A sentinel typed into the reply modal / collect modal reaches the ops channel but never any pino log call |
 | `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
 
@@ -2094,6 +2099,17 @@ Chronological, with rationale (see `git log` for commits):
     because the other failures cannot tell a hijack from an alias and deleting them would lock out pilot
     users the operator can ask in person.
 
+48. **One evaluator across instances: an advisory lock on the poller and digest ticks (§5.3).** The
+    shared Kubernetes chart DevOps provide (§12.7a) has no rollout-strategy setting, so every deploy
+    briefly runs two pods. Slack's Socket Mode copes — each event goes to one connection — but two
+    in-process timers would both ask the same person. Each tick now runs under
+    `pg_try_advisory_lock(hashtext(name))`, held on one dedicated pool connection (advisory locks
+    belong to a session, and the pool would otherwise unlock on a different one), and a tick that
+    loses simply skips; the winner's next tick comes a minute later anyway. Chosen over leader election
+    or a `Recreate` rollout because it needs nothing from the platform, cannot outlive a crashed
+    process, and makes replica count irrelevant rather than something to police. Shipped on Render
+    first, where it is a no-op, so it is proven before the move.
+
 ---
 
 ## 15. Known limitations
@@ -2129,15 +2145,11 @@ Chronological, with rationale (see `git log` for commits):
   `jira_triggers.notification_match` column + modal input — deferred until a second trigger exists.
 - **LLM output** is validated structurally, not semantically; reasons are shown to users as-is. Every
   LLM-derived change is confirmed by the person before it is written (reply preview, collect preview).
-- **The service assumes a single running instance.** The Jira poller and the digest scheduler are
-  plain in-process timers with no lock or leader election, and the dedup cache and per-channel rate
-  limiter are in memory. Two instances would DM the same person the same ask twice — the poller
-  reads which issues were already asked, sends, and only then records (`recordPrompt`), so the
-  second write is swallowed by `on conflict do nothing` and the duplicate is invisible in the audit
-  trail. The per-trigger daily cap and the hourly channel limit would likewise be evaluated per
-  instance. Slack's Socket Mode is *not* part of this limitation — it supports several concurrent
-  connections and delivers each event once. Render runs one instance, so this is latent today; it
-  becomes real on Kubernetes (§12.7a), which is why the advisory lock is listed in §16.1.
+- **Some state is still per instance.** The Jira poller and the digest scheduler run under a Postgres
+  advisory lock (§14 #48), so a second instance skips their ticks instead of asking the same people
+  twice. What remains in memory is the dedup cache and the hourly per-channel rate limiter: with two
+  instances (only ever briefly, during a rolling deploy) each would allow its own hourly quota. Slack's
+  Socket Mode delivers each event to one connection, so no event is handled twice.
 - **Database TLS is `require`, not verified:** traffic to Postgres is encrypted, but the server's
   certificate chain is not checked, so it defends against eavesdropping and not against an active
   man-in-the-middle. `DATABASE_CA_CERT` (§10) turns on full verification; it is deliberately unset
@@ -2156,11 +2168,7 @@ Ordered by value ÷ effort; each item is independently shippable.
 - **Graceful shutdown on SIGTERM** (stop the timers, drain in-flight handlers, `DbService.close()`,
   which already exists for it). On Render a restart simply dropped in-flight work; on Kubernetes pods
   are recycled routinely, so this stops being cosmetic (§12.7a).
-- **An advisory lock around the poller and digest ticks** — `select pg_try_advisory_lock($1)` at the
-  top of each tick, skip if another instance holds it. About ten lines, and it removes the
-  single-instance assumption in §15 entirely: replica count and rollout strategy stop mattering, and
-  an accidental scale-up or an overlapping pod during a rolling update can no longer duplicate asks.
-  Worth doing **before** the move to Kubernetes rather than after.
+- ~~An advisory lock around the poller and digest ticks~~ — done (§14 #48).
 - **A Bedrock provider in `llmService.js`** (§12.7a): SigV4 signing, the Converse/InvokeModel request
   shape, model ids, pod credentials rather than an API key — plus re-validating the §8 prompts, which
   are written for GPT-5.1. Sized as its own piece of work, not a configuration change.

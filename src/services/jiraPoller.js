@@ -140,6 +140,23 @@ class JiraPoller {
       return [];
     }
     this._running = true;
+    try {
+      // One evaluator across instances (rolling deploys, an accidental second replica): whoever holds
+      // the lock runs; the other skips this tick rather than asking the same people twice.
+      const { ran, result } = this.db.withTickLock
+        ? await this.db.withTickLock('slack-jira-bot:poller', () => this._evaluateDue({ force, onlyId }))
+        : { ran: true, result: await this._evaluateDue({ force, onlyId }) };
+      if (!ran) this.logger.info('[jiraPoller] Another instance holds the poller lock — tick skipped');
+      return ran ? result : [];
+    } catch (err) {
+      this.logger.error(`[jiraPoller] Tick failed: ${err.message}`);
+      return [];
+    } finally {
+      this._running = false;
+    }
+  }
+
+  async _evaluateDue({ force, onlyId }) {
     const results = [];
     try {
       let triggers = await this.db.getActiveJiraTriggers();
@@ -160,8 +177,6 @@ class JiraPoller {
       }
     } catch (err) {
       this.logger.error(`[jiraPoller] Could not load triggers: ${err.message}`);
-    } finally {
-      this._running = false;
     }
     return results;
   }
