@@ -28,4 +28,10 @@ create index if not exists audit_events_kind_idx  on public.audit_events (kind, 
 
 -- Same posture as every other table: only the server's key may read or write.
 alter table public.audit_events enable row level security;
-revoke all on table public.audit_events from anon, authenticated;
+-- Supabase's API roles exist only in Supabase; on any other Postgres (RDS, CI) there is nothing to revoke.
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'anon') then
+    revoke all on table public.audit_events from anon, authenticated;
+  end if;
+end $$;

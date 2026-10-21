@@ -15,4 +15,10 @@ create table if not exists public.app_settings (
 );
 
 alter table public.app_settings enable row level security;
-revoke all on table public.app_settings from anon, authenticated;
+-- Supabase's API roles exist only in Supabase; on any other Postgres (RDS, CI) there is nothing to revoke.
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'anon') then
+    revoke all on table public.app_settings from anon, authenticated;
+  end if;
+end $$;

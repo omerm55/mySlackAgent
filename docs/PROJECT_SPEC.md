@@ -1654,7 +1654,10 @@ today, an RDS or Azure Flexible Server tomorrow, with no code change. What the m
 node scripts/apply-schema.js "postgres://user:password@host:5432/database"
 ```
 
-Every file is idempotent, so this is also how to repair a missing table. `supabase/rls.sql` is
+Every file is idempotent, so this is also how to repair a missing table. Every file also runs on a
+plain Postgres: the two that close Supabase's API roles (`audit_events.sql`, `app_settings.sql`) do so
+only when those roles exist. Until Oct 2026 they revoked unconditionally, which failed outside Supabase
+(`role "anon" does not exist`) — in CI's database suite, and it would have failed on RDS. `supabase/rls.sql` is
 deliberately *not* applied by the script: it grants against Supabase's `anon` / `authenticated` roles,
 which exist only there.
 
