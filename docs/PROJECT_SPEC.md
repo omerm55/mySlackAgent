@@ -2116,7 +2116,11 @@ Chronological, with rationale (see `git log` for commits):
     (always saved false, dropped on RDS after cutover, so the schema the cutover copies is unchanged);
     asks already sitting in people's DMs still carry `allowFallback: true` in their button values, and
     the handlers **ignore it** rather than honouring old buttons; and the service account becomes
-    **read-only in practice**, which is what lets the IT request ask for no write permissions at all.
+    **read-only in practice**, which is what lets the IT request ask for no write permissions at all. Four
+    user-facing texts still promised the old behaviour and were corrected a day later. The Connect nudges
+    on the collect and risk-review asks said changes "are made by the bot account" until the person
+    connects, and two App Home lines contrasted "your name" with "the bot account". They now say plainly
+    that nothing is saved without the person's own connection.
 
 ---
 

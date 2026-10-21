@@ -104,8 +104,8 @@ async function buildHomeBlocks(userId, services, logger) {
       text: {
         type: 'mrkdwn',
         text: hasOAuth
-          ? '✅  *Jira account connected*\nYour Jira changes will appear as you, not the bot.'
-          : '🔌  *Jira account not connected*\nConnect your Jira account so updates appear under your name instead of the bot account.',
+          ? '✅  *Jira account connected*\nYour Jira changes are made as you.'
+          : '🔌  *Jira account not connected*\nConnect your Jira account: the bot makes every Jira change under your own name, so it needs this connection first.',
       },
       ...((!hasOAuth && authUrl) ? {
         accessory: {
@@ -241,7 +241,7 @@ async function buildHomeBlocks(userId, services, logger) {
       type: 'section',
       fields: [
         { type: 'mrkdwn', text: '📨  *Bot-initiated DM questions*\nClick Yes/No or reply in free text — AI interprets your intent and updates Jira accordingly.' },
-        { type: 'mrkdwn', text: '🔐  *OAuth impersonation*\nAfter connecting Jira above, all changes appear as you in the issue history — not the bot account.' },
+        { type: 'mrkdwn', text: '🔐  *Your own Jira account*\nEvery change is made with your own Jira connection and appears as you in the issue history. The bot never changes Jira on its own account.' },
       ],
     },
     { type: 'divider' },

@@ -53,7 +53,7 @@ function buildYesNoBlocks(context, slackUserId) {
 
 /**
  * First contact with someone who hasn't connected Jira: nudge them to connect right here, so the
- * action is done as them rather than as the bot account.
+ * action is done as them — there is no other way to write.
  */
 function connectBlocks(authUrl) {
   if (!authUrl) return [];

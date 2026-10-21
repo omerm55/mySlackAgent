@@ -181,7 +181,7 @@ function previewBlocks(context, slackUserId, values, { note = null } = {}) {
 function connectBlocks(authUrl) {
   if (!authUrl) return [];
   return [
-    { type: 'context', elements: [{ type: 'mrkdwn', text: '🔐 *Not connected to Jira yet.* Connect once (~10 seconds) so these changes appear under your name. Until then they are made by the bot account.' }] },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: '🔐 *Not connected to Jira yet.* Connect once (~10 seconds): changes are only ever made under your own name, so nothing can be saved until then.' }] },
     { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '🔗 Connect Jira', emoji: true }, url: authUrl, action_id: 'dm_connect_jira' }] },
   ];
 }
