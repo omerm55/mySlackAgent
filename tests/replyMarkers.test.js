@@ -1,5 +1,7 @@
 'use strict';
 
+const { connectedAs } = require('./helpers/connectedAs');
+
 // Reply markers: in the PM-reviewed channel a scheduled review replies "Auto-verified" (it already set
 // the field) or "Needs a decision" (the field must stay unset). The bot marks the root post 👍 / ❓ and
 // writes nothing to Jira for either.
@@ -65,7 +67,8 @@ describe('replyHandler with reply markers', () => {
         }],
       },
     };
-    registerReplyHandler(app, jira, { postAttributionComment: jest.fn() }, services);
+    services.oauthService = connectedAs(jira);
+    registerReplyHandler(app, jira, services);
     const client = {
       conversations: { replies: jest.fn().mockResolvedValue({ messages: [{ text: ROOT, ts: '111.000' }] }) },
       chat: { postMessage: jest.fn().mockResolvedValue({}) },
@@ -155,8 +158,8 @@ describe('settled posts: an approval marker means a person\'s 👍 or reply writ
     const handlers = {};
     const app = { event: (name, fn) => { handlers[name] = fn; } };
     const jira = { updateIssueField: jest.fn().mockResolvedValue({}) };
-    const svc = services(overrides);
-    registerReactionHandler(app, jira, { postAttributionComment: jest.fn() }, svc);
+    const svc = { ...services(overrides), oauthService: connectedAs(jira) };
+    registerReactionHandler(app, jira, svc);
     const client = {
       conversations: {
         history: jest.fn().mockResolvedValue({ messages: [{ ts: '111.000', text: ROOT, ...root }] }),
@@ -208,8 +211,8 @@ describe('settled posts: an approval marker means a person\'s 👍 or reply writ
     const handlers = {};
     const app = { message: (fn) => { handlers.message = fn; } };
     const jira = { updateIssueField: jest.fn().mockResolvedValue({}) };
-    const svc = services();
-    registerReplyHandler(app, jira, { postAttributionComment: jest.fn() }, svc);
+    const svc = { ...services(), oauthService: connectedAs(jira) };
+    registerReplyHandler(app, jira, svc);
     const thread = [{ ts: '111.000', text: ROOT, reply_count: 2 }, { ts: '222.000', user: 'UOMER', text: VERIFIED }, { ts: '333.000', user: 'UPM', text: 'I disagree, this needs a note' }];
     const client = {
       conversations: { replies: jest.fn().mockResolvedValue({ messages: thread }) },

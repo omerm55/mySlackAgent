@@ -7,7 +7,7 @@ const { findReplyMarker, threadReader, findSettlingMarker } = require('../utils/
 const { findOpenFlag } = require('../utils/threadDecision');
 const { proposeDecision } = require('./decisionHandler');
 
-function registerReplyHandler(app, jiraService, attributionService, services) {
+function registerReplyHandler(app, jiraService, services) {
   const { dedupCache, rateLimiter, auditLog, userCache, integrationCache } = services;
 
   /** React on the root message for each matched marker; scope and allowlist apply as for writes. */
@@ -122,7 +122,8 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
       const actorName = await userCache.getName(client, message.user);
 
       // Resolve OAuth once per event
-      let effectiveJira = jiraService;
+      // Writes are made only with the person's own token (SNS-133715, condition 3): no bot-account fallback.
+      let effectiveJira = null;
       let usingOAuth = false;
       const { oauthService } = services;
       let hasToken = false;
@@ -134,7 +135,7 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
             usingOAuth = true;
             hasToken = true;
           } catch {
-            effectiveJira = jiraService;
+            // Refresh failed: treated as not connected below.
           }
         }
         if (!hasToken) authUrl = await oauthService.generateAuthUrl(message.user).catch(() => null);
@@ -152,7 +153,7 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
         const {
           name, allowedSlackUserIds, rateLimitPerHour,
           jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType = 'select',
-          scope, createdBy, allowBotFallback = false,
+          scope, createdBy,
         } = integration;
         const tag = `[${name}/reply]`;
 
@@ -165,16 +166,18 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
           continue;
         }
 
-        // OAuth required: no token and this trigger does not allow the bot account → ask to connect, write nothing
-        if (oauthService && !hasToken && !allowBotFallback) {
-          logger.info(`${tag} ${message.user} not connected to Jira and bot fallback not allowed — asking to connect`);
+        // OAuth required: no usable token → ask to connect, write nothing
+        if (!usingOAuth && !oauthService) {
+          logger.warn(`${tag} Jira OAuth is not configured — nothing written`);
+          await services.opsNotifier?.reactionFiltered({ slackUserId: message.user, reason: `Jira OAuth is not configured, and writes need the person's own token (*${name}*)`, integration: name });
+          continue;
+        }
+        if (!usingOAuth) {
+          logger.info(`${tag} ${message.user} not connected to Jira — asking to connect`);
           sendAuthDm(`🔐 To apply your reply on ${issueKeys.map(issueLink).join(', ')} I need your Jira connection: <${authUrl}|connect your Jira account> (10 seconds), then reply again.`);
           await client.chat.postMessage({ channel: message.channel, thread_ts: message.thread_ts, text: `🔐 <@${message.user}> — I've DM'd you a link to connect Jira. Connect once, then reply again and I'll make the change under your name.` }).catch(() => {});
           await services.opsNotifier?.reactionFiltered({ slackUserId: message.user, reason: `not connected to Jira (OAuth required) for *${name}*`, integration: name });
           continue;
-        }
-        if (oauthService && !hasToken && allowBotFallback) {
-          sendAuthDm(`👋 To make your Jira changes appear as you (not the bot), <${authUrl}|connect your Jira account>. This change was made by the bot account.`);
         }
 
         // Rate limiting
@@ -204,11 +207,6 @@ function registerReplyHandler(app, jiraService, attributionService, services) {
               thread_ts: message.thread_ts,
               text: `✅ Jira issue *${issueLink(key)}* updated: *${jiraFieldName}* = *${jiraFieldValue}* (triggered by thread reply)`,
             });
-            if (effectiveJira === jiraService) {
-              await attributionService.postAttributionComment(
-                client, message.user, key, jiraFieldId, jiraFieldName, jiraFieldValue, 'thread reply', name, actorName,
-              );
-            }
           } catch (err) {
             success = false;
             errorMsg = err.message;

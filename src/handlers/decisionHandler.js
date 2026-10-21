@@ -66,7 +66,7 @@ async function proposeDecision({ integration, message, root, flag, issueKey, cli
     issueKey, channel: message.channel, rootTs: root.ts, decider: message.user,
     trigger: integration.name, fieldId: decision.fieldId, fieldName: decision.fieldName, value,
     reviewFieldId: integration.jiraFieldId, reviewFieldName: integration.jiraFieldName, reviewValue: integration.jiraFieldValue,
-    flagEmoji: flag.marker.emoji, allowFallback: integration.allowBotFallback === true,
+    flagEmoji: flag.marker.emoji,
   };
   const msg = buildProposalBlocks(ctx, { current, reason: read.reason });
   await client.chat.postMessage({ channel: message.channel, thread_ts: root.ts, ...msg });
@@ -104,23 +104,19 @@ function registerDecisionHandler(app, jiraService, services) {
       return;
     }
 
-    // Write as the decider; the bot account only when the trigger allows it.
+    // Write as the decider, with their own token only (SNS-133715, condition 3). An `allowFallback` left
+    // in an older proposal's button value is ignored.
     const { oauthService } = services;
-    let jira = jiraService;
-    let usingOAuth = false;
-    if (oauthService) {
-      jira = null;
-      if (oauthService.hasToken(ctx.decider)) {
-        try { jira = await oauthService.getJiraService(ctx.decider); usingOAuth = true; } catch { jira = null; }
-      }
-      if (!jira && ctx.allowFallback) jira = jiraService;
-      if (!jira) {
-        const authUrl = await oauthService.generateAuthUrl(ctx.decider).catch(() => null);
-        if (authUrl) await client.chat.postMessage({ channel: ctx.decider, text: `🔐 To apply your decision on ${issueLink(ctx.issueKey)} I need your Jira connection: <${authUrl}|connect your Jira account> (10 seconds), then press Apply again.` }).catch(() => {});
-        await keepProposal('🔐 I\'ve DM\'d you a link to connect Jira. Connect once, then press Apply again — the change will be made under your name.');
-        await services.opsNotifier?.reactionFiltered?.({ slackUserId: ctx.decider, reason: `not connected to Jira (OAuth required) for *${ctx.trigger}* decision`, integration: ctx.trigger });
-        return;
-      }
+    let jira = null;
+    if (oauthService?.hasToken(ctx.decider)) {
+      try { jira = await oauthService.getJiraService(ctx.decider); } catch { jira = null; }
+    }
+    if (!jira) {
+      const authUrl = await oauthService?.generateAuthUrl(ctx.decider).catch(() => null);
+      if (authUrl) await client.chat.postMessage({ channel: ctx.decider, text: `🔐 To apply your decision on ${issueLink(ctx.issueKey)} I need your Jira connection: <${authUrl}|connect your Jira account> (10 seconds), then press Apply again.` }).catch(() => {});
+      await keepProposal('🔐 I\'ve DM\'d you a link to connect Jira. Connect once, then press Apply again — the change will be made under your name.');
+      await services.opsNotifier?.reactionFiltered?.({ slackUserId: ctx.decider, reason: `not connected to Jira (OAuth required) for *${ctx.trigger}* decision`, integration: ctx.trigger });
+      return;
     }
 
     const summary = `*${ctx.fieldName}* = *${ctx.value}* and *${ctx.reviewFieldName}* = *${ctx.reviewValue}* on ${issueLink(ctx.issueKey)}`;
@@ -146,12 +142,6 @@ function registerDecisionHandler(app, jiraService, services) {
     }
     const verified = readBack && readBack.decision === ctx.value && readBack.review === ctx.reviewValue;
 
-    if (!usingOAuth && services.attributionService) {
-      services.attributionService.postAttributionComment(
-        client, ctx.decider, ctx.issueKey, ctx.fieldId, `${ctx.fieldName} and ${ctx.reviewFieldName}`,
-        `${ctx.value} / ${ctx.reviewValue}`, 'decision in Slack thread', ctx.trigger,
-      ).catch(() => {});
-    }
     services.auditLog?.addEntry({
       ts: Date.now(), integrationName: ctx.trigger, trigger: 'thread decision', slackUserId: ctx.decider,
       issueKey: ctx.issueKey, fieldName: ctx.fieldName, fieldValue: ctx.value, success: true,
@@ -168,9 +158,9 @@ function registerDecisionHandler(app, jiraService, services) {
     await client.reactions.add({ channel: ctx.channel, timestamp: ctx.rootTs, name: DONE_EMOJI }).catch((err) => {
       if ((err.data?.error || err.message) !== 'already_reacted') logger.warn(`${tag} could not add ✅: ${err.data?.error || err.message}`);
     });
-    await client.chat.update({ channel, ts, ...buildOutcomeBlocks(`✅ Done — ${summary}, set by <@${ctx.decider}>${usingOAuth ? '' : ' (via the bot account)'} and checked in Jira.`) }).catch(() => {});
+    await client.chat.update({ channel, ts, ...buildOutcomeBlocks(`✅ Done — ${summary}, set by <@${ctx.decider}> and checked in Jira.`) }).catch(() => {});
     logger.info(`${tag} ${ctx.issueKey}: applied ${ctx.fieldId}=${ctx.value} for ${ctx.decider}, verified`);
-    await services.opsNotifier?.post?.(`✅ *${ctx.trigger}*: <@${ctx.decider}> decided ${summary} _(OAuth ${usingOAuth ? '✅' : '🤖 bot account'})_ — ❓ → ✅.`, { kind: 'decision_applied', user: ctx.decider, issue: ctx.issueKey });
+    await services.opsNotifier?.post?.(`✅ *${ctx.trigger}*: <@${ctx.decider}> decided ${summary} _(OAuth ✅)_ — ❓ → ✅.`, { kind: 'decision_applied', user: ctx.decider, issue: ctx.issueKey });
   });
 
   app.action('decision_dismiss', async ({ ack, body, client }) => {

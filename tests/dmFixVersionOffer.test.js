@@ -1,5 +1,7 @@
 'use strict';
 
+const { connectedAs } = require('./helpers/connectedAs');
+
 /**
  * End-to-end-ish test of the Fix Version offer in dmHandler:
  * Yes → transition fails "Fix Version is required" → suggestion → offer rendered.
@@ -49,7 +51,7 @@ function setup({ updateImpl } = {}) {
     ]),
     deletePromptsForIssue: jest.fn().mockResolvedValue(undefined),
   };
-  registerDmHandler(app, jira, { db, llmService: null, oauthService: null });
+  registerDmHandler(app, jira, { db, llmService: null, oauthService: connectedAs(jira) });
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
   const clickYes = () => handlers.jira_confirm_yes({
     ack: jest.fn(),

@@ -20,7 +20,7 @@ const config = {
   jiraFieldType: 'select',
 };
 
-const attribution = { postAttributionComment: jest.fn().mockResolvedValue(undefined) };
+const { connectedAs } = require('./helpers/connectedAs');
 
 function makeServices(overrides = {}) {
   return {
@@ -68,7 +68,8 @@ function register(app, jira, cfg, services) {
       scope: cfg.scope || 'global',
     }],
   };
-  registerReplyHandler(app, jira, attribution, services);
+  if (!('oauthService' in services)) services.oauthService = connectedAs(jira);
+  registerReplyHandler(app, jira, services);
 }
 
 describe('replyHandler', () => {

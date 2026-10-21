@@ -105,7 +105,7 @@ describe('reply in a flagged thread → proposal', () => {
     const app = { message: (fn) => { handlers.message = fn; } };
     const services = makeServices(opts);
     const serviceJira = { updateIssueField: jest.fn(), getIssue: jest.fn().mockResolvedValue({ fields: { customfield_11228: { value: 'Internal' } } }) };
-    registerReplyHandler(app, serviceJira, { postAttributionComment: jest.fn() }, services);
+    registerReplyHandler(app, serviceJira, services);
     const client = makeClient(opts.thread);
     const reply = (user, text) => handlers.message({
       message: { channel: 'C_WATCH', ts: '300.000', thread_ts: '111.000', user, text }, client, logger, context,
@@ -169,7 +169,7 @@ describe('decision_apply / decision_dismiss', () => {
   const ctx = {
     issueKey: 'SNS-134420', channel: 'C_WATCH', rootTs: '111.000', decider: 'UMORLI', trigger: 'PM Reviewed',
     fieldId: 'customfield_11228', fieldName: 'Include Release Notes', value: 'Public',
-    reviewFieldId: 'customfield_11296', reviewFieldName: 'PM Reviewed', reviewValue: 'Yes', flagEmoji: 'question', allowFallback: false,
+    reviewFieldId: 'customfield_11296', reviewFieldName: 'PM Reviewed', reviewValue: 'Yes', flagEmoji: 'question',
   };
   function setup(opts = {}) {
     const handlers = {};
@@ -248,7 +248,7 @@ describe('👍 on a flagged post is a decision too', () => {
     const app = { event: (name, fn) => { handlers[name] = fn; } };
     const services = makeServices();
     services.oauthService.getJiraService.mockResolvedValue({ updateIssueField: jest.fn().mockResolvedValue({}) });
-    registerReactionHandler(app, {}, { postAttributionComment: jest.fn() }, services);
+    registerReactionHandler(app, {}, services);
     const root = { ...ROOT, reply_count: 0, reactions: [{ name: 'question', users: ['UBOT'], count: 1 }] };
     const client = {
       conversations: { history: jest.fn().mockResolvedValue({ messages: [root] }) },

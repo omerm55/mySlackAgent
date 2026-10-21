@@ -242,7 +242,6 @@ function buttonCtx(context, slackUserId, extra = {}) {
     slackUserId,
     question: (context.question || '').slice(0, 300),
     fyiSlackUserId: context.fyiSlackUserId || null,
-    allowFallback: !!context.allowFallback,
     risk: {
       notification: (r.notification || '').slice(0, 255),
       status: r.status || '',

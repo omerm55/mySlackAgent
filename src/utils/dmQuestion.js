@@ -22,8 +22,7 @@ function yesNoHeadline(context) {
 
 /**
  * The Yes / No / Reply ask (no Connect nudge). Button values are capped at 2000 chars — keep the
- * question short in ctx. `allowFallback` tells the click handlers whether the bot account may act
- * for a person who has not connected Jira (per-trigger admin setting; default no).
+ * question short in ctx.
  */
 function buildYesNoBlocks(context, slackUserId) {
   const ctx = JSON.stringify({
@@ -38,7 +37,6 @@ function buildYesNoBlocks(context, slackUserId) {
         jiraFieldType: context.jiraFieldType || 'select',
       }),
     slackUserId,
-    allowFallback: !!context.allowFallback,
   });
   return [
     { type: 'section', text: { type: 'mrkdwn', text: yesNoHeadline(context) } },
@@ -139,7 +137,7 @@ function buildReplyPreviewBlocks(context, decision, userText, slackUserId) {
     question: (context.question || '').slice(0, 200),
     transitionTo: context.transitionTo, jiraFieldId: context.jiraFieldId, jiraFieldName: context.jiraFieldName,
     jiraFieldValue: context.jiraFieldValue, jiraFieldType: context.jiraFieldType,
-    slackUserId, allowFallback: !!context.allowFallback,
+    slackUserId,
     dmChannelId: context.dmChannelId, messageTs: context.messageTs, originalText: (context.originalText || '').slice(0, 300),
     userText: (userText || '').slice(0, 400),
     decision: {

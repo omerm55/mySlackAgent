@@ -1,5 +1,7 @@
 'use strict';
 
+const { connectedAs } = require('./helpers/connectedAs');
+
 // A free-text reply is interpreted and then PREVIEWED. Nothing is written until the person confirms:
 // Confirm applies it, Edit reply reopens the modal with their text, Cancel restores the original ask.
 const { registerDmHandler } = require('../src/handlers/dmHandler');
@@ -25,7 +27,7 @@ function setup({ decision = { action: 'transition', transitionTo: 'Needs Review'
   const llmService = { interpretJiraResponse: llmError ? jest.fn().mockRejectedValue(new Error(llmError)) : jest.fn().mockResolvedValue(decision) };
   const ops = { dmLlmProposed: jest.fn(), dmLlmDecision: jest.fn(), post: jest.fn(), dmButtonClicked: jest.fn() };
   const db = { deletePromptsForIssue: jest.fn(), markPromptAnswered: jest.fn() };
-  registerDmHandler(app, jira, { db, llmService, oauthService: null, opsNotifier: ops, userCache: { getName: jest.fn() } });
+  registerDmHandler(app, jira, { db, llmService, oauthService: connectedAs(jira), opsNotifier: ops, userCache: { getName: jest.fn() } });
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
   const meta = JSON.stringify({ ...CTX, dmChannelId: 'D1', messageTs: '1', originalText: 'orig' });
   const submit = (text) => ({ ack: jest.fn(), body: {}, view: { private_metadata: meta, state: { values: { response_block: { response_input: { value: text } } } } }, client, logger });

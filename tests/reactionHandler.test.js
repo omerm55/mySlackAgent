@@ -20,7 +20,7 @@ const config = {
   jiraFieldType: 'select',
 };
 
-const attribution = { postAttributionComment: jest.fn().mockResolvedValue(undefined) };
+const { connectedAs } = require('./helpers/connectedAs');
 
 function makeServices(overrides = {}) {
   return {
@@ -68,7 +68,8 @@ function register(app, jira, cfg, services) {
       scope: cfg.scope || 'global',
     }],
   };
-  registerReactionHandler(app, jira, attribution, services);
+  if (!('oauthService' in services)) services.oauthService = connectedAs(jira);
+  registerReactionHandler(app, jira, services);
 }
 
 describe('reactionHandler', () => {
@@ -117,46 +118,55 @@ describe('reactionHandler', () => {
     }
   );
 
-  test('no token + fallback not allowed → nothing written, thread asks to connect, auth DM sent, ops told', async () => {
-    const app = makeApp();
-    const jira = makeJira();
-    const client = makeClient(REAL_MESSAGE);
-    client.conversations.open = jest.fn().mockResolvedValue({ channel: { id: 'DUSER' } });
-    const services = makeServices({
-      oauthService: { hasToken: () => false, generateAuthUrl: jest.fn().mockResolvedValue('https://auth?state=r'), getJiraService: jest.fn() },
-      opsNotifier: { reactionFiltered: jest.fn().mockResolvedValue(undefined), jiraTriggered: jest.fn() },
-    });
-    register(app, jira, { ...config, allowBotFallback: false }, services);
+  test('no token → nothing written, thread asks to connect, auth DM sent, ops told — even on a trigger still flagged allow_bot_fallback', async () => {
+    for (const cfg of [config, { ...config, allowBotFallback: true }]) { // a leftover flag changes nothing
+      jest.clearAllMocks();
+      const app = makeApp();
+      const jira = makeJira();
+      const client = makeClient(REAL_MESSAGE);
+      client.conversations.open = jest.fn().mockResolvedValue({ channel: { id: 'DUSER' } });
+      const services = makeServices({
+        oauthService: { hasToken: () => false, generateAuthUrl: jest.fn().mockResolvedValue('https://auth?state=r'), getJiraService: jest.fn() },
+        opsNotifier: { reactionFiltered: jest.fn().mockResolvedValue(undefined), jiraTriggered: jest.fn() },
+      });
+      register(app, jira, cfg, services);
+      await app._trigger('reaction_added', { event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } }, client, logger });
+      await new Promise((r) => setImmediate(r));
+      expect(jira.updateIssueField).not.toHaveBeenCalled();
+      expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'C_WATCH', thread_ts: '111.000', text: expect.stringMatching(/connect Jira.*react again/i) }));
+      expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'DUSER', text: expect.stringMatching(/https:\/\/auth\?state=r/) }));
+      expect(services.opsNotifier.reactionFiltered).toHaveBeenCalledWith(expect.objectContaining({ reason: expect.stringMatching(/not connected to Jira/) }));
+    }
+  });
+
+  test('with a token → the person\'s own client writes, never the bot account', async () => {
+    const app = makeApp(); const jira = makeJira(); const client = makeClient(REAL_MESSAGE);
+    const userJira = { updateIssueField: jest.fn().mockResolvedValue({}) };
+    const services = makeServices({ oauthService: { hasToken: () => true, generateAuthUrl: jest.fn(), getJiraService: jest.fn().mockResolvedValue(userJira) }, opsNotifier: { reactionFiltered: jest.fn(), jiraTriggered: jest.fn() } });
+    register(app, jira, config, services);
     await app._trigger('reaction_added', { event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } }, client, logger });
-    await new Promise((r) => setImmediate(r));
+    expect(userJira.updateIssueField).toHaveBeenCalledTimes(1);
     expect(jira.updateIssueField).not.toHaveBeenCalled();
-    expect(attribution.postAttributionComment).not.toHaveBeenCalled();
-    expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'C_WATCH', thread_ts: '111.000', text: expect.stringMatching(/connect Jira.*react again/i) }));
-    expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'DUSER', text: expect.stringMatching(/https:\/\/auth\?state=r/) }));
+    expect(services.opsNotifier.jiraTriggered).toHaveBeenCalledWith(expect.objectContaining({ usingOAuth: true }));
+  });
+
+  test('token refresh fails → treated as not connected, nothing written', async () => {
+    const app = makeApp(); const jira = makeJira(); const client = makeClient(REAL_MESSAGE);
+    client.conversations.open = jest.fn().mockResolvedValue({ channel: { id: 'DUSER' } });
+    const services = makeServices({ oauthService: { hasToken: () => true, generateAuthUrl: jest.fn().mockResolvedValue('https://auth'), getJiraService: jest.fn().mockRejectedValue(new Error('refresh failed')) }, opsNotifier: { reactionFiltered: jest.fn(), jiraTriggered: jest.fn() } });
+    register(app, jira, config, services);
+    await app._trigger('reaction_added', { event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } }, client, logger });
+    expect(jira.updateIssueField).not.toHaveBeenCalled();
     expect(services.opsNotifier.reactionFiltered).toHaveBeenCalledWith(expect.objectContaining({ reason: expect.stringMatching(/not connected to Jira/) }));
   });
 
-  test('no token + fallback allowed → bot account writes with attribution comment; with token → user writes, no attribution', async () => {
-    const mk = (hasToken) => {
-      const app = makeApp(); const jira = makeJira(); const client = makeClient(REAL_MESSAGE);
-      client.conversations.open = jest.fn().mockResolvedValue({ channel: { id: 'DUSER' } });
-      const userJira = { updateIssueField: jest.fn().mockResolvedValue({}) };
-      const services = makeServices({ oauthService: { hasToken: () => hasToken, generateAuthUrl: jest.fn().mockResolvedValue('https://auth'), getJiraService: jest.fn().mockResolvedValue(userJira) }, opsNotifier: { reactionFiltered: jest.fn(), jiraTriggered: jest.fn() } });
-      register(app, jira, { ...config, allowBotFallback: true }, services);
-      return { app, jira, userJira, client, services };
-    };
-    let t = mk(false);
-    await t.app._trigger('reaction_added', { event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } }, client: t.client, logger });
-    expect(t.jira.updateIssueField).toHaveBeenCalledTimes(1);
-    expect(attribution.postAttributionComment).toHaveBeenCalledTimes(1);
-    expect(t.services.opsNotifier.jiraTriggered).toHaveBeenCalledWith(expect.objectContaining({ usingOAuth: false, success: true }));
-    jest.clearAllMocks();
-    t = mk(true);
-    await t.app._trigger('reaction_added', { event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } }, client: t.client, logger });
-    expect(t.userJira.updateIssueField).toHaveBeenCalledTimes(1);
-    expect(t.jira.updateIssueField).not.toHaveBeenCalled();
-    expect(attribution.postAttributionComment).not.toHaveBeenCalled();
-    expect(t.services.opsNotifier.jiraTriggered).toHaveBeenCalledWith(expect.objectContaining({ usingOAuth: true }));
+  test('OAuth not configured at all → nothing written (no bot-account path), ops told', async () => {
+    const app = makeApp(); const jira = makeJira(); const client = makeClient(REAL_MESSAGE);
+    const services = makeServices({ oauthService: null, opsNotifier: { reactionFiltered: jest.fn(), jiraTriggered: jest.fn() } });
+    register(app, jira, config, services);
+    await app._trigger('reaction_added', { event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } }, client, logger });
+    expect(jira.updateIssueField).not.toHaveBeenCalled();
+    expect(services.opsNotifier.reactionFiltered).toHaveBeenCalledWith(expect.objectContaining({ reason: expect.stringMatching(/OAuth is not configured/) }));
   });
 
   test('blocks a user not in the allowlist', async () => {

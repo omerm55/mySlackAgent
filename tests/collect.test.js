@@ -1,5 +1,7 @@
 'use strict';
 
+const { connectedAs } = require('./helpers/connectedAs');
+
 const cm = require('../src/utils/collectMessage');
 const { registerDmHandler } = require('../src/handlers/dmHandler');
 const { sendDmQuestion } = require('../src/utils/dmQuestion');
@@ -121,7 +123,7 @@ describe('collect handlers', () => {
     const db = { markPromptAnswered: jest.fn().mockResolvedValue(undefined), deletePromptsForIssue: jest.fn().mockResolvedValue(undefined) };
     const ops = { collectAction: jest.fn().mockResolvedValue(undefined) };
     const llmService = llm === undefined ? { extractFields: jest.fn().mockResolvedValue({ values: { [NAME]: 'Smart Alerts', [VALUE]: 'Customers know the moment a KPI drifts.' }, note: null }) } : llm;
-    registerDmHandler(app, jira, { db, llmService, oauthService: null, opsNotifier: ops, userCache: { getName: jest.fn().mockResolvedValue('Omer') } });
+    registerDmHandler(app, jira, { db, llmService, oauthService: connectedAs(jira), opsNotifier: ops, userCache: { getName: jest.fn().mockResolvedValue('Omer') } });
     const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
     const value = (extra) => JSON.stringify({ ...ctxFor(), slackUserId: 'U1', ...extra });
     const body = (extra) => ({ actions: [{ value: value(extra) }], channel: { id: 'D1' }, message: { ts: '1', text: 'orig' }, user: { id: 'U1' }, trigger_id: 'T' });

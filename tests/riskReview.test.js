@@ -1,5 +1,7 @@
 'use strict';
 
+const { connectedAs } = require('./helpers/connectedAs');
+
 const rr = require('../src/utils/riskReviewMessage');
 const { registerDmHandler } = require('../src/handlers/dmHandler');
 
@@ -83,7 +85,7 @@ describe('risk review handlers', () => {
     const db = { markPromptAnswered: jest.fn().mockResolvedValue(undefined), deletePromptsForIssue: jest.fn().mockResolvedValue(undefined) };
     const ops = { riskReviewAction: jest.fn().mockResolvedValue(undefined) };
     const userCache = { getName: jest.fn().mockResolvedValue('Omer') };
-    registerDmHandler(app, jira, { db, llmService: llm, oauthService: null, opsNotifier: ops, userCache });
+    registerDmHandler(app, jira, { db, llmService: llm, oauthService: connectedAs(jira), opsNotifier: ops, userCache });
     const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
     const value = (extra) => JSON.stringify({ askType: 'risk_review', issueKey: 'PR-1234', slackUserId: 'U1', risk: ctxFor('On Track').risk, ...extra });
     const body = (extra) => ({ actions: [{ value: value(extra) }], channel: { id: 'D1' }, message: { ts: '1', text: 'orig' }, user: { id: 'U1' }, trigger_id: 'T' });
@@ -170,7 +172,7 @@ describe('risk review FYI follow-ups', () => {
       views: { open: jest.fn() }, conversations: { open: jest.fn() },
     };
     const jira = { transitionIssue: jest.fn().mockResolvedValue(undefined) };
-    registerDmHandler(app, jira, { db: { markPromptAnswered: jest.fn().mockResolvedValue(undefined) }, oauthService: null });
+    registerDmHandler(app, jira, { db: { markPromptAnswered: jest.fn().mockResolvedValue(undefined) }, oauthService: connectedAs(jira) });
     const statusHandler = handlers[Object.keys(handlers).find((k) => k.startsWith('/^risk_set_status_'))];
     const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
     const mk = (fyi) => ({ actions: [{ value: JSON.stringify({ askType: 'risk_review', issueKey: 'PR-9', slackUserId: 'UDEV', status: 'High Risk', fyiSlackUserId: fyi, risk: {} }) }], channel: { id: 'D1' }, message: { ts: '1', text: 'o' }, user: { id: 'UDEV' } });
@@ -217,7 +219,7 @@ describe('Skip after a status change', () => {
     const client = { chat: { update: jest.fn().mockResolvedValue({}), postMessage: jest.fn().mockResolvedValue({}) }, views: { open: jest.fn() }, conversations: { open: jest.fn() } };
     const jira = { transitionIssue: jest.fn(), updateIssueField: jest.fn(), getIssue: jest.fn() };
     const ops = { riskReviewAction: jest.fn().mockResolvedValue(undefined) };
-    registerDmHandler(app, jira, { db: {}, oauthService: null, opsNotifier: ops });
+    registerDmHandler(app, jira, { db: {}, oauthService: connectedAs(jira), opsNotifier: ops });
     const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
     const body = { actions: [{ value: JSON.stringify({ askType: 'risk_review', issueKey: 'PR-9', slackUserId: 'UDEV', risk: { status: 'High Risk' } }) }], channel: { id: 'D1' }, message: { ts: '1', text: 'o' }, user: { id: 'UDEV' } };
     await handlers.risk_skip_notes({ ack: jest.fn(), body, client, logger });

@@ -4,7 +4,6 @@ require('dotenv').config();
 
 const { App } = require('@slack/bolt');
 const JiraService = require('./services/jiraService');
-const AttributionService = require('./services/attributionService');
 const { registerReplyHandler } = require('./handlers/replyHandler');
 const { registerReactionHandler } = require('./handlers/reactionHandler');
 const { registerDecisionHandler } = require('./handlers/decisionHandler');
@@ -62,8 +61,6 @@ const jiraService = new JiraService({
   apiToken: process.env.JIRA_API_TOKEN,
 });
 
-const attributionService = new AttributionService(jiraService);
-
 const dedupCache = new DedupCache();
 const rateLimiter = new RateLimiter();
 const auditLog = new AuditLog();
@@ -97,7 +94,6 @@ const normalizedStatic = staticIntegrations.map((i) => ({
   jiraFieldType: i.jiraFieldType || 'select',
   allowedSlackUserIds: i.allowedSlackUserIds || [],
   rateLimitPerHour: i.rateLimitPerHour ?? settings.rateLimiting.defaultPerHour,
-  allowBotFallback: i.allowBotFallback === true,
   scope: 'global',
   createdBy: null,
 }));
@@ -113,7 +109,7 @@ let jiraPoller;
 let digestScheduler;
 
 const services = {
-  dedupCache, rateLimiter, auditLog, userCache, oauthService, llmService, attributionService,
+  dedupCache, rateLimiter, auditLog, userCache, oauthService, llmService,
   integrationCache, jiraService,
   db,
   get alerting() { return alerting; },
@@ -123,8 +119,8 @@ const services = {
 };
 
 // Single generic handlers — each queries integrationCache at event time
-registerReactionHandler(app, jiraService, attributionService, services);
-registerReplyHandler(app, jiraService, attributionService, services);
+registerReactionHandler(app, jiraService, services);
+registerReplyHandler(app, jiraService, services);
 registerDecisionHandler(app, jiraService, services);
 registerDmHandler(app, jiraService, services);
 registerHomeHandler(app, jiraService, services);

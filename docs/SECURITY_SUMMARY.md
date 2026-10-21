@@ -6,6 +6,13 @@
 > [`PROJECT_SPEC.md`](PROJECT_SPEC.md); the March design is preserved in [`architecture.md`](architecture.md);
 > the Jira service-account request for IT is in [`JIRA_SERVICE_ACCOUNT.md`](JIRA_SERVICE_ACCOUNT.md).
 
+> **Update, 21 October 2026.** Security approved the AWS design on 19 October (SNS-133715) with five
+> conditions. This document is kept as the snapshot that was reviewed; where it describes a per-trigger
+> exception letting the bot account write, that exception **no longer exists**. Every Jira write is
+> now made with the person's own token (condition 3), and the consenting Atlassian account is checked
+> against the Slack user who started the connect (condition 1). The status of each condition is in
+> [`PROJECT_SPEC.md`](PROJECT_SPEC.md) §12.7a.
+
 ## 0. Status, stated plainly
 
 - **The March review ended with "please don't deploy anything to production"** (Abhishek, 15 April),

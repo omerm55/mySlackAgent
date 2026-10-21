@@ -117,7 +117,6 @@ src/
     llmService.js             # Free-text → structured action, field extraction
     digestScheduler.js        # Queued question delivery
     fixVersionSuggester.js    # Fix Version suggestions on validator failure
-    attributionService.js     # "acting on behalf of" comments
     integrationCache.js
   server/callbackServer.js    # OAuth callback + /health
   utils/                      # logger, admins, rate limiting, dedup, audit log,

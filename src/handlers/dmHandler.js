@@ -33,28 +33,14 @@ function registerDmHandler(app, jiraService, services) {
   // ── helpers ──────────────────────────────────────────────────────────────
 
   /**
-   * Jira client for a write on behalf of `slackUserId`:
-   *   - their own token            → as them
-   *   - no token + ctx.allowFallback → the bot (service) account, labelled — an admin allowed it on this trigger
-   *   - no token, no fallback      → null: the caller shows the Connect nudge and keeps the ask alive
-   * Without an oauthService at all (local dev) → service account.
+   * Jira client for a write on behalf of `slackUserId` — their own token, or null: the caller shows the
+   * Connect nudge and keeps the ask alive. There is no bot-account fallback (SNS-133715, condition 3),
+   * including when OAuth is not configured at all.
    */
-  async function resolveJira(slackUserId, client, ctx = {}) {
+  async function resolveJira(slackUserId) {
     const { oauthService } = services;
-    if (!oauthService || !slackUserId) return jiraService;
-    if (oauthService.hasToken(slackUserId)) {
-      try { return await oauthService.getJiraService(slackUserId); } catch { /* refresh failed → treat as not connected */ }
-    }
-    if (!ctx.allowFallback) return null;
-    if (client) {
-      // Allowed exception: act as the bot, tell them how to make it theirs next time (fire and forget)
-      const authUrl = await oauthService.generateAuthUrl(slackUserId);
-      client.chat.postMessage({
-        channel: slackUserId,
-        text: `👋 To make your Jira changes appear as *you* (not the bot), <${authUrl}|connect your Jira account>. This change was made by the bot account.`,
-      }).catch(() => {});
-    }
-    return jiraService;
+    if (!oauthService || !slackUserId || !oauthService.hasToken(slackUserId)) return null;
+    try { return await oauthService.getJiraService(slackUserId); } catch { return null; } // refresh failed → not connected
   }
 
   /**
@@ -80,10 +66,10 @@ function registerDmHandler(app, jiraService, services) {
     return true;
   }
 
-  /** Can this person's write go ahead right now (own token, or the trigger allows the bot account)? */
+  /** Can this person's write go ahead right now — do they have their own token? */
   function canWrite(ctx) {
     const { oauthService } = services;
-    return !oauthService || !ctx?.slackUserId || oauthService.hasToken(ctx.slackUserId) || !!ctx.allowFallback;
+    return !!oauthService && !!ctx?.slackUserId && oauthService.hasToken(ctx.slackUserId);
   }
 
   /** The ask's own blocks, rebuilt from its context (used when the message blocks aren't at hand). */
@@ -109,7 +95,7 @@ function registerDmHandler(app, jiraService, services) {
       ? body.message.blocks.filter((b) => !isConnectBlock(b))
       : rebuildAsk(ctx, slackUserId);
     const nudge = [
-      { type: 'section', text: { type: 'mrkdwn', text: `🔐 *Connect Jira first, then press the button again.* This change must be made under your name — the bot account isn't allowed to do it for you here.` } },
+      { type: 'section', text: { type: 'mrkdwn', text: `🔐 *Connect Jira first, then press the button again.* Changes are always made under your own name.` } },
       ...connectBlocks(authUrl),
     ].filter((b) => b.type !== 'context'); // one explanation line is enough
     if (channelId && messageTs) {
@@ -122,7 +108,7 @@ function registerDmHandler(app, jiraService, services) {
     } else if (authUrl) {
       await client.chat.postMessage({ channel: slackUserId, text: `🔐 To ${what} on ${issueLink(issueKey)} I need your Jira connection: <${authUrl}|connect> (10 seconds), then press the button again.` }).catch(() => {});
     }
-    logger?.info(`[dm] ${slackUserId} blocked on ${issueKey}: not connected to Jira (no fallback) — asked to connect`);
+    logger?.info(`[dm] ${slackUserId} blocked on ${issueKey}: not connected to Jira — asked to connect`);
     await services.opsNotifier?.post?.(`🔐 <@${slackUserId}> tried to ${what} on *${issueKey}* without a Jira connection — asked to connect, nothing written`);
   }
 
@@ -156,22 +142,6 @@ function registerDmHandler(app, jiraService, services) {
         : null;
       services.auditLog?.addEntry({ ts: Date.now(), integrationName: entry.integrationName || 'DM', success: true, slackUserName, ...entry });
     } catch { /* cosmetic */ }
-  }
-
-  /**
-   * A write the bot account made on someone's behalf leaves nothing in Jira's changelog that names the
-   * human — so add the attribution comment, exactly as the channel triggers do. No comment when the
-   * person's own token was used (the changelog already names them). Never fails the user's action.
-   */
-  async function attributeIfBot(client, { usingOAuth, slackUserId, issueKey, fieldId = null, fieldName, fieldValue, trigger }) {
-    if (usingOAuth || !services.attributionService || !slackUserId) return;
-    try {
-      await services.attributionService.postAttributionComment(
-        client, slackUserId, issueKey, fieldId, fieldName, fieldValue, trigger, 'Slack DM',
-      );
-    } catch (err) {
-      baseLogger.warn(`[dm] Attribution comment failed on ${issueKey}: ${err.message}`);
-    }
   }
 
   const needsFixVersion = (err) => /fix\s*version/i.test(err?.message || '');
@@ -290,7 +260,7 @@ function registerDmHandler(app, jiraService, services) {
     try {
       const { oauthService } = services;
       const usingOAuth = oauthService?.hasToken(slackUserId) ?? false;
-      const jira = await resolveJira(slackUserId, client, context);
+      const jira = await resolveJira(slackUserId);
       if (!jira) { await needsConnect(client, context, null, 'set the Fix Version', logger); return; }
       await jira.updateIssueField(issueKey, 'fixVersions', [{ id: versionId }], 'raw');
       if (transitionTo) {
@@ -305,7 +275,6 @@ function registerDmHandler(app, jiraService, services) {
             ? `✅ Done — Fix Version set to *${versionName}*, *${issueLink(issueKey)}* moved to *${transitionTo}*`
             : `✅ Done — Fix Version set to *${versionName}*, *${issueLink(issueKey)}* updated: *${jiraFieldName}* = *${jiraFieldValue}*`);
       }
-      await attributeIfBot(client, { usingOAuth, slackUserId, issueKey, fieldId: transitionTo ? null : jiraFieldId, fieldName, fieldValue: `${fieldValue} (Fix Version ${versionName})`, trigger: 'Yes on a bot question, after setting a Fix Version' });
       await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue: `${fieldValue} (fixVersion: ${versionName})`, usingOAuth });
       await record(client, { slackUserId, issueKey, trigger: 'DM Yes', fieldName, fieldValue: `${fieldValue} (Fix Version ${versionName})` });
     } catch (err) {
@@ -351,7 +320,7 @@ function registerDmHandler(app, jiraService, services) {
     try {
       const { oauthService } = services;
       const usingOAuth = oauthService?.hasToken(slackUserId) ?? false;
-      const effectiveJira = await resolveJira(slackUserId, client, context);
+      const effectiveJira = await resolveJira(slackUserId);
       if (!effectiveJira) { await needsConnect(client, { ...context, dmChannelId: channelId, messageTs }, body, 'say Yes', logger); return; }
       if (transitionTo) {
         await effectiveJira.transitionIssue(issueKey, transitionTo);
@@ -366,7 +335,6 @@ function registerDmHandler(app, jiraService, services) {
             ? `✅ Done — *${issueLink(issueKey)}* moved to *${transitionTo}*`
             : `✅ Done — *${issueLink(issueKey)}* updated: *${jiraFieldName}* = *${jiraFieldValue}*`);
       }
-      await attributeIfBot(client, { usingOAuth, slackUserId, issueKey, fieldId: transitionTo ? null : jiraFieldId, fieldName, fieldValue, trigger: 'Yes on a bot question' });
       await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue, usingOAuth });
       await record(client, { slackUserId, issueKey, trigger: 'DM Yes', fieldName, fieldValue });
     } catch (err) {
@@ -431,7 +399,7 @@ function registerDmHandler(app, jiraService, services) {
     if (channelId && messageTs) await replaceButtons(client, channelId, messageTs, originalText, `_Moving to ${status}…_`);
     try {
       const usingOAuth = services.oauthService?.hasToken(slackUserId) ?? false;
-      const jira = await resolveJira(slackUserId, client, ctx);
+      const jira = await resolveJira(slackUserId);
       if (!jira) { await needsConnect(client, { ...ctx, dmChannelId: channelId, messageTs }, body, `set ${status}`, logger); return; }
       await jira.transitionIssue(issueKey, status);
       logger.info(`[risk] ${issueKey} → ${status} by ${slackUserId} ✓`);
@@ -442,7 +410,6 @@ function registerDmHandler(app, jiraService, services) {
           riskReview.afterStatusBlocks(after, slackUserId));
       }
       await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
-      await attributeIfBot(client, { usingOAuth, slackUserId, issueKey, fieldName: 'status', fieldValue: status, trigger: 'a risk-review action' });
       await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'set status', detail: status, usingOAuth });
       await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'status', fieldValue: status });
       await fyiFollowUp(client, ctx, `<@${slackUserId}> set *${issueLink(issueKey)}* to *${status}*.`);
@@ -507,7 +474,7 @@ function registerDmHandler(app, jiraService, services) {
       }
       const author = await services.userCache?.getName?.(client, slackUserId).catch(() => null);
       const usingOAuth = services.oauthService?.hasToken(slackUserId) ?? false;
-      const jira = await resolveJira(slackUserId, client, ctx);
+      const jira = await resolveJira(slackUserId);
       if (!jira) { await needsConnect(client, ctx, null, 'update Notes', logger); return; }
       const issue = await jira.getIssue(issueKey);
       const existing = issue?.fields?.[riskReview.FIELDS.NOTES] || '';
@@ -518,7 +485,6 @@ function registerDmHandler(app, jiraService, services) {
         await replaceButtons(client, dmChannelId, messageTs, originalText, `✅ Added to *${issueLink(issueKey)}* Notes:\n> ${entry}`);
       }
       await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
-      await attributeIfBot(client, { usingOAuth, slackUserId, issueKey, fieldId: riskReview.FIELDS.NOTES, fieldName: 'Notes', fieldValue: entry, trigger: 'a risk-review action' });
       await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'updated Notes', detail: `"${note.slice(0, 140)}"`, usingOAuth });
       await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'Notes', fieldValue: note.slice(0, 80) });
       await fyiFollowUp(client, ctx, `<@${slackUserId}> updated Notes on *${issueLink(issueKey)}*:\n> ${entry}`);
@@ -576,7 +542,7 @@ function registerDmHandler(app, jiraService, services) {
     if (dmChannelId && messageTs) await replaceButtons(client, dmChannelId, messageTs, originalText, '_Updating the target…_');
     try {
       const usingOAuth = services.oauthService?.hasToken(slackUserId) ?? false;
-      const jira = await resolveJira(slackUserId, client, ctx);
+      const jira = await resolveJira(slackUserId);
       if (!jira) { await needsConnect(client, ctx, null, 'change the target', logger); return; }
       let detail;
       if (clear) {
@@ -592,7 +558,6 @@ function registerDmHandler(app, jiraService, services) {
         await replaceButtons(client, dmChannelId, messageTs, originalText, `✅ *${issueLink(issueKey)}*: ${detail}.`);
       }
       await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
-      await attributeIfBot(client, { usingOAuth, slackUserId, issueKey, fieldId: riskReview.FIELDS.TARGET, fieldName: 'Project target', fieldValue: detail, trigger: 'a risk-review action' });
       await services.opsNotifier?.riskReviewAction({ slackUserId, issueKey, action: 'target', detail, usingOAuth });
       await record(client, { slackUserId, issueKey, trigger: '🩺 risk review', fieldName: 'Project target', fieldValue: clear ? 'cleared' : newEnd });
       await fyiFollowUp(client, ctx, `<@${slackUserId}> changed the target of *${issueLink(issueKey)}*: ${detail}.`);
@@ -732,7 +697,7 @@ function registerDmHandler(app, jiraService, services) {
     if (dmChannelId && messageTs) await replaceButtons(client, dmChannelId, messageTs, originalText, '_Saving to Jira…_');
     try {
       const usingOAuth = services.oauthService?.hasToken(slackUserId) ?? false;
-      const jira = await resolveJira(slackUserId, client, ctx);
+      const jira = await resolveJira(slackUserId);
       if (!jira) { await needsConnect(client, full, body, 'save', logger); return; }
       await jira.updateIssueFields(issueKey, toWrite);
       logger.info(`[collect] ${issueKey} updated by ${slackUserId}: ${Object.keys(toWrite).join(', ')} ✓`);
@@ -742,7 +707,6 @@ function registerDmHandler(app, jiraService, services) {
       }
       await services.db?.markPromptAnswered(issueKey, slackUserId).catch(() => {});
       const detail = fields.filter((f) => toWrite[f.id]).map((f) => `${f.name} = "${toWrite[f.id].slice(0, 80)}"`).join(' · ');
-      await attributeIfBot(client, { usingOAuth, slackUserId, issueKey, fieldName: fields.filter((f) => toWrite[f.id]).map((f) => f.name).join(', '), fieldValue: Object.values(toWrite).join(' / '), trigger: 'filling in requested fields' });
       await services.opsNotifier?.collectAction({ slackUserId, issueKey, action: 'saved', detail, usingOAuth });
       await record(client, { slackUserId, issueKey, trigger: '📝 collect', fieldName: fields.filter((f) => toWrite[f.id]).map((f) => f.name).join(', '), fieldValue: Object.values(toWrite).map((v) => v.slice(0, 40)).join(' / ') });
       await fyiFollowUp(client, ctx, `<@${slackUserId}> filled in *${issueLink(issueKey)}*:\n${lines}`);
@@ -808,7 +772,7 @@ function registerDmHandler(app, jiraService, services) {
     if (!canWrite(context)) { await needsConnect(client, context, body, 'set the Fix Version', logger); return; }
 
     try {
-      const jira = (await resolveJira(slackUserId, client, context)) || jiraService; // reading versions is fine as the bot
+      const jira = (await resolveJira(slackUserId)) || jiraService; // reading versions is fine as the bot
       const versions = (await jira.getProjectVersions(projectKey))
         .filter((v) => !v.archived)
         .sort((a, b) => {
@@ -1028,7 +992,7 @@ function registerDmHandler(app, jiraService, services) {
     const { issueKey, jiraFieldId, jiraFieldName, jiraFieldValue, jiraFieldType, transitionTo,
             slackUserId, dmChannelId, messageTs, originalText = '' } = context;
 
-    const effectiveJira = await resolveJira(slackUserId, client, context);
+    const effectiveJira = await resolveJira(slackUserId);
     if (!effectiveJira) {
       await needsConnect(client, context, null, 'apply your reply', logger);
       return;
@@ -1071,7 +1035,6 @@ function registerDmHandler(app, jiraService, services) {
       if (dmChannelId && messageTs) {
         await replaceButtons(client, dmChannelId, messageTs, originalText, `✅ ${confirmation} (${issueLink(issueKey)})`);
       }
-      await attributeIfBot(client, { usingOAuth, slackUserId, issueKey, fieldId: jiraFieldId ?? null, fieldName: decision.action === 'transition' ? 'status' : (jiraFieldName || 'status'), fieldValue: decision.transitionTo || decision.fieldValue || jiraFieldValue || transitionTo, trigger: 'a confirmed free-text reply' });
       await services.opsNotifier?.dmLlmDecision({ slackUserId, issueKey, userText, decision, usingOAuth });
       const what = decision.action === 'transition' ? `status = ${decision.transitionTo || transitionTo}`
         : decision.action === 'update_field' ? `${jiraFieldName || 'status'} = ${decision.fieldValue ?? jiraFieldValue ?? transitionTo}`

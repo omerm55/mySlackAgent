@@ -132,7 +132,7 @@ describe('reaction while paused', () => {
       db: pausedDb(true), opsNotifier: { post: jest.fn().mockResolvedValue(undefined) },
       integrationCache: { getAll: async () => [{ name: 'Docs', slackChannelId: 'C1', triggers: ['reaction'], jiraFieldId: 'customfield_1', jiraFieldName: 'F', jiraFieldValue: 'Yes', scope: 'global', allowedSlackUserIds: [], rateLimitPerHour: 20 }] },
     };
-    registerReactionHandler(app, jira, { postAttributionComment: jest.fn() }, services);
+    registerReactionHandler(app, jira, services);
     const client = {
       conversations: { history: jest.fn().mockResolvedValue({ messages: [{ text: 'SNS-1 please', ts: '1' }] }) },
       chat: { postMessage: jest.fn().mockResolvedValue({}) },

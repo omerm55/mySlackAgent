@@ -64,12 +64,12 @@ describe('Jira trigger modal save', () => {
     expect(db.insertJiraTrigger).toHaveBeenCalledWith(expect.objectContaining({ scope: 'personal' }));
   });
 
-  test('Jira identity checkbox: unchecked → allow_bot_fallback false (default); checked → true', async () => {
+  test('no bot-account writes: allow_bot_fallback is always saved false, even from a form still showing the old checkbox', async () => {
     const { handlers, db, client, logger } = setup();
     await handlers.create_jira_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values } }, client, logger });
     expect(db.insertJiraTrigger).toHaveBeenCalledWith(expect.objectContaining({ allow_bot_fallback: false }));
     await handlers.create_jira_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: { ...values, jt_fallback: { value: { selected_options: [{ value: 'allow' }] } } } } }, client, logger });
-    expect(db.insertJiraTrigger).toHaveBeenLastCalledWith(expect.objectContaining({ allow_bot_fallback: true }));
+    expect(db.insertJiraTrigger).toHaveBeenLastCalledWith(expect.objectContaining({ allow_bot_fallback: false }));
   });
 
   test('editing someone else\'s trigger → inline error, no write', async () => {
@@ -153,7 +153,7 @@ describe('Channel trigger modal save', () => {
     field_name_block: { value: txt('PM reviewed') },
     field_value_block: { value: txt('Yes') },
   };
-  test('channel trigger: Jira identity checkbox persisted; default false', async () => {
+  test('channel trigger: allow_bot_fallback always saved false (stale checkbox ignored); ops line says OAuth required', async () => {
     const { app, handlers } = fakeApp();
     const db = { upsertIntegration: jest.fn().mockResolvedValue({}) };
     const ops = { channelId: 'COPS', post: jest.fn().mockResolvedValue(undefined) };
@@ -164,8 +164,8 @@ describe('Channel trigger modal save', () => {
     expect(db.upsertIntegration).toHaveBeenCalledWith(expect.objectContaining({ allow_bot_fallback: false }));
     expect(ops.post).toHaveBeenCalledWith(expect.stringMatching(/OAuth required/));
     await handlers.create_trigger_modal({ ack: jest.fn(), body: { user: { id: 'UADMIN' } }, view: { private_metadata: '{}', state: { values: { ...values, fallback_block: { value: { selected_options: [{ value: 'allow' }] } } } } }, client, logger });
-    expect(db.upsertIntegration).toHaveBeenLastCalledWith(expect.objectContaining({ allow_bot_fallback: true }));
-    expect(ops.post).toHaveBeenLastCalledWith(expect.stringMatching(/bot account may act/));
+    expect(db.upsertIntegration).toHaveBeenLastCalledWith(expect.objectContaining({ allow_bot_fallback: false }));
+    expect(ops.post).toHaveBeenLastCalledWith(expect.stringMatching(/OAuth required/));
   });
 
   test('channel trigger: reply markers saved as a list and named to ops; a bad line keeps the modal open', async () => {

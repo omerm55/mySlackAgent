@@ -6,15 +6,13 @@
 
 ## Why we are asking
 
-The bot authenticates to Jira with **one** account for two purposes:
-
-1. **Reads and polling** — always. It runs JQL searches every minute or two, reads issues, project
-   versions, transitions and changelogs, and looks up users by e-mail.
-2. **Writes** — only where an admin has explicitly allowed it on a specific trigger. Normally a write is
-   made with the acting person's own Atlassian OAuth token, not this account.
+The bot authenticates to Jira with **one** account, and **only to read**: it runs JQL searches every
+minute or two, reads issues, project versions, transitions and changelogs, and looks up users by e-mail.
+**It never writes.** Every Jira change is made with the acting person's own Atlassian OAuth token — since
+October 2026 without exception, as the security review (SNS-133715) required.
 
 **Today that account is a personal Jira admin account** (the bot owner's). That is wrong in three ways:
-the audit trail attributes bot reads and fallback writes to a person who did not perform them, the bot
+the audit trail attributes the bot's reads to a person who did not perform them, the bot
 holds far more permission than it needs, and the credential cannot be revoked without disrupting a real
 user. We would like a dedicated, non-human account instead.
 
@@ -23,7 +21,7 @@ user. We would like a dedicated, non-human account instead.
 | Item | Value |
 |---|---|
 | Account type | Atlassian account for automation (not a person's account), e.g. `svc-slack-jira-bot@sisense.com` |
-| Display name | `Slack-Jira Bot` — it appears in Jira history and comments, so it should read as a system |
+| Display name | `Slack-Jira Bot` — it may appear in Jira's access logs, so it should read as a system |
 | Product access | **Jira Software** (and Jira Product Discovery if PR needs its own seat) — nothing else |
 | Admin rights | **None.** Not site admin, not org admin, not Jira admin |
 | Groups | Only what the permissions below require. Not `site-admins`, not `jira-administrators` |
@@ -33,39 +31,28 @@ user. We would like a dedicated, non-human account instead.
 ## Permissions it actually needs
 
 Scoped to **two projects only**: `SNS` (Sisense) and `PR` (Product Roadmap). No other project.
-
-**Read (always used):**
+**Read-only.**
 
 | Jira permission | Why |
 |---|---|
 | Browse Projects (SNS, PR) | The JQL polling that finds issues to ask about |
 | View Development Tools / — | not needed |
-| Browse users and groups (global) | Resolve an issue's reporter, assignee or owner field to an e-mail so we can find the right person in Slack |
+| Browse users and groups (global) | Resolve an issue's reporter, assignee or owner field to an e-mail so we can find the right person in Slack; and find the Jira user for a Slack user's e-mail, which is how the bot checks that a person connecting Jira signed in as themselves (security review condition 1) |
 
 The account must also be able to **see users' e-mail addresses**. Atlassian profile visibility can hide
 them; when it does, the bot cannot map a Jira person to a Slack person and simply skips that issue. If
 org policy forbids exposing e-mail to a service account, tell us and we will use `accountId` mapping
 instead, which needs a table we maintain by hand.
 
-**Write (used only on triggers where an admin allowed the bot account, and for the attribution comment):**
+**Not needed, please do not grant:** any write permission — Edit, Transition, Assign, Create, Delete or
+Move Issues, Add or Delete Comments, Manage Sprints or Watchers, Work On Issues, attachments — and
+Administer Projects.
 
-| Jira permission | Why |
-|---|---|
-| Edit Issues (SNS, PR) | Set the field a trigger names (e.g. *PM reviewed*, *Notes*, *Project target*) |
-| Transition Issues (SNS, PR) | Move an issue to the status a trigger names (e.g. Acceptance → Done) |
-| Add Comments (SNS, PR) | The attribution comment "changed by X via Slack" whenever this account acts for someone |
-| Assign Issues (SNS, PR) | Only reachable through a free-text reply that explicitly asks for an assignee |
-
-**Not needed, please do not grant:** Delete Issues, Delete Comments, Manage Sprints, Administer
-Projects, Manage Watchers, Create Issues, Move Issues between projects, Work On Issues, or any
-attachment permission.
-
-If it is easier to grant a project role than individual permissions, the smallest role that covers the
-list above is fine — as long as it excludes delete and administer.
+If it is easier to grant a project role than individual permissions, a read-only (browse) role is fine.
 
 ## How we switch over
 
-1. IT creates the account and the API token, and grants the permissions above on SNS and PR.
+1. IT creates the account and the API token, and grants the read permissions above on SNS and PR.
 2. We set three values in the bot's runtime environment: the account's e-mail, its API token, and
    `JIRA_SERVICE_ACCOUNT_EMAIL` (the same address) so the bot can flag a mismatch.
 3. On start the bot reports its Jira identity to the operator channel: *"🔑 Jira service identity: Slack-Jira
