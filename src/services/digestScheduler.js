@@ -1,6 +1,7 @@
 'use strict';
 
 const { sendDmQuestion } = require('../utils/dmQuestion');
+const { fixVersionForAsk } = require('./fixVersionSuggester');
 
 /**
  * Digest frequencies a user can choose. Delivery slots are in the user's own
@@ -78,8 +79,11 @@ function isDigestDue(pref, now = new Date()) {
  * own Yes / No / Reply message (so the existing button handlers work as-is).
  */
 class DigestScheduler {
-  constructor({ db, slackClient, opsNotifier = null, oauthService = null, logger, intervalMs = 60_000 }) {
+  // jiraService + llmService: only to suggest a Fix Version when closing needs one (optional)
+  constructor({ db, slackClient, opsNotifier = null, oauthService = null, jiraService = null, llmService = null, logger, intervalMs = 60_000 }) {
     this.db = db;
+    this.jira = jiraService;
+    this.llm = llmService;
     this.slack = slackClient;
     this.ops = opsNotifier;
     this.oauth = oauthService;
@@ -150,6 +154,13 @@ class DigestScheduler {
     for (const row of pending) {
       const context = { ...(row.payload || {}), issueKey: row.issue_key, ...(authUrl ? { authUrl } : {}) };
       if (!context.question) context.question = `Approve ${row.issue_key}?`;
+      // Checked at delivery, not when queued: the Fix Version may have been set in between
+      if (context.transitionTo && !context.askType) {
+        const fixVersion = await fixVersionForAsk({
+          jira: this.jira, llm: this.llm, db: this.db, issueKey: row.issue_key, transitionTo: context.transitionTo, logger: this.logger,
+        });
+        if (fixVersion) context.fixVersion = fixVersion;
+      }
       try {
         await sendDmQuestion(this.slack, slackUserId, context, null, this.ops);
         deliveredIds.push(row.id);

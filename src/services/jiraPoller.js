@@ -8,6 +8,7 @@ const {
 } = require('../utils/riskReviewMessage');
 const { collectContextFor, ROADMAP_FIELDS } = require('../utils/collectMessage');
 const { pauseState, describePause } = require('../utils/pauseState');
+const { fixVersionForAsk } = require('./fixVersionSuggester');
 
 // Legacy "Mmm DD" stamps predate the notifier's 2026-09-14 contract, which never cleared the field;
 // ignore those once they are older than this (env RISK_NOTIFICATION_MAX_AGE_DAYS, default 8). Current
@@ -83,11 +84,13 @@ class JiraPoller {
    * @param {import('./dbService')} deps.db
    * @param {import('@slack/bolt').App['client']} deps.slackClient
    * @param {import('../utils/opsNotifier')} [deps.opsNotifier]
+   * @param {import('./llmService')} [deps.llmService]  weighs the evidence for a Fix Version suggestion
    * @param {import('pino').Logger} deps.logger
    * @param {number} [deps.intervalMs]
    */
-  constructor({ jiraService, db, slackClient, opsNotifier, oauthService = null, logger, intervalMs = 60_000 }) {
+  constructor({ jiraService, db, slackClient, opsNotifier, oauthService = null, llmService = null, logger, intervalMs = 60_000 }) {
     this.jira = jiraService;
+    this.llm = llmService;
     this.db = db;
     this.slack = slackClient;
     this.ops = opsNotifier;
@@ -418,6 +421,14 @@ class JiraPoller {
         ? await this.oauth.generateAuthUrl(slackUserId)
         : null;
       const context = { ...payload, ...(authUrl ? { authUrl } : {}) };
+
+      // Closing needs a Fix Version it doesn't have? Suggest one in the question itself.
+      if (payload.transitionTo) {
+        const fixVersion = await fixVersionForAsk({
+          jira: this.jira, llm: this.llm, db: this.db, issueKey: issue.key, transitionTo: payload.transitionTo, logger: this.logger,
+        });
+        if (fixVersion) context.fixVersion = fixVersion;
+      }
 
       try {
         await sendDmQuestion(this.slack, slackUserId, context, null, this.ops);

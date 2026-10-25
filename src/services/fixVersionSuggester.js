@@ -1,6 +1,6 @@
 'use strict';
 
-const { withTimeoutOr } = require('../utils/withTimeout');
+const { withTimeout, withTimeoutOr } = require('../utils/withTimeout');
 
 const RECENT_RELEASED_DAYS = 180;
 const DEFAULT_STAGE_TIMEOUT_MS = 5_000;
@@ -247,4 +247,65 @@ async function suggestFixVersion({
   return result;
 }
 
-module.exports = { suggestFixVersion, getEpicChildren, candidateVersions, buildTimeline, releaseFor };
+/** One-line "Based on …" summary of a suggestion's evidence (shown under the suggestion). */
+function suggestionBasis({ children = [], acceptedAt = null, statusName = '', usedLlm = false } = {}) {
+  return [
+    `${children.length} child issue(s)`,
+    acceptedAt ? `entered ${statusName} ${new Date(acceptedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : null,
+    usedLlm ? 'chosen by AI' : null,
+  ].filter(Boolean).join(' · ');
+}
+
+/**
+ * Will moving `issueKey` to `transitionTo` need a Fix Version it doesn't have yet?
+ * True when the issue has no Fix Version and the transition closes it — lands in a done-category
+ * status — with Fix Version on its screen. SNS enforces the field with a workflow validator the API
+ * does not expose (the screen marks it optional), so the screen is the visible signal; Cancel has no
+ * screen and is never held up.
+ */
+async function fixVersionNeeded(jira, issueKey, transitionTo) {
+  const [issue, transitions] = await Promise.all([jira.getIssue(issueKey), jira.getTransitions(issueKey)]);
+  if ((issue?.fields?.fixVersions || []).length > 0) return false;
+  const want = norm(transitionTo);
+  const match = transitions.find((t) => norm(t.to?.name) === want || norm(t.name) === want);
+  return Boolean(match && match.to?.statusCategory?.key === 'done' && match.fields?.fixVersions);
+}
+
+/**
+ * Fix Version part of a "close this?" ask, worked out before the question is sent.
+ * Returns null when no Fix Version is needed — or when the check itself fails, so the person is asked
+ * as before and a refusal still gets the after-the-fact offer. Otherwise a compact suggestion
+ * (small enough to ride in button values): { pick, reason, alternative, basis }, pick null when
+ * nothing could be suggested.
+ */
+async function fixVersionForAsk({
+  jira, llm, db, issueKey, transitionTo, logger, checkMs = 5_000, budgetMs = 22_000, stageTimeoutMs = DEFAULT_STAGE_TIMEOUT_MS,
+}) {
+  if (!jira || !transitionTo) return null;
+  try {
+    if (!(await withTimeout(fixVersionNeeded(jira, issueKey, transitionTo), checkMs, 'Fix Version check'))) return null;
+  } catch (err) {
+    logger?.warn?.(`[fixVersion] ${issueKey}: could not tell whether a Fix Version is needed (${err.message}) — asking without one`);
+    return null;
+  }
+  try {
+    const s = await withTimeout(suggestFixVersion({ jira, llm, db, issueKey, logger, stageTimeoutMs }), budgetMs, 'Fix Version suggestion');
+    if (!s.pick) return { pick: null, reason: '', alternative: null, basis: suggestionBasis(s) };
+    return {
+      pick: { id: String(s.pick.id), name: s.pick.name, released: Boolean(s.pick.released) },
+      reason: String(s.reason || '').slice(0, 200),
+      alternative: s.alternative
+        ? { id: String(s.alternative.pick.id), name: s.alternative.pick.name, reason: String(s.alternative.reason || '').slice(0, 200) }
+        : null,
+      basis: suggestionBasis(s),
+    };
+  } catch (err) {
+    logger?.warn?.(`[fixVersion] ${issueKey}: suggestion failed before asking (${err.message}) — offering the picker only`);
+    return { pick: null, reason: '', alternative: null, basis: '' };
+  }
+}
+
+module.exports = {
+  suggestFixVersion, getEpicChildren, candidateVersions, buildTimeline, releaseFor,
+  suggestionBasis, fixVersionNeeded, fixVersionForAsk,
+};

@@ -114,10 +114,16 @@ class OpsNotifier {
   }
 
   // Bot sent a DM question to a user
-  async dmQuestionSent({ slackUserId, issueKey, question, fieldName, fieldValue }) {
+  async dmQuestionSent({ slackUserId, issueKey, question, fieldName, fieldValue, fixVersion = null }) {
+    const fv = fixVersion
+      ? ` · Fix Version needed — ${fixVersion.pick ? `suggested *${fixVersion.pick.name}*` : 'no suggestion, picker offered'}`
+      : '';
     await this.post(
-      `📨 Bot asked <@${slackUserId}> about *${issueKey}*: "${question}" _(${fieldName} → ${fieldValue})_`,
-      { kind: 'ask_sent', user: slackUserId, issue: issueKey, detail: { fieldName, fieldValue } },
+      `📨 Bot asked <@${slackUserId}> about *${issueKey}*: "${question}" _(${fieldName} → ${fieldValue})_${fv}`,
+      {
+        kind: 'ask_sent', user: slackUserId, issue: issueKey,
+        detail: { fieldName, fieldValue, ...(fixVersion ? { fixVersionSuggested: fixVersion.pick?.name || null } : {}) },
+      },
     );
   }
 

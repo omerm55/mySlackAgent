@@ -193,14 +193,14 @@ registerPreferencesHandler(app, services);
     // Tick cadence — the floor for per-trigger poll_interval_min (default 60s)
     const intervalSec = parseInt(process.env.JIRA_POLL_INTERVAL_SEC || '60', 10);
     jiraPoller = new JiraPoller({
-      jiraService, db, slackClient: app.client, opsNotifier, oauthService, logger,
+      jiraService, db, slackClient: app.client, opsNotifier, oauthService, llmService, logger,
       intervalMs: intervalSec * 1000,
     });
     jiraPoller.start();
 
     // Deliver queued prompts to users who chose an hourly / daily digest
     digestScheduler = new DigestScheduler({
-      db, slackClient: app.client, opsNotifier, oauthService, logger,
+      db, slackClient: app.client, opsNotifier, oauthService, jiraService, llmService, logger,
     });
     digestScheduler.start();
   }

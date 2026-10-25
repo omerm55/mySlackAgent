@@ -1,7 +1,7 @@
 'use strict';
 
 const { issueLink } = require('../utils/jiraLink');
-const { suggestFixVersion } = require('../services/fixVersionSuggester');
+const { suggestFixVersion, suggestionBasis } = require('../services/fixVersionSuggester');
 const riskReview = require('../utils/riskReviewMessage');
 const collect = require('../utils/collectMessage');
 const { buildYesNoBlocks, connectBlocks, buildReplyPreviewBlocks, describeDecision, yesNoHeadline } = require('../utils/dmQuestion');
@@ -206,15 +206,10 @@ function registerDmHandler(app, jiraService, services) {
     let text = intro + suggestionNote;
 
     if (suggestion?.pick) {
-      const { pick, reason, alternative, children, usedLlm, acceptedAt, statusName } = suggestion;
+      const { pick, reason, alternative } = suggestion;
       text += `\n💡 Suggested: *${pick.name}*${pick.released ? ' _(already released)_' : ''} — ${reason}.`;
       if (alternative) text += `\nAlternative: *${alternative.pick.name}* — ${alternative.reason}.`;
-      const basis = [
-        `${children.length} child issue(s)`,
-        acceptedAt ? `entered ${statusName} ${new Date(acceptedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : null,
-        usedLlm ? 'chosen by AI' : null,
-      ].filter(Boolean).join(' · ');
-      text += `\n_Based on ${basis}._`;
+      text += `\n_Based on ${suggestionBasis(suggestion)}._`;
       buttons.push({
         type: 'button',
         style: 'primary',
@@ -246,13 +241,18 @@ function registerDmHandler(app, jiraService, services) {
     return replaceButtons(client, channelId, messageTs, originalText, text, [{ type: 'actions', elements: buttons }]);
   }
 
-  /** Set fixVersions on the issue, then apply the originally proposed action. Updates the DM. */
+  /**
+   * Set fixVersions on the issue, then apply the originally proposed action. Updates the DM.
+   * Reached from the ask itself (closing needed a Fix Version, suggested up front) or from the offer
+   * shown after Jira refused a plain Yes.
+   */
   async function applyFixVersionAndRetry(client, context, versionId, versionName, logger) {
     const { issueKey, transitionTo, jiraFieldId, jiraFieldValue, jiraFieldType, jiraFieldName,
             slackUserId, dmChannelId, messageTs, originalText = '' } = context;
 
     if (dmChannelId && messageTs) {
-      await replaceButtons(client, dmChannelId, messageTs, originalText, `_Setting Fix Version to *${versionName}* and retrying…_`);
+      await replaceButtons(client, dmChannelId, messageTs, originalText,
+        `_Setting Fix Version to *${versionName}*${transitionTo ? ` and moving to *${transitionTo}*` : ''}…_`);
     }
 
     const fieldName = transitionTo ? 'status' : jiraFieldName;
@@ -281,7 +281,7 @@ function registerDmHandler(app, jiraService, services) {
       logger.error(`[dm] Fix Version retry failed for ${issueKey}: ${err.message}`);
       if (dmChannelId && messageTs) {
         await replaceButtons(client, dmChannelId, messageTs, originalText,
-          `❌ Still failed on *${issueLink(issueKey)}*: ${err.message}\n_I'll ask again on the next check if it still applies._`);
+          `❌ Failed on *${issueLink(issueKey)}*: ${err.message}\n_I'll ask again on the next check if it still applies._`);
       }
       await services.db?.deletePromptsForIssue(issueKey, slackUserId).catch(() => {});
       await services.opsNotifier?.dmButtonClicked({ action: 'yes', slackUserId, issueKey, fieldName, fieldValue, error: err.message });
@@ -746,6 +746,17 @@ function registerDmHandler(app, jiraService, services) {
 
   // ── Fix Version: one-click apply of the suggestion ────────────────────────
 
+  /**
+   * Where the clicked message lives. Buttons on the offer carry it; buttons on the ask itself (Fix
+   * Version suggested before asking) were built before the message existed, so take it from the click.
+   */
+  const withMessageLocation = (ctx, body) => ({
+    ...ctx,
+    dmChannelId: ctx.dmChannelId || body.channel?.id,
+    messageTs: ctx.messageTs || body.message?.ts,
+    originalText: ctx.originalText || (body.message?.text || '').slice(0, 600),
+  });
+
   // Matches both the suggested ("jira_fixversion_apply") and alternative ("…_alt") buttons
   app.action(/^jira_fixversion_apply(_alt)?$/, async ({ ack, body, client, logger }) => {
     await ack();
@@ -754,7 +765,8 @@ function registerDmHandler(app, jiraService, services) {
       logger.error('[dm] Could not parse Fix Version apply context');
       return;
     }
-    const { versionId, versionName, ...rest } = context;
+    const { versionId, versionName, ...rest } = withMessageLocation(context, body);
+    if (await refusedWhilePaused(client, rest, body, logger)) return;
     await applyFixVersionAndRetry(client, rest, versionId, versionName, logger);
   });
 
@@ -767,6 +779,7 @@ function registerDmHandler(app, jiraService, services) {
       logger.error('[dm] Could not parse Fix Version button context');
       return;
     }
+    context = withMessageLocation(context, body);
     const { issueKey, slackUserId, suggestedId } = context;
     const projectKey = issueKey.split('-')[0];
     if (!canWrite(context)) { await needsConnect(client, context, body, 'set the Fix Version', logger); return; }

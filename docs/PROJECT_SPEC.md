@@ -9,7 +9,7 @@
 > truth: `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (moved from GitHub, §11.4). Trunk:
 > `main`. Render deploys `main` through the GitHub push mirror — Render cannot reach the internal
 > GitLab (§11.4).
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (347 tests, 34 suites; 13
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (366 tests, 35 suites; 14
 > of them need a Postgres and skip without one — §13).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
@@ -155,10 +155,22 @@ only has an effect together with `scope=global`. Typical path: personal → glob
 
 ### 2.4 Fix Version assistance
 
-If a transition fails because Jira requires a Fix Version (workflow validator), the bot suggests one
-from the epic's child issues, the date it entered its current status, and a release calendar, then
-offers **✅ Use X & retry**, **Use Y instead**, and **🏷 Choose another…** (a picker of project
-versions). Required *Resolution* is auto-filled (Done → Fixed → Resolved).
+**Before asking.** When a Jira trigger asks someone to *close* an issue (the transition lands in a
+done-category status and has Fix Version on its screen) and the issue has no Fix Version, the bot works
+out a suggestion *before* sending the question. The ask then explains that Jira needs a Fix Version and
+offers **✅ Yes, with X**, **Yes, with Y** (the alternative), **🏷 Yes, another version…** (the picker,
+X preselected), **No** and **💬 Reply**; one click sets the Fix Version and closes the issue, as the
+person. With no suggestion it offers **🏷 Yes, choose a version**. If the Fix Version is already set, or
+the transition doesn't close the issue (e.g. *Acceptance*, or *Canceled*, which has no screen), the ask
+is the plain Yes / No / Reply as before. The check runs when the question is delivered — immediately,
+or at the digest slot — so a version set in the meantime is respected. If the check itself fails, the
+plain ask is sent.
+
+**After a refusal (fallback).** If a transition still fails because Jira requires a Fix Version (the
+workflow validator; e.g. a reply interpreted by the LLM, or an ask sent before this check existed), the
+bot suggests one from the epic's child issues, the date it entered its current status, and a release
+calendar, then offers **✅ Use X & retry**, **Use Y instead**, and **🏷 Choose another…** (a picker of
+project versions). Required *Resolution* is auto-filled (Done → Fixed → Resolved).
 
 ### 2.5 Per-user OAuth (Atlassian 3LO)
 
@@ -391,7 +403,7 @@ src/
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6); applied by scripts/apply-schema.js
-tests/                         Jest (347 tests, 34 suites; the database suite needs TEST_DATABASE_URL);
+tests/                         Jest (366 tests, 35 suites; the database suite needs TEST_DATABASE_URL);
                                tests/helpers/connectedAs.js gives a test a connected user
 config/*.example.json          Local-dev config templates (legacy path)
 .github/workflows/ci.yml       CI on GitHub: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
@@ -432,7 +444,7 @@ beyond Bolt, and no ORM — the database is addressed in SQL.
 |---|---|---|
 | `reactionHandler.js` | `reaction_added` | Ignore the bot's own reactions (reply markers); match channel triggers by channel; drop triggers for which the post is **settled** (`findSettlingMarker`: bot's approval reaction on the root, else a matching reply in the thread — fetched only for triggers with an approval marker) → ops `reactionFiltered`, no write, no thread message, before the pause check and the OAuth gate; after a successful write on a post carrying the bot's non-approval marker (❓), swap it for ✅ (`reactions.remove` + `reactions.add`); fetch message; extract issue keys; per-trigger scope/allowlist/**OAuth gate** (no usable token → thread reply "connect, then react again" + auth DM + ops `reactionFiltered`, nothing written; OAuth not configured at all → ops only, nothing written)/rate/dedup; update field via the user's own OAuth client — the only write path; thread confirmation; audit + ops. |
 | `replyHandler.js` | `message` (thread replies; never the bot's own) | **Reply markers first:** a reply whose text contains a trigger's marker phrase → `reactions.add` with that emoji on the root message, scope/allowlist/dedup applied, no Jira write, no thread message (`already_reacted` is quiet; any other Slack error → ops `reply_marker_failed`); markers also follow other apps' replies. **Decisions:** for triggers with a `decision` and an open flag (`findOpenFlag`), the trigger is removed from the raw-reply path; a reply from one of the flag's deciders (deduped per message) goes to `proposeDecision` after the pause check, anyone else's is ignored. Otherwise, for non-bot replies on triggers with `reply`: settled posts are dropped the same way as for reactions (one memoised thread fetch per event), then the same as reactions (root message holds the issue key), including the OAuth gate — which is only resolved when a write is coming. While paused a marker-only reply gets no thread message. |
-| `dmHandler.js` | `resolveJira(slackUserId)` returns the user's own client or `null` (→ Connect nudge, ask kept); `canWrite(ctx)` is the same test for modal openers — an `allowFallback` in an older ask's button value is ignored · actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_reply_confirm`, `jira_reply_edit`, `jira_reply_cancel`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text is **preview-then-confirm** (`buildReplyPreviewBlocks` → `executeDecision`; the LLM never writes unconfirmed); Fix Version offer with progress + fallbacks; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); **`resolveJira(user, client, ctx)`** returns the user's client, the service account only when `ctx.allowFallback`, else `null` → **`needsConnect`** re-renders the ask (the message's own blocks, or rebuilt from ctx) with a Connect nudge and leaves `jira_prompts` alone; modal openers check `canWrite` before opening; clears `jira_prompts` on failure so the poller re-asks. Pino logs carry issue keys, actions and text *lengths* only — never the user's text or extracted values (those go to the ops channel). |
+| `dmHandler.js` | `resolveJira(slackUserId)` returns the user's own client or `null` (→ Connect nudge, ask kept); `canWrite(ctx)` is the same test for modal openers — an `allowFallback` in an older ask's button value is ignored · actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_reply_confirm`, `jira_reply_edit`, `jira_reply_cancel`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text is **preview-then-confirm** (`buildReplyPreviewBlocks` → `executeDecision`; the LLM never writes unconfirmed); Fix Version offer with progress + fallbacks; the Fix Version buttons also appear on the ask itself (§2.4) — `withMessageLocation(ctx, body)` fills `dmChannelId`/`messageTs`/`originalText` from the click when the button was built before the message existed, and the apply handler honours the pause; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); **`resolveJira(user, client, ctx)`** returns the user's client, the service account only when `ctx.allowFallback`, else `null` → **`needsConnect`** re-renders the ask (the message's own blocks, or rebuilt from ctx) with a Connect nudge and leaves `jira_prompts` alone; modal openers check `canWrite` before opening; clears `jira_prompts` on failure so the poller re-asks. Pino logs carry issue keys, actions and text *lengths* only — never the user's text or extracted values (those go to the ops channel). |
 | `homeHandler.js` | `app_home_opened`; actions `home_disconnect_jira`, `home_pause_bot`, `home_resume_bot`; view `home_disconnect_jira_modal` | Builds the Home view (connection with Connect / Disconnect, notifications, how it works, persistent recent activity; trigger sections **admin-only**); Disconnect → confirm modal → `oauthService.disconnect` → DM + ops line + Home refresh; exports `publishHome` for other handlers to refresh it. |
 | `triggerHandler.js` | actions `home_create_trigger`, `trigger_menu`, `home_create_jira_trigger`, `jira_trigger_menu`; views `create_trigger_modal`, `create_jira_trigger_modal` | CRUD for both trigger kinds (channel-trigger modal: optional **Decision field** line `customfield_… | name | value, value, …` parsed by `threadDecision.parseDecisionConfig`, inline error on a bad line, named in the ops line; optional **Reply markers** box, one `text => :emoji:` per line, parsed by `replyMarkers` with an inline error on a bad line; both modals save `allow_bot_fallback: false` (the checkbox was removed with bot-account writes, §14 #49; the column stays until the move to RDS); Jira-trigger modal: ask type yes/no / risk review / collect (+ field list, one per line), notify reporter/assignee/user field + field id, re-ask watch field, FYI user field, pilot users (multi-user select), cadence, action); validates JQL against Jira before saving; **saves before acknowledging the modal**, so a failed write (e.g. missing migration) keeps the modal open with the reason instead of closing; runs the trigger once right after saving and posts the same summary as Run now (`runSummaryLines`: matched · not yet asked · already asked or waiting in a digest · sent · queued, with 🔔 lines for matches held for a digest); Run now / Re-ask; all outcomes reported to **ops** (not DM). |
 | `decisionHandler.js` | actions `decision_apply`, `decision_dismiss`; `proposeDecision` (called by `replyHandler`) | **Propose:** reads the decision field's current value (service account, read-only), `llmService.interpretDecision`, validates the answer against the options, posts the proposal in the thread with both buttons carrying the context (issue, decider, field ids/values, flag emoji) + ops `decision_proposed`; LLM error → ops `decision_failed`, nothing posted; no decision → log only. **Apply** (decider only — anyone else gets an ephemeral note): pause → proposal kept with a note; OAuth as the decider only, else Connect DM + proposal kept + ops; one `updateIssueFields` PUT (decision field + the trigger's field); `getIssue` read-back — match → `reactions.remove` flag, `reactions.add` ✅, proposal replaced by "✅ Done … checked in Jira", ops `decision_applied`; mismatch → ❓ kept, ops `decision_unverified`; Jira error → proposal kept with the reason, ops `decision_failed`. Activity entry. **Not quite:** proposal closed, nothing written, ops `decision_dismissed`. Pino logs carry keys, ids and lengths only. |
@@ -531,7 +543,9 @@ fields:[{id, name, hint, required, current}]}}` (`fieldsFor` requests every `col
 current values ride along); any may carry `fyiSlackUserId`. **FYI:** `fyiFieldFor(trigger)`
 (explicit `fyi_field_id`, else PM owner for risk reviews) → first user → Slack id; if different from the
 person asked, `sendFyi` posts an informational DM right away and the id rides in the payload/button
-context so `dmHandler` can echo actions to them. Returns per-trigger stats `{matched, fresh, sent, queued,
+context so `dmHandler` can echo actions to them. **Fix Version before asking:** for a transition ask
+delivered now, `fixVersionForAsk` (below) runs just before `sendDmQuestion`; a suggestion rides on the
+send context as `fixVersion` (never in the recorded payload). Takes an optional `llmService`. Returns per-trigger stats `{matched, fresh, sent, queued,
 fyi, pilotSkipped, stale, offTopic, dayCapped, skipped[], sentTo[], queuedFor[]}`. `runOnce({force, onlyId})` is used by Run now / Re-ask / save.
 
 **`riskReviewMessage.js`** (utils) — builds the `risk_review` DM (`buildRiskReviewBlocks`,
@@ -560,7 +574,8 @@ withheld while a required field is missing. `sendDmQuestion` delegates when `ask
 `digest_frequency != immediate`, compute the latest slot (hourly: top of hour; daily: 09:00 local;
 twice_daily: 09:00/15:00 local; time zone from Slack profile) and deliver pending prompts if
 `last_digest_at < slot`. Delivery = header DM + one `sendDmQuestion` per prompt (so existing button
-handlers work). Exposes pure helpers `localParts`, `zonedTimeToUtc`, `currentSlotStart`, `isDigestDue`.
+handlers work); a transition prompt gets `fixVersionForAsk` at delivery, not at queue time (optional
+`jiraService` + `llmService` deps; without `jiraService` the check is skipped). Exposes pure helpers `localParts`, `zonedTimeToUtc`, `currentSlotStart`, `isDigestDue`.
 
 **`fixVersionSuggester.js`** — `suggestFixVersion({jira, llm, db, issueKey, stageTimeoutMs=5000,
 onProgress})`. Stages (each capped, skipped on timeout, recorded in `degraded[]`): issue + children
@@ -570,6 +585,13 @@ Decision order: unanimous children → LLM → timeline fit → current release 
 Returns `{pick, reason, alternative, acceptedAt, statusName, candidates, children, usedLlm, degraded}`.
 "Timeline fit" = release whose branch-out window contains the acceptance date (or the next window);
 "current" = window containing today (or `CURRENT_RELEASE_VERSION`).
+`suggestionBasis(s)` → the "Based on …" line. `fixVersionNeeded(jira, key, transitionTo)` → true when the
+issue has no Fix Version and the matching transition goes to a `statusCategory.key === 'done'` status
+with `fixVersions` among its screen fields (the SNS validator is invisible to the API; the screen marks the
+field optional). `fixVersionForAsk({jira, llm, db, issueKey, transitionTo, logger, checkMs=5000,
+budgetMs=22000, stageTimeoutMs})` → `null` (not needed, no transition, or the check failed/timed out) or
+`{pick:{id,name,released}|null, reason, alternative:{id,name,reason}|null, basis}` — compact so it fits in
+button values; a failed suggestion yields `pick: null` (picker only).
 
 **`llmService.js`** — `fromEnv()` picks provider by key precedence OpenAI → Gemini → Anthropic.
 `interpretJiraResponse(...)`, `suggestFixVersion(...)`, `tidyNote(...)`, `extractFields(...)` and `interpretDecision(...)` all call
@@ -582,7 +604,7 @@ Returns `{pick, reason, alternative, acceptedAt, statusName, candidates, childre
 `setPaused(db, on, byUser)`, `invalidate()`, `describePause(state)`; `BOT_PAUSED` or the `app_settings`
 row pauses; a DB error reads as running), `opsNotifier` funnels every message through `post(text, meta)`; `meta` (`kind`, `user`, `issue`, `ok`,
 `detail`) becomes the `audit_events` row, and `setDb` attaches the sink after construction.
-`tokenCrypto.TokenCrypto` (`encrypt` → `enc:v1:<iv>:<tag>:<data>` base64url, `decrypt` with legacy plaintext passthrough and previous-key fallback, `isEncrypted`, `isCurrent`, `fromEnv`), `opsNotifier` (all ops messages, incl. `riskReviewAction` and `collectAction`), `dmQuestion` (`sendDmQuestion`, `buildYesNoBlocks`, `connectBlocks`, `describeDecision` → human-readable list of an LLM decision's effects, `buildReplyPreviewBlocks` → preview + Confirm/Edit/Cancel with a compacted decision in the button value) (builds
+`tokenCrypto.TokenCrypto` (`encrypt` → `enc:v1:<iv>:<tag>:<data>` base64url, `decrypt` with legacy plaintext passthrough and previous-key fallback, `isEncrypted`, `isCurrent`, `fromEnv`), `opsNotifier` (all ops messages, incl. `riskReviewAction` and `collectAction`), `dmQuestion` (`sendDmQuestion`, `buildYesNoBlocks` — with `context.fixVersion` on a transition ask, Yes becomes `jira_fixversion_apply` / `_alt` / `jira_set_fixversion` and the headline gains the Fix Version lines (`fixVersionLines`, `fixVersionYesButtons`); `dmQuestionSent` then appends "Fix Version needed — suggested X" to the ops line and `fixVersionSuggested` to its detail — `connectBlocks`, `describeDecision` → human-readable list of an LLM decision's effects, `buildReplyPreviewBlocks` → preview + Confirm/Edit/Cancel with a compacted decision in the button value) (builds
 the Yes/No/Reply message, optional Connect block, no key prefix if the question already names the
 issue), `jiraLink` (`issueUrl`, `issueLink`, `issueLinkLabelled` with link-safe labels — `|`→`∣`,
 `<>&` escaped), `jiraLinkParser.extractJiraIssueKeys`, `replyMarkers` (`parseReplyMarkers` → `{markers, error}` from the modal text, `=>` or `→`, colons optional; `formatReplyMarkers`; `findReplyMarker(markers, text)` → first case-insensitive substring match; `isApprovalReaction` — the 👍 / ✅ set, skin tones included, shared with the reaction handler; `threadReader(client, channel, ts)` → memoised paginated thread fetch; `findSettlingMarker({root, markers, botUserId, botId, readThread})` → the approval marker that settles the post — or `{match: 'decided'}` for any bot approval reaction such as a decision's ✅ — or null), `threadDecision` (`parseDecisionConfig` / `formatDecisionConfig`, `mentionedUsers(text)`, `findOpenFlag({thread, root, markers, botUserId, botId})` → `{reply, marker, deciders}` for the latest non-bot non-approval marker reply not followed by an approval one, `normaliseDecision(value, options)`, `buildProposalBlocks(ctx, {current, reason})`, `buildOutcomeBlocks(text)`, `DONE_EMOJI` = `white_check_mark`), `keepAlive` (self-GET `/health` every 5 min),
@@ -898,7 +920,9 @@ decision_apply (decider only) ─► OAuth as decider (or bot if allowed; else C
 JiraPoller tick ─► paused? ─► ops line (≤1/h) + stop
   ─► trigger due? ─► searchIssues(jql) (paginated) ─► minus jira_prompts
   ─► for each new issue (≤ cap): reporter/assignee email ─► users.lookupByEmail ─► scope check
-  ─► preference: digest? recordPrompt(queued, payload) : sendDmQuestion(+Connect if no OAuth) + recordPrompt(delivered)
+  ─► preference: digest? recordPrompt(queued, payload) : [transition ask? fixVersionForAsk] sendDmQuestion(+Connect if no OAuth) + recordPrompt(delivered)
+     closing needs a Fix Version ─► ask shows the suggestion: [✅ Yes, with X][Yes, with Y][🏷 Yes, another version…][No][💬 Reply]
+User clicks Yes, with X ─► set fixVersions as the user ─► transition ─► ✅ "Fix Version set to X, moved to Done" ─► ops
 User clicks Yes ─► dmHandler.resolveJira(user): own token → as user · else null
   ├─ null ─► needsConnect: ask re-rendered with its buttons + "🔐 Connect Jira first, then press again" (nothing written, prompt kept) ─► ops
   ├─ ok ─► message replaced with ✅ (issue linked) ─► ops
@@ -915,7 +939,7 @@ User clicks 💬 Reply ─► modal ─► LLM interpretJiraResponse ─► *pre
 
 ```
 DigestScheduler tick ─► getDigestUsers ─► isDigestDue(pref, now)?
-  ─► getPendingPrompts(user) ─► header DM ─► sendDmQuestion per prompt (+Connect if needed)
+  ─► getPendingPrompts(user) ─► header DM ─► [transition? fixVersionForAsk] sendDmQuestion per prompt (+Connect if needed)
   ─► markPromptsDelivered ─► upsert last_digest_at ─► ops "Digest delivered"
 Switching preference to immediate ─► deliverTo(user) flushes the queue now.
 ```
@@ -1555,7 +1579,8 @@ select slack_user_id, count(*) pending from public.jira_prompts where delivered_
 | Boot fails: "oauth_tokens are encrypted but TOKEN_ENCRYPTION_KEY is not set" | Key removed from Render (or wrong service) while encrypted rows exist | Restore the key in Render; never "fix" by deleting rows — users would have to reconnect |
 | Boot fails: "Could not decrypt token (wrong TOKEN_ENCRYPTION_KEY or tampered value)" | Key changed without keeping the old one | Put the old key in `TOKEN_ENCRYPTION_KEY_PREVIOUS`, deploy, then clear it (§12.5) |
 | Jira trigger matched but nobody DM'd | Reporter email hidden or no Slack user for email | Ops shows the reason; adjust profile visibility or map users |
-| Transition fails "A Fix Version is required" | Workflow validator | Bot offers suggestion + picker automatically |
+| Transition fails "A Fix Version is required" | Workflow validator | New asks to close an issue without a Fix Version already carry the suggestion (§2.4); if one still fails (an older ask, or a reply), the bot offers suggestion + picker automatically. The ops line "clicked Yes → ❌ failed … Fix Version is required" is posted even when that offer is shown — check the DM before treating it as stuck |
+| A close ask shows no Fix Version suggestion though the issue has none | The check failed or timed out (`[fixVersion] … could not tell whether a Fix Version is needed` in the logs), or the transition's screen has no Fix Version field / the target isn't a done-category status | Plain ask was sent; Jira's refusal still triggers the offer |
 | Only 50 issues found | (fixed) pagination | Now follows `nextPageToken` |
 | Saving a trigger shows "Could not save: … column … does not exist" inline in the modal | A migration in §6 hasn't been run yet (the modal stays open and the ops channel gets the same error) | Run the relevant SQL in §6, then Save again |
 | Risk button fails: "Planned release is empty; PR PM owner is empty" | PR workflow validators on the target status | Set those fields on the Initiative (any status transition in PR requires them); consider a picker like Fix Version |
@@ -1757,7 +1782,7 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 347 tests in 34 suites:
+`npm test` → Jest, `tests/*.test.js`, 366 tests in 35 suites:
 
 | Suite | Covers |
 |---|---|
@@ -1767,6 +1792,7 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 | `fixVersionSuggester` | Candidate filtering, calendar windows, timeline/current, LLM adjudication + fallbacks, stage timeouts, progress |
 | `digestScheduler` | Time-zone helpers, slot computation, due logic, delivery, flush |
 | `jiraPollerQueue` | Send vs queue by preference |
+| `fixVersionBeforeAsk` | `fixVersionNeeded`: closing transition with the field on its screen + empty → needed; already set, Cancel (no screen), a non-closing transition, or no such transition → not; `fixVersionForAsk`: compact suggestion with basis, null when set / check fails / field ask, picker-only when the suggestion times out; the ask: plain Yes/No/Reply without it, Yes-with-X / alternative / another version (unique ids, values < 2000 chars, suggestion preselected), picker-only when no pick, field asks ignore it; poller DMs the suggestion and doesn't store it in the payload, plain ask when set; digest checks at delivery; clicking Yes-with-X on the ask sets the version, then transitions, updating the same message; "another version" opens the picker preselected with the message location kept |
 | `dmFixVersionOffer` | Offer rendering, unique action_ids, progress lines, fallback when Slack rejects blocks. The clock is pinned (`jest.useFakeTimers`, Date only — `withTimeout` needs real timers): the *Alternative* comes from the release window containing **today**, so with a fixed calendar fixture the assertion rots as soon as the real date leaves it, which is what happened on 1 Oct 2026 |
 | `dmQuestionFormat` | Template rendering (`{key} ({summary})` → one link, pipe-safety), headline dedup, button context |
 | `riskReview` | Interval parsing, status-button rules (already at risk / On hold), block layout + unique action_ids, handlers: status transition, Notes prepend (LLM + fallback), target move/clear/validation, handled, failure → re-ask; FYI follow-up echoed to the PM (and not without one); Notes preview in DM/FYI (string or ADF, 400-char cap, "empty"); Skip after a status change; the notifier's verdict: ISO stamps (with/without seconds, `Z` or `+03:00`) and legacy `Mmm DD` (current year, year roll-back, unparseable = fresh), ISO never stale vs. the legacy 8-day cutoff, `riskFlagsIn` (the four risk flags, hygiene-only = none, the `Action:` tail never counts), `isClearedNotification` (`No flags`, `Not tracked`), `notificationMatches` (case-insensitive regex, empty = all, invalid regex = substring) |
@@ -2121,11 +2147,28 @@ Chronological, with rationale (see `git log` for commits):
     on the collect and risk-review asks said changes "are made by the bot account" until the person
     connects, and two App Home lines contrasted "your name" with "the bot account". They now say plainly
     that nothing is saved without the person's own connection.
+50. **Ask for the Fix Version up front, not after Jira refuses (§2.4).** People clicked Yes on
+    "close this epic?" and got "HTTP 400: A Fix Version is required" (SNS-119446, SNS-135052): the SNS
+    Done transition enforces the field with a workflow validator, while the transition screen marks it
+    optional, so the bot only learned about it from the refusal — and the ops channel reported a
+    failure even though the DM then switched to the Fix Version offer. Now the bot checks before
+    asking and puts the suggestion into the question, so one click sets the version and closes. The
+    signal is "no Fix Version, the target is a done-category status, and Fix Version is on that
+    transition's screen": the validator is invisible to the API, and the screen condition keeps
+    *Acceptance* (on-screen but not closing) and *Canceled* (closing, no screen) from being held up.
+    The check runs at delivery, not at queue time, so a digest doesn't suggest a version for an issue
+    that has since got one, and the suggestion rides on the send context only — never in
+    `jira_prompts.payload`. A failed check sends the plain ask; the after-refusal offer stays as the
+    fallback for replies and for asks already in people's DMs.
 
 ---
 
 ## 15. Known limitations
 
+- **Fix Version check costs time per close ask:** up to ~5 s for the check and ~22 s for the
+  suggestion (LLM included), run inside the poller / digest tick, so a run with many epics to close
+  takes longer. The ops channel still reports the after-refusal case as "❌ failed" even when the
+  Fix Version offer is shown (§12.4).
 - **Retention is manual:** the prune SQL in §12.6 is run by hand; `audit_events`, `activity_log` and
   `jira_prompts` grow until then.
 - **Hosting:** Render free tier sleeps; self-ping mitigates but cannot revive a sleeping instance.

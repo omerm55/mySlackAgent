@@ -21,11 +21,56 @@ function yesNoHeadline(context) {
 }
 
 /**
+ * Closing needs a Fix Version the issue doesn't have: the text explaining it and the suggestion.
+ * `fv` comes from fixVersionForAsk (pick may be null).
+ */
+function fixVersionLines(context, fv) {
+  let text = `\nℹ️ Jira needs a *Fix Version* to move it to *${context.transitionTo}* — it has none yet.`;
+  if (fv.pick) {
+    text += `\n💡 Suggested: *${fv.pick.name}*${fv.pick.released ? ' _(already released)_' : ''}${fv.reason ? ` — ${fv.reason}` : ''}.`;
+    if (fv.alternative) text += `\nAlternative: *${fv.alternative.name}*${fv.alternative.reason ? ` — ${fv.alternative.reason}` : ''}.`;
+    if (fv.basis) text += `\n_Based on ${fv.basis}._`;
+  } else {
+    text += '\n_I couldn\'t suggest one — pick a version when you say Yes._';
+  }
+  return text;
+}
+
+/** "Yes" for an ask that needs a Fix Version: set it and close in one click, or pick another. */
+function fixVersionYesButtons(base, fv) {
+  const buttons = [];
+  if (fv.pick) {
+    buttons.push({
+      type: 'button', style: 'primary',
+      text: { type: 'plain_text', text: `✅ Yes, with ${fv.pick.name}`.slice(0, 75), emoji: true },
+      action_id: 'jira_fixversion_apply',
+      value: JSON.stringify({ ...base, versionId: fv.pick.id, versionName: fv.pick.name }),
+    });
+    if (fv.alternative) {
+      buttons.push({
+        type: 'button',
+        text: { type: 'plain_text', text: `Yes, with ${fv.alternative.name}`.slice(0, 75), emoji: true },
+        action_id: 'jira_fixversion_apply_alt',
+        value: JSON.stringify({ ...base, versionId: fv.alternative.id, versionName: fv.alternative.name }),
+      });
+    }
+  }
+  buttons.push({
+    type: 'button',
+    ...(fv.pick ? {} : { style: 'primary' }),
+    text: { type: 'plain_text', text: fv.pick ? '🏷 Yes, another version…' : '🏷 Yes, choose a version', emoji: true },
+    action_id: 'jira_set_fixversion',
+    value: JSON.stringify({ ...base, suggestedId: fv.pick?.id ?? null }),
+  });
+  return buttons;
+}
+
+/**
  * The Yes / No / Reply ask (no Connect nudge). Button values are capped at 2000 chars — keep the
- * question short in ctx.
+ * question short in ctx. When closing needs a Fix Version (context.fixVersion), Yes carries it.
  */
 function buildYesNoBlocks(context, slackUserId) {
-  const ctx = JSON.stringify({
+  const base = {
     issueKey: context.issueKey,
     question: (context.question || '').slice(0, 300),
     ...(context.transitionTo
@@ -37,13 +82,18 @@ function buildYesNoBlocks(context, slackUserId) {
         jiraFieldType: context.jiraFieldType || 'select',
       }),
     slackUserId,
-  });
+  };
+  const ctx = JSON.stringify(base);
+  const fv = context.transitionTo ? context.fixVersion : null;
+  const yes = fv
+    ? fixVersionYesButtons(base, fv)
+    : [{ type: 'button', text: { type: 'plain_text', text: 'Yes' }, style: 'primary', action_id: 'jira_confirm_yes', value: ctx }];
   return [
-    { type: 'section', text: { type: 'mrkdwn', text: yesNoHeadline(context) } },
+    { type: 'section', text: { type: 'mrkdwn', text: yesNoHeadline(context) + (fv ? fixVersionLines(context, fv) : '') } },
     {
       type: 'actions',
       elements: [
-        { type: 'button', text: { type: 'plain_text', text: 'Yes' }, style: 'primary', action_id: 'jira_confirm_yes', value: ctx },
+        ...yes,
         { type: 'button', text: { type: 'plain_text', text: 'No' }, action_id: 'jira_confirm_no', value: ctx },
         { type: 'button', text: { type: 'plain_text', text: '💬 Reply' }, action_id: 'jira_reply', value: ctx },
       ],
@@ -103,6 +153,7 @@ async function sendDmQuestion(client, slackUserId, context, _pendingQuestions, o
     question: context.question,
     fieldName: context.transitionTo ? 'status' : (context.jiraFieldName || context.jiraFieldId),
     fieldValue: context.transitionTo || context.jiraFieldValue,
+    ...(context.transitionTo && context.fixVersion ? { fixVersion: context.fixVersion } : {}),
   });
 
   return { channelId: dm.channel.id, messageTs: result.ts };
