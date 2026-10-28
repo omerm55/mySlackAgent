@@ -1,6 +1,6 @@
 'use strict';
 
-const { extractJiraIssueKeys } = require('../src/utils/jiraLinkParser');
+const { extractJiraIssueKeys, extractSubjectIssueKey } = require('../src/utils/jiraLinkParser');
 
 const REAL_MESSAGE =
   "Bug SNS-122172 / Customer Hosted Multi-Node POC License Expiration Not Working  was marked as Include Release Notes = No." +
@@ -54,5 +54,30 @@ describe('extractJiraIssueKeys', () => {
   test('handles issue keys with underscores in project name', () => {
     const text = 'See MY_PROJ-10 for context';
     expect(extractJiraIssueKeys(text)).toEqual(['MY_PROJ-10']);
+  });
+});
+
+// The PM-reviewed post for SNS-125104 also linked its follow-up SNS-125106; a 👍 wrote to both.
+const POST_WITH_REFERENCE =
+  "Bug <https://sisenseglobal.atlassian.net/browse/SNS-125104|SNS-125104 / seismic-us14.sisense.com | Pivot deployment hung up>  was marked as Include Release Notes = No.\n" +
+  "*   **Mitigation Strategy:** the team implemented cloud alerts and automatic restarts ([SNS-125106](<https://sisenseglobal.atlassian.net/browse/SNS-125106>)).";
+
+describe('extractSubjectIssueKey', () => {
+  test('returns the post\'s subject, not keys it references further down', () => {
+    expect(extractSubjectIssueKey(POST_WITH_REFERENCE)).toBe('SNS-125104');
+  });
+
+  test('prefers the first Jira link over an earlier bare key-like token', () => {
+    expect(extractSubjectIssueKey('Encoding UTF-8: see https://myco.atlassian.net/browse/SNS-7')).toBe('SNS-7');
+  });
+
+  test('falls back to the first bare key when there is no link', () => {
+    expect(extractSubjectIssueKey(REAL_MESSAGE)).toBe('SNS-122172');
+    expect(extractSubjectIssueKey('Bug SNS-1, duplicate of SNS-2')).toBe('SNS-1');
+  });
+
+  test('returns null when there is no key', () => {
+    expect(extractSubjectIssueKey('Hello world')).toBeNull();
+    expect(extractSubjectIssueKey(undefined)).toBeNull();
   });
 });

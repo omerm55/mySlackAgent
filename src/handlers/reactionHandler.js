@@ -1,6 +1,6 @@
 'use strict';
 
-const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
+const { extractSubjectIssueKey } = require('../utils/jiraLinkParser');
 const { issueLink } = require('../utils/jiraLink');
 const { pauseState, describePause } = require('../utils/pauseState');
 const { isApprovalReaction: isThumbsUp, threadReader, findSettlingMarker } = require('../utils/replyMarkers');
@@ -37,7 +37,9 @@ function registerReactionHandler(app, jiraService, services) {
       const message = result.messages?.[0];
       if (!message) return;
 
-      const issueKeys = extractJiraIssueKeys(message.text);
+      // Only the post's subject issue — other keys in it are references, not targets.
+      const subjectKey = extractSubjectIssueKey(message.text);
+      const issueKeys = subjectKey ? [subjectKey] : [];
       if (issueKeys.length === 0) {
         for (const i of matching) {
           await services.opsNotifier?.reactionFiltered({ slackUserId: event.user, reason: 'no Jira issue keys in message', integration: i.name });

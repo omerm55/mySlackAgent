@@ -9,7 +9,7 @@
 > truth: `gitlab.rnd.sisense.com/Omer.Meshar/jira-slack-bot` (moved from GitHub, §11.4). Trunk:
 > `main`. Render deploys `main` through the GitHub push mirror — Render cannot reach the internal
 > GitLab (§11.4).
-> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (366 tests, 35 suites; 14
+> Production URL: `https://myslackagent.onrender.com`. Tests: `npm test` (372 tests, 35 suites; 14
 > of them need a Postgres and skip without one — §13).
 
 This document is written so that a person **or an LLM with no prior context** can understand what the
@@ -75,7 +75,9 @@ Design principles that shaped the build:
 
 A *channel trigger* watches one Slack channel. When a message there contains a Jira issue key or
 browse URL and someone reacts 👍 / ✅ (or replies in its thread), the bot sets a configured Jira field
-on that issue and confirms in the thread.
+on that issue and confirms in the thread. A post acts on **one** issue — its subject: the first Jira
+browse link in it, else the first bare key. Other keys in the post (a follow-up ticket, a duplicate,
+a linked fix) are references and are never written to (§14 #51).
 
 - Accepted reactions: `+1`, `thumbsup`, `thumbs_up`, `white_check_mark`, including skin-tone
   variants (`+1::skin-tone-3`).
@@ -403,7 +405,7 @@ src/
     admins.js  logger.js (pino)  dedupCache.js  rateLimiter.js  auditLog.js (+ activity_log)  alerting.js  userCache.js
 docs/                          PROJECT_SPEC.md (this file), SCENARIO_CATALOG.md, SECURITY_SUMMARY.md (for the security review), JIRA_SERVICE_ACCOUNT.md (permission request for IT), architecture.md (March design)
 supabase/                      SQL for all tables and migrations (see §6); applied by scripts/apply-schema.js
-tests/                         Jest (366 tests, 35 suites; the database suite needs TEST_DATABASE_URL);
+tests/                         Jest (372 tests, 35 suites; the database suite needs TEST_DATABASE_URL);
                                tests/helpers/connectedAs.js gives a test a connected user
 config/*.example.json          Local-dev config templates (legacy path)
 .github/workflows/ci.yml       CI on GitHub: tests · npm audit (high+) · secret scan · spec-updated check (PRs)
@@ -442,7 +444,7 @@ beyond Bolt, and no ORM — the database is addressed in SQL.
 
 | File | Slack entry points | Responsibility |
 |---|---|---|
-| `reactionHandler.js` | `reaction_added` | Ignore the bot's own reactions (reply markers); match channel triggers by channel; drop triggers for which the post is **settled** (`findSettlingMarker`: bot's approval reaction on the root, else a matching reply in the thread — fetched only for triggers with an approval marker) → ops `reactionFiltered`, no write, no thread message, before the pause check and the OAuth gate; after a successful write on a post carrying the bot's non-approval marker (❓), swap it for ✅ (`reactions.remove` + `reactions.add`); fetch message; extract issue keys; per-trigger scope/allowlist/**OAuth gate** (no usable token → thread reply "connect, then react again" + auth DM + ops `reactionFiltered`, nothing written; OAuth not configured at all → ops only, nothing written)/rate/dedup; update field via the user's own OAuth client — the only write path; thread confirmation; audit + ops. |
+| `reactionHandler.js` | `reaction_added` | Ignore the bot's own reactions (reply markers); match channel triggers by channel; drop triggers for which the post is **settled** (`findSettlingMarker`: bot's approval reaction on the root, else a matching reply in the thread — fetched only for triggers with an approval marker) → ops `reactionFiltered`, no write, no thread message, before the pause check and the OAuth gate; after a successful write on a post carrying the bot's non-approval marker (❓), swap it for ✅ (`reactions.remove` + `reactions.add`); fetch message; take the post's subject issue (`extractSubjectIssueKey` — first browse link, else first bare key; other keys are ignored); per-trigger scope/allowlist/**OAuth gate** (no usable token → thread reply "connect, then react again" + auth DM + ops `reactionFiltered`, nothing written; OAuth not configured at all → ops only, nothing written)/rate/dedup; update field via the user's own OAuth client — the only write path; thread confirmation; audit + ops. |
 | `replyHandler.js` | `message` (thread replies; never the bot's own) | **Reply markers first:** a reply whose text contains a trigger's marker phrase → `reactions.add` with that emoji on the root message, scope/allowlist/dedup applied, no Jira write, no thread message (`already_reacted` is quiet; any other Slack error → ops `reply_marker_failed`); markers also follow other apps' replies. **Decisions:** for triggers with a `decision` and an open flag (`findOpenFlag`), the trigger is removed from the raw-reply path; a reply from one of the flag's deciders (deduped per message) goes to `proposeDecision` after the pause check, anyone else's is ignored. Otherwise, for non-bot replies on triggers with `reply`: settled posts are dropped the same way as for reactions (one memoised thread fetch per event), then the same as reactions (root message holds the issue key), including the OAuth gate — which is only resolved when a write is coming. While paused a marker-only reply gets no thread message. |
 | `dmHandler.js` | `resolveJira(slackUserId)` returns the user's own client or `null` (→ Connect nudge, ask kept); `canWrite(ctx)` is the same test for modal openers — an `allowFallback` in an older ask's button value is ignored · actions `jira_confirm_yes`, `jira_confirm_no`, `jira_reply`, `jira_reply_confirm`, `jira_reply_edit`, `jira_reply_cancel`, `jira_fixversion_apply(_alt)`, `jira_set_fixversion`, `risk_set_status_*`, `risk_update_notes`, `risk_skip_notes`, `risk_move_target`, `risk_handled`, `collect_answer`, `collect_edit`, `collect_save`, `collect_cancel`, `collect_skip`, `dm_connect_jira`, `home_connect_jira`; views `jira_response_modal`, `jira_fixversion_modal`, `risk_notes_modal`, `risk_target_modal`, `collect_modal` | Executes the proposed action (transition or field) as the user; LLM path for free text is **preview-then-confirm** (`buildReplyPreviewBlocks` → `executeDecision`; the LLM never writes unconfirmed); Fix Version offer with progress + fallbacks; the Fix Version buttons also appear on the ask itself (§2.4) — `withMessageLocation(ctx, body)` fills `dmChannelId`/`messageTs`/`originalText` from the click when the button was built before the message existed, and the apply handler honours the pause; risk-review actions (status / Notes prepend / target interval / handled) with `answered_at`; collect flow (modal → `extractFields` → preview → one `updateIssueFields` PUT); **`resolveJira(user, client, ctx)`** returns the user's client, the service account only when `ctx.allowFallback`, else `null` → **`needsConnect`** re-renders the ask (the message's own blocks, or rebuilt from ctx) with a Connect nudge and leaves `jira_prompts` alone; modal openers check `canWrite` before opening; clears `jira_prompts` on failure so the poller re-asks. Pino logs carry issue keys, actions and text *lengths* only — never the user's text or extracted values (those go to the ops channel). |
 | `homeHandler.js` | `app_home_opened`; actions `home_disconnect_jira`, `home_pause_bot`, `home_resume_bot`; view `home_disconnect_jira_modal` | Builds the Home view (connection with Connect / Disconnect, notifications, how it works, persistent recent activity; trigger sections **admin-only**); Disconnect → confirm modal → `oauthService.disconnect` → DM + ops line + Home refresh; exports `publishHome` for other handlers to refresh it. |
@@ -607,7 +609,7 @@ row pauses; a DB error reads as running), `opsNotifier` funnels every message th
 `tokenCrypto.TokenCrypto` (`encrypt` → `enc:v1:<iv>:<tag>:<data>` base64url, `decrypt` with legacy plaintext passthrough and previous-key fallback, `isEncrypted`, `isCurrent`, `fromEnv`), `opsNotifier` (all ops messages, incl. `riskReviewAction` and `collectAction`), `dmQuestion` (`sendDmQuestion`, `buildYesNoBlocks` — with `context.fixVersion` on a transition ask, Yes becomes `jira_fixversion_apply` / `_alt` / `jira_set_fixversion` and the headline gains the Fix Version lines (`fixVersionLines`, `fixVersionYesButtons`); `dmQuestionSent` then appends "Fix Version needed — suggested X" to the ops line and `fixVersionSuggested` to its detail — `connectBlocks`, `describeDecision` → human-readable list of an LLM decision's effects, `buildReplyPreviewBlocks` → preview + Confirm/Edit/Cancel with a compacted decision in the button value) (builds
 the Yes/No/Reply message, optional Connect block, no key prefix if the question already names the
 issue), `jiraLink` (`issueUrl`, `issueLink`, `issueLinkLabelled` with link-safe labels — `|`→`∣`,
-`<>&` escaped), `jiraLinkParser.extractJiraIssueKeys`, `replyMarkers` (`parseReplyMarkers` → `{markers, error}` from the modal text, `=>` or `→`, colons optional; `formatReplyMarkers`; `findReplyMarker(markers, text)` → first case-insensitive substring match; `isApprovalReaction` — the 👍 / ✅ set, skin tones included, shared with the reaction handler; `threadReader(client, channel, ts)` → memoised paginated thread fetch; `findSettlingMarker({root, markers, botUserId, botId, readThread})` → the approval marker that settles the post — or `{match: 'decided'}` for any bot approval reaction such as a decision's ✅ — or null), `threadDecision` (`parseDecisionConfig` / `formatDecisionConfig`, `mentionedUsers(text)`, `findOpenFlag({thread, root, markers, botUserId, botId})` → `{reply, marker, deciders}` for the latest non-bot non-approval marker reply not followed by an approval one, `normaliseDecision(value, options)`, `buildProposalBlocks(ctx, {current, reason})`, `buildOutcomeBlocks(text)`, `DONE_EMOJI` = `white_check_mark`), `keepAlive` (self-GET `/health` every 5 min),
+`<>&` escaped), `jiraLinkParser` (`extractJiraIssueKeys` → every key in the text; `extractSubjectIssueKey` → the one issue a post is about: first browse link, else first bare key, else null), `replyMarkers` (`parseReplyMarkers` → `{markers, error}` from the modal text, `=>` or `→`, colons optional; `formatReplyMarkers`; `findReplyMarker(markers, text)` → first case-insensitive substring match; `isApprovalReaction` — the 👍 / ✅ set, skin tones included, shared with the reaction handler; `threadReader(client, channel, ts)` → memoised paginated thread fetch; `findSettlingMarker({root, markers, botUserId, botId, readThread})` → the approval marker that settles the post — or `{match: 'decided'}` for any bot approval reaction such as a decision's ✅ — or null), `threadDecision` (`parseDecisionConfig` / `formatDecisionConfig`, `mentionedUsers(text)`, `findOpenFlag({thread, root, markers, botUserId, botId})` → `{reply, marker, deciders}` for the latest non-bot non-approval marker reply not followed by an approval one, `normaliseDecision(value, options)`, `buildProposalBlocks(ctx, {current, reason})`, `buildOutcomeBlocks(text)`, `DONE_EMOJI` = `white_check_mark`), `keepAlive` (self-GET `/health` every 5 min),
 `withTimeout`/`withTimeoutOr`, `admins.isAdmin/canManage` (`ADMIN_SLACK_USER_IDS`), `dedupCache`,
 `rateLimiter`, `auditLog` (in-memory list for the daily ops summary **plus** fire-and-forget persistence
 to `activity_log`; `recentFor(user)` feeds the Home tab), `alerting` (error threshold → ops), `userCache`,
@@ -1782,11 +1784,11 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 
 ## 13. Testing
 
-`npm test` → Jest, `tests/*.test.js`, 366 tests in 35 suites:
+`npm test` → Jest, `tests/*.test.js`, 372 tests in 35 suites:
 
 | Suite | Covers |
 |---|---|
-| `reactionHandler`, `replyHandler` | The bot's own 👍 is ignored; trigger matching, allowlist, rate limit, dedup, personal scope, emoji variants, audit/alerting; OAuth gate: no token → thread reply + auth DM + ops, nothing written, even on a trigger still flagged `allow_bot_fallback`; token → the user's own client writes, never the bot's; refresh failure → treated as not connected; OAuth not configured → nothing written, ops told |
+| `reactionHandler`, `replyHandler` | The bot's own 👍 is ignored; trigger matching, allowlist, rate limit, dedup, personal scope, emoji variants, audit/alerting; OAuth gate: no token → thread reply + auth DM + ops, nothing written, even on a trigger still flagged `allow_bot_fallback`; token → the user's own client writes, never the bot's; refresh failure → treated as not connected; OAuth not configured → nothing written, ops told; a post that also mentions a follow-up ticket writes only its subject issue |
 | `jiraService` | Field payload shapes, JQL pagination/truncation/errors, transition matching, Resolution auto-fill, unfillable fields |
 | `dbService.integration` | **Needs a Postgres** (`TEST_DATABASE_URL`; skipped without one, which is the default on a laptop). Applies the whole schema, then exercises the real SQL: token upsert stores ciphertext and replaces rather than duplicates; `consumeOauthState` succeeds exactly once and refuses expired states; pruning keeps recent ones; `integrations.triggers` stays a `text[]` and `collect_fields` / `payload` / `detail` / `value` stay jsonb; one prompt per (trigger, issue); the durable daily count; digest queue and `uuid[]` delivery; `markPromptAnswered` for one user or all; audit filters newest-first; activity mapping; digest users exclude `immediate`; release-calendar dates come back as `YYYY-MM-DD` strings; `withTickLock` refuses a second session the same lock until the first finishes |
 | `fixVersionSuggester` | Candidate filtering, calendar windows, timeline/current, LLM adjudication + fallbacks, stage timeouts, progress |
@@ -1814,7 +1816,7 @@ injected; how the pod authenticates to Bedrock and which models are enabled; whe
 | `oauthAccountBinding` | The consenting account matches → stored, `users.info` and the lookup called for that user, `/myself` read with the user's token; `mismatch`, `not_found`, `ambiguous`, `no_slack_email` → `AccountBindingError` and nothing stored in memory or the database; a failing lookup → `lookup_failed`; no dependencies → `not_configured`; `verifyStoredBindings` keeps the ok token, disconnects the mismatch, keeps and reports the unverifiable one; `findAccountIdsByEmail` drops prefix matches, app and inactive accounts, keeps a hidden e-mail, throws on API errors |
 | `tickLock` | `withTickLock`: lock won → runs, unlocks and releases the same connection; held elsewhere → does not run, never unlocks, still releases; the work throws → unlocked and released, error surfaces; the poller and digest scheduler skip their tick (nothing loaded or delivered) when the lock is held elsewhere |
 | `noContentLogging` | A sentinel typed into the reply modal / collect modal reaches the ops channel but never any pino log call |
-| `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities |
+| `loadIntegrations`, `dedupCache`, `rateLimiter`, `auditLog`, `alerting`, `jiraLinkParser` | Utilities; `extractSubjectIssueKey` picks the first link over later references and over an earlier key-like token (`UTF-8`) |
 
 Tests mock Slack/Jira/Supabase clients; no network. Ad-hoc harnesses used during development live
 only in the session scratchpad and are superseded by the suites above.
@@ -2160,6 +2162,14 @@ Chronological, with rationale (see `git log` for commits):
     that has since got one, and the suggestion rides on the send context only — never in
     `jira_prompts.payload`. A failed check sends the plain ask; the after-refusal offer stays as the
     fallback for replies and for asks already in people's DMs.
+51. **A post is about one issue: write only its subject (§2.1).** A 👍 on the PM-reviewed post for
+    SNS-125104 also set PM Reviewed on SNS-125106 (27 Oct 2026): the post's review text cited
+    SNS-125106 as the follow-up that added alerts and restarts, and the handlers wrote to every key the
+    parser found. Writing to a key the reviewer never looked at is worse than missing one, and the
+    posts that feed triggers name their issue first ("Bug <link|SNS-…>"), so both the reaction and
+    the reply handler now act on the first browse link only, falling back to the first bare key when
+    the post has no link. Links win over bare keys so a key-shaped token earlier in the text (`UTF-8`)
+    cannot become the subject. A post that genuinely covers several issues needs one post each.
 
 ---
 

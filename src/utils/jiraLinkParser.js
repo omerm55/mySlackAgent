@@ -32,4 +32,19 @@ function extractJiraIssueKeys(text) {
   return [...new Set(keys)];
 }
 
-module.exports = { extractJiraIssueKeys };
+/**
+ * The issue a post is about: the first Jira browse link in the text, else the first bare key.
+ * A trigger acts on this one issue only — other keys in the post are references (a follow-up
+ * ticket, a duplicate, a linked fix) and must not be written to.
+ * @param {string} text
+ * @returns {string|null}
+ */
+function extractSubjectIssueKey(text) {
+  if (!text) return null;
+  const url = new RegExp(JIRA_URL_RE.source).exec(text);
+  if (url) return url[1];
+  const bare = new RegExp(JIRA_KEY_RE.source).exec(text);
+  return bare ? bare[1] : null;
+}
+
+module.exports = { extractJiraIssueKeys, extractSubjectIssueKey };

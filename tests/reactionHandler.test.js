@@ -9,6 +9,10 @@ const REAL_MESSAGE =
   "The bug is assigned to ** from team 'Cockpit'." +
   "@Adva Almog-Dadush - please take a look and make sure this bug does not require public documentation.";
 
+const POST_WITH_REFERENCE =
+  "Bug <https://sisenseglobal.atlassian.net/browse/SNS-125104|SNS-125104 / Pivot deployment hung up>  was marked as Include Release Notes = No.\n" +
+  "Mitigation: cloud alerts and automatic restarts ([SNS-125106](<https://sisenseglobal.atlassian.net/browse/SNS-125106>)).";
+
 const config = {
   name: 'doc-review-workflow',
   watchChannelId: 'C_WATCH',
@@ -88,6 +92,21 @@ describe('reactionHandler', () => {
     await app._trigger('reaction_added', { ...base,
       event: { reaction: '+1', user: 'U_OWNER', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } } });
     expect(jira.updateIssueField).toHaveBeenCalledTimes(1);
+  });
+
+  test('writes only the post\'s subject issue, not other keys it mentions', async () => {
+    const app = makeApp();
+    const jira = makeJira();
+    register(app, jira, config, makeServices());
+
+    await app._trigger('reaction_added', {
+      event: { reaction: '+1', user: 'U123', item: { type: 'message', channel: 'C_WATCH', ts: '111.000' } },
+      client: makeClient(POST_WITH_REFERENCE),
+      logger,
+    });
+
+    expect(jira.updateIssueField).toHaveBeenCalledTimes(1);
+    expect(jira.updateIssueField).toHaveBeenCalledWith('SNS-125104', 'customfield_10000', 'Yes', 'select');
   });
 
   test.each(['+1', 'thumbsup', 'thumbs_up', 'white_check_mark', '+1::skin-tone-3'])(

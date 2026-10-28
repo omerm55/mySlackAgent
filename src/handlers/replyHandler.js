@@ -1,6 +1,6 @@
 'use strict';
 
-const { extractJiraIssueKeys } = require('../utils/jiraLinkParser');
+const { extractSubjectIssueKey } = require('../utils/jiraLinkParser');
 const { issueLink } = require('../utils/jiraLink');
 const { pauseState, describePause } = require('../utils/pauseState');
 const { findReplyMarker, threadReader, findSettlingMarker } = require('../utils/replyMarkers');
@@ -67,7 +67,9 @@ function registerReplyHandler(app, jiraService, services) {
       const rootMessage = result.messages?.[0];
       if (!rootMessage) return;
 
-      const issueKeys = extractJiraIssueKeys(rootMessage.text);
+      // Only the post's subject issue — other keys in it are references, not targets.
+      const subjectKey = extractSubjectIssueKey(rootMessage.text);
+      const issueKeys = subjectKey ? [subjectKey] : [];
       if (issueKeys.length === 0) return;
 
       const readThread = threadReader(client, message.channel, message.thread_ts);
